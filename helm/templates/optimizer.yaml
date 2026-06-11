@@ -7,6 +7,14 @@ metadata:
     app.kubernetes.io/component: optimizer
 spec:
   replicas: {{ .Values.optimizer.replicas }}
+  {{- if .Values.optimizer.persistence.enabled }}
+  {{- if gt (int .Values.optimizer.replicas) 1 }}
+  {{- fail "optimizer.replicas > 1 needs optimizer.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
+  {{- end }}
+  # Recreate: the RWO volume must detach before the replacement pod can mount it
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 6 }}
@@ -48,7 +56,32 @@ spec:
               mountPath: /data
       volumes:
         - name: data
+          {{- if .Values.optimizer.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "anyray.fullname" . }}-optimizer-data
+          {{- else }}
           emptyDir: {}
+          {{- end }}
+{{- if .Values.optimizer.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "anyray.fullname" . }}-optimizer-data
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: optimizer
+  annotations:
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.optimizer.persistence.storageClass }}
+  storageClassName: {{ .Values.optimizer.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.optimizer.persistence.size }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

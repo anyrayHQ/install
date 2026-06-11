@@ -27,10 +27,21 @@ gateway:
   contentMode: encrypted
   allowPlaintext: "false"
   optimizerTimeoutMs: "800"
+  # Persist /data (provider keys, routing config, spend + audit logs) across
+  # pod restarts. Requires replicas: 1 — the PVC is ReadWriteOnce.
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
 
 # Optimizer
 optimizer:
   replicas: 1
+  # Persist /data (optimizer config + audit log) across pod restarts.
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
   resources:
     requests:
       cpu: "50m"

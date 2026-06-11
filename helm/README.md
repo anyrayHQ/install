@@ -57,10 +57,14 @@ and any cert-manager annotations. See the commented example in `values.yaml`.
 
 ## v1 limitations to be aware of
 
-- **Gateway and optimizer use `emptyDir` volumes.** Provider keys entered via the
-  console wizard, spend logs, and routing config do not survive pod restarts. For
-  production use, replace `emptyDir` with a PVC in the gateway/optimizer Deployments.
-  This is a planned follow-up, not a fundamental design constraint.
+- **Gateway and optimizer state is on single-attach PVCs.** Provider keys, routing
+  config, spend and audit logs persist across pod restarts and upgrades (the PVCs
+  also survive `helm uninstall` via a `helm.sh/resource-policy: keep` annotation).
+  The trade-off: the volumes are `ReadWriteOnce`, so these Deployments use a
+  `Recreate` strategy (brief downtime on upgrade) and must stay at `replicas: 1` —
+  the chart fails fast if you raise replicas with persistence enabled. Scaling
+  beyond one replica requires moving gateway state out of files (planned follow-up).
+  Set `gateway.persistence.enabled: false` to fall back to ephemeral `emptyDir`.
 - **Single-replica datastores.** Postgres, ClickHouse, MinIO, Redis are all `replicas: 1`
   StatefulSets — adequate for most orgs, but not HA. Use managed cloud equivalents
   (RDS, Cloud SQL, etc.) by pointing the env vars at an external host and removing the

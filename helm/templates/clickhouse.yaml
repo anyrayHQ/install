@@ -22,7 +22,7 @@ spec:
         fsGroup: 101
       containers:
         - name: clickhouse
-          image: docker.io/clickhouse/clickhouse-server:latest
+          image: docker.io/clickhouse/clickhouse-server:26.3
           env:
             - name: CLICKHOUSE_DB
               value: default

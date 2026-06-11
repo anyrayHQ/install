@@ -18,7 +18,8 @@ spec:
     spec:
       containers:
         - name: minio
-          image: cgr.dev/chainguard/minio:latest
+          # digest pin: Chainguard's free tier publishes only :latest, no version tags
+          image: cgr.dev/chainguard/minio:latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07
           command: ["/bin/sh", "-c"]
           args:
             - "mkdir -p /data/langfuse && minio server --address :9000 /data"

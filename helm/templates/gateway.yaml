@@ -7,6 +7,14 @@ metadata:
     app.kubernetes.io/component: gateway
 spec:
   replicas: {{ .Values.gateway.replicas }}
+  {{- if .Values.gateway.persistence.enabled }}
+  {{- if gt (int .Values.gateway.replicas) 1 }}
+  {{- fail "gateway.replicas > 1 needs gateway.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
+  {{- end }}
+  # Recreate: the RWO volume must detach before the replacement pod can mount it
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 6 }}
@@ -85,7 +93,33 @@ spec:
               mountPath: /data
       volumes:
         - name: data
+          {{- if .Values.gateway.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "anyray.fullname" . }}-gateway-data
+          {{- else }}
           emptyDir: {}
+          {{- end }}
+{{- if .Values.gateway.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "anyray.fullname" . }}-gateway-data
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+  annotations:
+    # survive helm uninstall — this volume holds provider keys and spend history
+    "helm.sh/resource-policy": keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.gateway.persistence.storageClass }}
+  storageClassName: {{ .Values.gateway.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.gateway.persistence.size }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

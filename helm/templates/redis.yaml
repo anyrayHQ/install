@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "anyray.fullname" . }}-redis
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: {{ include "anyray.fullname" . }}-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "redis" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "anyray.selectorLabels" (dict "component" "redis" "context" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: redis
+          image: docker.io/redis:7
+          command: ["sh", "-c"]
+          args:
+            - "redis-server --requirepass \"$(REDIS_AUTH)\" --maxmemory-policy noeviction"
+          env:
+            - name: REDIS_AUTH
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "REDIS_AUTH" "context" .) | nindent 16 }}
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              # sh -c: kubelet doesn't expand $(VAR) in probe commands
+              command:
+                - sh
+                - -c
+                - test "$(REDISCLI_AUTH="$REDIS_AUTH" redis-cli ping)" = "PONG"
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.redis.storageClass }}
+        storageClassName: {{ .Values.redis.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "anyray.fullname" . }}-redis
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    {{- include "anyray.selectorLabels" (dict "component" "redis" "context" .) | nindent 4 }}
+  ports:
+    - port: 6379
+      targetPort: 6379

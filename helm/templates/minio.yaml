@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "anyray.fullname" . }}-minio
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  serviceName: {{ include "anyray.fullname" . }}-minio
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "minio" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "anyray.selectorLabels" (dict "component" "minio" "context" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: minio
+          image: cgr.dev/chainguard/minio:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - "mkdir -p /data/langfuse && minio server --address :9000 /data"
+          env:
+            - name: MINIO_ROOT_USER
+              value: minio
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "MINIO_ROOT_PASSWORD" "context" .) | nindent 16 }}
+          ports:
+            - containerPort: 9000
+          readinessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.minio.storageClass }}
+        storageClassName: {{ .Values.minio.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.minio.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "anyray.fullname" . }}-minio
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    {{- include "anyray.selectorLabels" (dict "component" "minio" "context" .) | nindent 4 }}
+  ports:
+    - port: 9000
+      targetPort: 9000

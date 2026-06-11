@@ -1,0 +1,187 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "displayName": "Anyray",
+  "description": "Self-hosted AI-spend optimizer — gateway, optimizer, and observability console.",
+  "tags": ["ai", "gateway", "llm", "observability"],
+  "icon": "https://docs.anyray.ai/img/favicon.svg",
+  "readme": "https://raw.githubusercontent.com/anyrayHQ/install/main/railway/README.md",
+  "services": [
+    {
+      "name": "gateway",
+      "source": {
+        "image": "ghcr.io/anyrayhq/gateway:v0.1.0"
+      },
+      "deploy": {
+        "healthcheckPath": "/",
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "variables": {
+        "ANYRAY_OBSERVABILITY_BASEURL": "http://${{web.RAILWAY_PRIVATE_DOMAIN}}:3000",
+        "ANYRAY_OBSERVABILITY_PUBLIC_KEY": "${{web.LANGFUSE_INIT_PROJECT_PUBLIC_KEY}}",
+        "ANYRAY_OBSERVABILITY_SECRET_KEY": "${{web.LANGFUSE_INIT_PROJECT_SECRET_KEY}}",
+        "ANYRAY_OPTIMIZER_URL": "http://${{optimizer.RAILWAY_PRIVATE_DOMAIN}}:8088",
+        "ANYRAY_OPTIMIZER_TOKEN": "${{optimizer.ANYRAY_OPTIMIZER_TOKEN}}",
+        "ANYRAY_OPTIMIZER_TIMEOUT_MS": "800",
+        "ANYRAY_CONTENT_KEY": "${{secret()}}",
+        "ANYRAY_CONTENT_MODE": "encrypted",
+        "ANYRAY_ALLOW_PLAINTEXT": "false",
+        "ANYRAY_ADMIN_TOKEN": "${{secret()}}",
+        "ANYRAY_SETTINGS_FILE": "/data/anyray-settings.json",
+        "ANYRAY_AUDIT_FILE": "/data/anyray-settings-audit.log",
+        "ANYRAY_SPEND_FILE": "/data/spend.jsonl",
+        "ANYRAY_PROVIDER_KEYS_FILE": "/data/provider-keys.config.json",
+        "ANYRAY_PROVIDER_KEYS_AUDIT_FILE": "/data/provider-keys-audit.log",
+        "ANYRAY_ROUTING_CONFIG_FILE": "/data/routing.config.json",
+        "ANYRAY_ROUTING_CONFIG_AUDIT_FILE": "/data/routing-config-audit.log",
+        "ANYRAY_PRICING_CONFIG": "/data/pricing.config.json",
+        "ANYRAY_PRICING_AUDIT_FILE": "/data/pricing-settings-audit.log",
+        "ANYRAY_CLIENT_KEYS_FILE": "/data/client-keys.config.json",
+        "ANYRAY_CLIENT_KEYS_AUDIT_FILE": "/data/client-keys-audit.log",
+        "ANYRAY_ENTITLEMENT_FILE": "/data/entitlement.lease.json"
+      }
+    },
+    {
+      "name": "optimizer",
+      "source": {
+        "image": "ghcr.io/anyrayhq/optimizer:v0.1.0"
+      },
+      "deploy": {
+        "healthcheckPath": "/health",
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "variables": {
+        "PORT": "8088",
+        "ANYRAY_OPTIMIZER_TOKEN": "${{secret()}}",
+        "ANYRAY_ADMIN_TOKEN": "${{gateway.ANYRAY_ADMIN_TOKEN}}",
+        "ANYRAY_OPTIMIZER_CONFIG": "/data/optimizer.config.json",
+        "ANYRAY_OPTIMIZER_AUDIT_FILE": "/data/optimizer-settings-audit.log"
+      }
+    },
+    {
+      "name": "proxy",
+      "source": {
+        "image": "ghcr.io/anyrayhq/proxy:v0.1.0"
+      },
+      "deploy": {
+        "healthcheckPath": "/anyray-login",
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "variables": {}
+    },
+    {
+      "name": "web",
+      "source": {
+        "image": "docker.io/langfuse/langfuse:3"
+      },
+      "deploy": {
+        "healthcheckPath": "/api/public/health",
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "variables": {
+        "DATABASE_URL": "${{Postgres.DATABASE_URL}}",
+        "NEXTAUTH_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
+        "NEXTAUTH_SECRET": "${{secret()}}",
+        "SALT": "${{secret()}}",
+        "ENCRYPTION_KEY": "${{secret()}}",
+        "TELEMETRY_ENABLED": "false",
+        "CLICKHOUSE_MIGRATION_URL": "clickhouse://${{clickhouse.RAILWAY_PRIVATE_DOMAIN}}:9000",
+        "CLICKHOUSE_URL": "http://${{clickhouse.RAILWAY_PRIVATE_DOMAIN}}:8123",
+        "CLICKHOUSE_USER": "clickhouse",
+        "CLICKHOUSE_PASSWORD": "${{clickhouse.CLICKHOUSE_PASSWORD}}",
+        "CLICKHOUSE_CLUSTER_ENABLED": "false",
+        "LANGFUSE_S3_EVENT_UPLOAD_BUCKET": "langfuse",
+        "LANGFUSE_S3_EVENT_UPLOAD_REGION": "auto",
+        "LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID": "minio",
+        "LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY": "${{minio.MINIO_ROOT_PASSWORD}}",
+        "LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT": "http://${{minio.RAILWAY_PRIVATE_DOMAIN}}:9000",
+        "LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE": "true",
+        "LANGFUSE_S3_EVENT_UPLOAD_PREFIX": "events/",
+        "LANGFUSE_S3_MEDIA_UPLOAD_BUCKET": "langfuse",
+        "LANGFUSE_S3_MEDIA_UPLOAD_REGION": "auto",
+        "LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID": "minio",
+        "LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY": "${{minio.MINIO_ROOT_PASSWORD}}",
+        "LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT": "http://${{minio.RAILWAY_PRIVATE_DOMAIN}}:9000",
+        "LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE": "true",
+        "LANGFUSE_S3_MEDIA_UPLOAD_PREFIX": "media/",
+        "REDIS_HOST": "${{Redis.RAILWAY_PRIVATE_DOMAIN}}",
+        "REDIS_PORT": "6379",
+        "REDIS_AUTH": "${{Redis.REDIS_PASSWORD}}",
+        "LANGFUSE_INIT_ORG_ID": "anyray",
+        "LANGFUSE_INIT_ORG_NAME": "Anyray",
+        "LANGFUSE_INIT_PROJECT_ID": "anyray-gateway",
+        "LANGFUSE_INIT_PROJECT_NAME": "Anyray Gateway",
+        "LANGFUSE_INIT_PROJECT_PUBLIC_KEY": "${{secret()}}",
+        "LANGFUSE_INIT_PROJECT_SECRET_KEY": "${{secret()}}",
+        "LANGFUSE_INIT_USER_EMAIL": "admin@anyray.local",
+        "LANGFUSE_INIT_USER_NAME": "Admin",
+        "LANGFUSE_INIT_USER_PASSWORD": "${{secret()}}"
+      }
+    },
+    {
+      "name": "worker",
+      "source": {
+        "image": "docker.io/langfuse/langfuse-worker:3"
+      },
+      "deploy": {
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "variables": {
+        "DATABASE_URL": "${{Postgres.DATABASE_URL}}",
+        "NEXTAUTH_URL": "https://${{web.RAILWAY_PUBLIC_DOMAIN}}",
+        "SALT": "${{web.SALT}}",
+        "ENCRYPTION_KEY": "${{web.ENCRYPTION_KEY}}",
+        "TELEMETRY_ENABLED": "false",
+        "CLICKHOUSE_MIGRATION_URL": "clickhouse://${{clickhouse.RAILWAY_PRIVATE_DOMAIN}}:9000",
+        "CLICKHOUSE_URL": "http://${{clickhouse.RAILWAY_PRIVATE_DOMAIN}}:8123",
+        "CLICKHOUSE_USER": "clickhouse",
+        "CLICKHOUSE_PASSWORD": "${{clickhouse.CLICKHOUSE_PASSWORD}}",
+        "CLICKHOUSE_CLUSTER_ENABLED": "false",
+        "LANGFUSE_S3_EVENT_UPLOAD_BUCKET": "langfuse",
+        "LANGFUSE_S3_EVENT_UPLOAD_REGION": "auto",
+        "LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID": "minio",
+        "LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY": "${{minio.MINIO_ROOT_PASSWORD}}",
+        "LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT": "http://${{minio.RAILWAY_PRIVATE_DOMAIN}}:9000",
+        "LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE": "true",
+        "LANGFUSE_S3_EVENT_UPLOAD_PREFIX": "events/",
+        "LANGFUSE_S3_MEDIA_UPLOAD_BUCKET": "langfuse",
+        "LANGFUSE_S3_MEDIA_UPLOAD_REGION": "auto",
+        "LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID": "minio",
+        "LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY": "${{minio.MINIO_ROOT_PASSWORD}}",
+        "LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT": "http://${{minio.RAILWAY_PRIVATE_DOMAIN}}:9000",
+        "LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE": "true",
+        "LANGFUSE_S3_MEDIA_UPLOAD_PREFIX": "media/",
+        "REDIS_HOST": "${{Redis.RAILWAY_PRIVATE_DOMAIN}}",
+        "REDIS_PORT": "6379",
+        "REDIS_AUTH": "${{Redis.REDIS_PASSWORD}}"
+      }
+    },
+    {
+      "name": "clickhouse",
+      "source": {
+        "image": "docker.io/clickhouse/clickhouse-server:latest"
+      },
+      "deploy": {
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "variables": {
+        "CLICKHOUSE_DB": "default",
+        "CLICKHOUSE_USER": "clickhouse",
+        "CLICKHOUSE_PASSWORD": "${{secret()}}"
+      }
+    },
+    {
+      "name": "minio",
+      "source": {
+        "image": "docker.io/minio/minio:latest"
+      },
+      "deploy": {
+        "startCommand": "minio server /data",
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "variables": {
+        "MINIO_ROOT_USER": "minio",
+        "MINIO_ROOT_PASSWORD": "${{secret()}}"
+      }
+    }
+  ]
+}

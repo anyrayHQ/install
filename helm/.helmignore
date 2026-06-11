@@ -1,0 +1,6 @@
+# Helm chart ignore file — matched against chart source before packaging.
+.DS_Store
+*.orig
+*.swp
+.git/
+.github/

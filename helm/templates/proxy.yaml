@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anyray.fullname" . }}-proxy
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  replicas: {{ .Values.proxy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "proxy" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "anyray.selectorLabels" (dict "component" "proxy" "context" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: proxy
+          image: ghcr.io/anyrayhq/proxy:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /anyray-login
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.proxy.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "anyray.fullname" . }}-proxy
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "anyray.selectorLabels" (dict "component" "proxy" "context" .) | nindent 4 }}
+  ports:
+    - port: 3000
+      targetPort: 80

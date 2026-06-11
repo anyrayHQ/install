@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anyray.fullname" . }}-web
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicas }}
+  selector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "web" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "anyray.selectorLabels" (dict "component" "web" "context" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: web
+          image: docker.io/langfuse/langfuse:3
+          env:
+            - name: NEXTAUTH_URL
+              value: "http://{{ .Values.host }}:3000"
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "NEXTAUTH_SECRET" "context" .) | nindent 16 }}
+            - name: DATABASE_URL
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "POSTGRES_PASSWORD" "context" .) | nindent 16 }}
+            - name: SALT
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "SALT" "context" .) | nindent 16 }}
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ENCRYPTION_KEY" "context" .) | nindent 16 }}
+            - name: TELEMETRY_ENABLED
+              value: "false"
+            - name: CLICKHOUSE_MIGRATION_URL
+              value: "clickhouse://{{ include "anyray.fullname" . }}-clickhouse:9000"
+            - name: CLICKHOUSE_URL
+              value: "http://{{ include "anyray.fullname" . }}-clickhouse:8123"
+            - name: CLICKHOUSE_USER
+              value: clickhouse
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "CLICKHOUSE_PASSWORD" "context" .) | nindent 16 }}
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              value: langfuse
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              value: auto
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              value: minio
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "MINIO_ROOT_PASSWORD" "context" .) | nindent 16 }}
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: "http://{{ include "anyray.fullname" . }}-minio:9000"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_PREFIX
+              value: events/
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
+              value: langfuse
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
+              value: auto
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
+              value: minio
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "MINIO_ROOT_PASSWORD" "context" .) | nindent 16 }}
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: "http://{{ include "anyray.fullname" . }}-minio:9000"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_PREFIX
+              value: media/
+            - name: REDIS_HOST
+              value: "{{ include "anyray.fullname" . }}-redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_AUTH
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "REDIS_AUTH" "context" .) | nindent 16 }}
+            - name: LANGFUSE_INIT_ORG_ID
+              value: anyray
+            - name: LANGFUSE_INIT_ORG_NAME
+              value: Anyray
+            - name: LANGFUSE_INIT_PROJECT_ID
+              value: anyray-gateway
+            - name: LANGFUSE_INIT_PROJECT_NAME
+              value: Anyray Gateway
+            - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_OBSERVABILITY_PUBLIC_KEY" "context" .) | nindent 16 }}
+            - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_OBSERVABILITY_SECRET_KEY" "context" .) | nindent 16 }}
+            - name: LANGFUSE_INIT_USER_EMAIL
+              value: admin@anyray.local
+            - name: LANGFUSE_INIT_USER_NAME
+              value: Admin
+            - name: LANGFUSE_INIT_USER_PASSWORD
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_INIT_USER_PASSWORD" "context" .) | nindent 16 }}
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /api/public/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 20
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "anyray.fullname" . }}-web
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "anyray.selectorLabels" (dict "component" "web" "context" .) | nindent 4 }}
+  ports:
+    - port: 3000
+      targetPort: 3000

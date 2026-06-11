@@ -1,0 +1,134 @@
+# Anyray Helm chart values.
+# Run setup.sh --k8s to generate anyray-secrets.yaml + a starter my-values.yaml,
+# then: kubectl apply -f anyray-secrets.yaml && helm install anyray ./helm -f my-values.yaml
+
+# The hostname users will reach (console + gateway). Required.
+host: ""
+
+image:
+  tag: "v0.1.0"
+  pullPolicy: IfNotPresent
+
+# Name of the Kubernetes Secret created by: ./setup.sh --k8s
+secretName: anyray-secrets
+
+# Gateway
+gateway:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  # Content privacy: encrypted | off
+  # Never set to plaintext in production.
+  contentMode: encrypted
+  allowPlaintext: "false"
+  optimizerTimeoutMs: "800"
+
+# Optimizer
+optimizer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+
+# Proxy (nginx reverse proxy / console)
+proxy:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "25m"
+      memory: "64Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+
+# Observability backend web (trace API + UI engine)
+web:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+# Observability backend worker
+worker:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# Postgres
+postgres:
+  storage: 10Gi
+  storageClass: ""
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# ClickHouse
+clickhouse:
+  storage: 20Gi
+  storageClass: ""
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+
+# MinIO
+minio:
+  storage: 10Gi
+  storageClass: ""
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+
+# Redis
+redis:
+  storage: 2Gi
+  storageClass: ""
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+# Ingress — disabled by default; fill in and set enabled: true to expose externally.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Example annotations for nginx ingress:
+  #   kubernetes.io/ingress.class: nginx
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls: []
+  # - secretName: anyray-tls
+  #   hosts:
+  #     - anyray.example.com

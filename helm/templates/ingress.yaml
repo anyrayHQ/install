@@ -1,0 +1,45 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "anyray.fullname" . }}
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "anyray.fullname" . }}-proxy
+                port:
+                  number: 3000
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "anyray.fullname" . }}-gateway
+                port:
+                  number: 8787
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "anyray.fullname" . }}-gateway
+                port:
+                  number: 8787
+{{- end }}

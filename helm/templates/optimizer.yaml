@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anyray.fullname" . }}-optimizer
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: optimizer
+spec:
+  replicas: {{ .Values.optimizer.replicas }}
+  selector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: optimizer
+          image: ghcr.io/anyrayhq/optimizer:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: PORT
+              value: "8088"
+            - name: ANYRAY_OPTIMIZER_TOKEN
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}
+            - name: ANYRAY_ADMIN_TOKEN
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_ADMIN_TOKEN" "context" .) | nindent 16 }}
+            - name: ANYRAY_OPTIMIZER_CONFIG
+              value: /data/optimizer.config.json
+            - name: ANYRAY_OPTIMIZER_AUDIT_FILE
+              value: /data/optimizer-settings-audit.log
+          ports:
+            - containerPort: 8088
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8088
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.optimizer.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "anyray.fullname" . }}-optimizer
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: optimizer
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 4 }}
+  ports:
+    - port: 8088
+      targetPort: 8088

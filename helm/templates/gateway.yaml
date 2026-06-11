@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anyray.fullname" . }}-gateway
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 8 }}
+    spec:
+      containers:
+        - name: gateway
+          image: ghcr.io/anyrayhq/gateway:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: ANYRAY_OBSERVABILITY_BASEURL
+              value: "http://{{ include "anyray.fullname" . }}-web:3000"
+            - name: ANYRAY_OBSERVABILITY_PUBLIC_KEY
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_OBSERVABILITY_PUBLIC_KEY" "context" .) | nindent 16 }}
+            - name: ANYRAY_OBSERVABILITY_SECRET_KEY
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_OBSERVABILITY_SECRET_KEY" "context" .) | nindent 16 }}
+            - name: ANYRAY_OPTIMIZER_URL
+              value: "http://{{ include "anyray.fullname" . }}-optimizer:8088"
+            - name: ANYRAY_OPTIMIZER_TOKEN
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}
+            - name: ANYRAY_OPTIMIZER_TIMEOUT_MS
+              value: {{ .Values.gateway.optimizerTimeoutMs | quote }}
+            - name: ANYRAY_CONTENT_KEY
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_CONTENT_KEY" "context" .) | nindent 16 }}
+            - name: ANYRAY_CONTENT_MODE
+              value: {{ .Values.gateway.contentMode | quote }}
+            - name: ANYRAY_ALLOW_PLAINTEXT
+              value: {{ .Values.gateway.allowPlaintext | quote }}
+            - name: ANYRAY_ADMIN_TOKEN
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_ADMIN_TOKEN" "context" .) | nindent 16 }}
+            - name: ANYRAY_SETTINGS_FILE
+              value: /data/anyray-settings.json
+            - name: ANYRAY_AUDIT_FILE
+              value: /data/anyray-settings-audit.log
+            - name: ANYRAY_SPEND_FILE
+              value: /data/spend.jsonl
+            - name: ANYRAY_PROVIDER_KEYS_FILE
+              value: /data/provider-keys.config.json
+            - name: ANYRAY_PROVIDER_KEYS_AUDIT_FILE
+              value: /data/provider-keys-audit.log
+            - name: ANYRAY_ROUTING_CONFIG_FILE
+              value: /data/routing.config.json
+            - name: ANYRAY_ROUTING_CONFIG_AUDIT_FILE
+              value: /data/routing-config-audit.log
+            - name: ANYRAY_PRICING_CONFIG
+              value: /data/pricing.config.json
+            - name: ANYRAY_PRICING_AUDIT_FILE
+              value: /data/pricing-settings-audit.log
+            - name: ANYRAY_CLIENT_KEYS_FILE
+              value: /data/client-keys.config.json
+            - name: ANYRAY_CLIENT_KEYS_AUDIT_FILE
+              value: /data/client-keys-audit.log
+            - name: ANYRAY_ENTITLEMENT_FILE
+              value: /data/entitlement.lease.json
+          ports:
+            - containerPort: 8787
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8787
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "anyray.fullname" . }}-gateway
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 4 }}
+  ports:
+    - port: 8787
+      targetPort: 8787

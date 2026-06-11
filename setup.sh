@@ -228,16 +228,20 @@ data:
 EOF
 chmod 600 anyray-secrets.yaml
 
-cat > my-values.yaml <<EOF
+echo "✓ Secrets generated → anyray-secrets.yaml"
+
+if [ -f my-values.yaml ]; then
+  echo "✓ my-values.yaml already exists — leaving it untouched"
+else
+  cat > my-values.yaml <<EOF
 # Anyray Helm values — safe to commit (no secrets here).
 host: "${HOST}"
 
 image:
   tag: "v1.5.0"
 EOF
-
-echo "✓ Secrets generated → anyray-secrets.yaml"
-echo "✓ Helm values stub → my-values.yaml"
+  echo "✓ Helm values stub → my-values.yaml"
+fi
 echo ""
 echo "  Next:"
 echo "    kubectl apply -f anyray-secrets.yaml"

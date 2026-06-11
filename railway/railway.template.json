@@ -9,7 +9,7 @@
     {
       "name": "gateway",
       "source": {
-        "image": "ghcr.io/anyrayhq/gateway:v0.1.0"
+        "image": "ghcr.io/anyrayhq/gateway:v1.5.0"
       },
       "deploy": {
         "healthcheckPath": "/",
@@ -43,7 +43,7 @@
     {
       "name": "optimizer",
       "source": {
-        "image": "ghcr.io/anyrayhq/optimizer:v0.1.0"
+        "image": "ghcr.io/anyrayhq/optimizer:v1.5.0"
       },
       "deploy": {
         "healthcheckPath": "/health",
@@ -60,7 +60,7 @@
     {
       "name": "proxy",
       "source": {
-        "image": "ghcr.io/anyrayhq/proxy:v0.1.0"
+        "image": "ghcr.io/anyrayhq/proxy:v1.5.0"
       },
       "deploy": {
         "healthcheckPath": "/anyray-login",

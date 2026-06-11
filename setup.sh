@@ -39,6 +39,9 @@ fi
 
 if [ -z "$HOST" ]; then
   HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  # macOS: hostname has no -I — fall back to the primary interface address so
+  # the gateway URL shown to developers is reachable, not "localhost".
+  [ -n "$HOST" ] || HOST="$(ipconfig getifaddr en0 2>/dev/null || true)"
   [ -n "$HOST" ] || HOST=localhost
 fi
 
@@ -151,7 +154,8 @@ EOF
 
     strip_env() { grep -v "^${1}=" .env > .env.tmp || true; mv .env.tmp .env; }
     for k in ANYRAY_METERING_ENABLED ANYRAY_CONTROL_PLANE_URL ANYRAY_DEPLOYMENT_TOKEN \
-             ANYRAY_LICENSE_PUBLIC_KEY ANYRAY_PSEUDONYM_SALT ANYRAY_GATEWAY_PUBLIC_URL; do
+             ANYRAY_LICENSE_PUBLIC_KEY ANYRAY_PSEUDONYM_SALT ANYRAY_GATEWAY_PUBLIC_URL \
+             ANYRAY_METERING_INTERVAL_MS ANYRAY_ENTITLEMENT_GRACE_MS; do
       strip_env "$k"
     done
     grep -v '^# Anyray Cloud (--connect)' .env > .env.tmp || true; mv .env.tmp .env
@@ -164,6 +168,10 @@ ANYRAY_DEPLOYMENT_TOKEN=${CONNECT_TOKEN}
 ANYRAY_LICENSE_PUBLIC_KEY="${LICENSE_PEM}"
 ANYRAY_PSEUDONYM_SALT=${PSEUDONYM_SALT}
 ANYRAY_GATEWAY_PUBLIC_URL=${GATEWAY_URL}
+# Explicit values: docker-compose passes unset optional vars as empty strings,
+# which gateways before v1.5.1 parse as 0 (metering every tick / zero grace).
+ANYRAY_METERING_INTERVAL_MS=900000
+ANYRAY_ENTITLEMENT_GRACE_MS=259200000
 EOF
     chmod 600 .env
 
@@ -225,7 +233,7 @@ cat > my-values.yaml <<EOF
 host: "${HOST}"
 
 image:
-  tag: "v0.1.0"
+  tag: "v1.5.0"
 EOF
 
 echo "✓ Secrets generated → anyray-secrets.yaml"

@@ -7,4 +7,4 @@ model_list:
 
 litellm_settings:
   callbacks:
-    - anyrayCallback.anyray_callback
+    - anyray_optimizer.proxy_handler_instance

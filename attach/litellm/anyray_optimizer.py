@@ -41,6 +41,7 @@ from litellm.integrations.custom_logger import CustomLogger
 # Provider-shaped request fields the protocol cares about. LiteLLM's proxy `data`
 # also carries internal objects (UserAPIKeyAuth, …) that are not JSON-serializable
 # and must never round-trip through the optimizer.
+# Canonical list: PROTOCOL.md "Request fields" — keep in sync when it grows.
 REQUEST_FIELDS = (
     "model", "messages", "prompt", "input", "temperature", "top_p",
     "max_tokens", "max_completion_tokens", "tools", "tool_choice", "stream",
@@ -77,7 +78,9 @@ class AnyrayOptimizer(CustomLogger):
 
     def _metadata(self, data: dict, user_api_key_dict) -> dict:
         # Scalars only — proxy metadata nests non-serializable internals.
-        merged = {**self._attribution(user_api_key_dict), **(data.get("metadata") or {})}
+        # Attribution comes LAST: it derives from the authenticated key, and a
+        # client-supplied metadata.user_id must never re-attribute spend.
+        merged = {**(data.get("metadata") or {}), **self._attribution(user_api_key_dict)}
         return {k: v for k, v in merged.items() if isinstance(v, (str, int, float, bool)) or v is None}
 
     @staticmethod
@@ -113,10 +116,16 @@ class AnyrayOptimizer(CustomLogger):
             if isinstance(optimized, dict):
                 # Mutate in place so LiteLLM forwards the transformed request;
                 # touch only protocol fields so proxy internals survive intact.
+                # Omission means deletion (tool pruning) only for a full request
+                # body — a sparse one (optimizer version skew) must never pop
+                # load-bearing fields like `messages`.
+                full = "model" in optimized and any(
+                    k in optimized for k in ("messages", "prompt", "input")
+                )
                 for key in REQUEST_FIELDS:
                     if key in optimized:
                         data[key] = optimized[key]
-                    elif key in sent:
+                    elif full and key in sent:
                         data.pop(key, None)
         except Exception as err:  # FAIL OPEN — never block the call
             litellm.print_verbose(f"[anyray-optimizer] request hook skipped: {err}")
@@ -126,17 +135,18 @@ class AnyrayOptimizer(CustomLogger):
         # OUTPUT control: send the response to the optimizer and apply any output
         # strategy changes. Only rebuilds the response when the optimizer actually
         # changed something, so it's a safe no-op otherwise. FAIL OPEN.
-        if not self._client:
+        # Chat completions only: `data` carries no call_type at post-call time,
+        # and rebuilding a non-chat body as ModelResponse would corrupt the reply.
+        if not self._client or not isinstance(response, ModelResponse):
             return response
         try:
-            as_dict = response.model_dump() if hasattr(response, "model_dump") else dict(response)
             resp = await self._client.post(
                 f"{self.base_url}/v1/optimize-response",
                 headers=self._headers(),
                 json={
-                    "endpoint": self._endpoint_for(data.get("call_type", "completion")),
+                    "endpoint": "/v1/chat/completions",
                     "request": self._request_view(data),
-                    "response": as_dict,
+                    "response": response.model_dump(),
                     "metadata": self._metadata(data, user_api_key_dict),
                 },
             )
@@ -144,7 +154,11 @@ class AnyrayOptimizer(CustomLogger):
             body = resp.json()
             optimized = body.get("response")
             if body.get("decisions") and isinstance(optimized, dict):
-                return ModelResponse(**optimized)
+                rebuilt = ModelResponse(**optimized)
+                # model_dump() drops private attrs; the proxy forwards provider
+                # rate-limit/cost headers from _hidden_params — carry them over.
+                rebuilt._hidden_params = response._hidden_params
+                return rebuilt
         except Exception as err:  # FAIL OPEN — return the original response
             litellm.print_verbose(f"[anyray-optimizer] response hook skipped: {err}")
         return response

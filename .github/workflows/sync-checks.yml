@@ -1,0 +1,15 @@
+name: Sync checks
+
+# Cheap drift guards that must fail BEFORE merge — the smoke workflows only
+# run on push to main, which catches drift one step too late.
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Seeder copies in sync (compose vs helm)
+        run: diff -u scripts/seedModelPrices.mjs helm/files/seedModelPrices.mjs

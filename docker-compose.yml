@@ -244,7 +244,12 @@ services:
     volumes:
       - anyray_redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # Authenticated ping — a plain `redis-cli ping` exits 0 even on NOAUTH.
+      test:
+        [
+          "CMD-SHELL",
+          'REDISCLI_AUTH="${REDIS_AUTH:?run ./setup.sh first}" redis-cli ping | grep -q PONG',
+        ]
       interval: 3s
       timeout: 10s
       retries: 10

@@ -5,14 +5,15 @@
 Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
 
 - Prompt compression, tool pruning, and param tuning before each request.
+- Response (output) optimization after each request.
 - Content-free traces (metadata only) in the Anyray console — no prompt/response content.
 
 ## Files
 
-| File                | Purpose                                                                      |
-|---------------------|------------------------------------------------------------------------------|
-| `anyrayCallback.py` | LiteLLM `CustomLogger` subclass — pre-call optimizer hook + cache write-back |
-| `config.yaml`       | LiteLLM config snippet; merge into yours                                     |
+| File                  | Purpose                                                                                  |
+|-----------------------|------------------------------------------------------------------------------------------|
+| `anyray_optimizer.py` | LiteLLM `CustomLogger` subclass — pre-call request transform + post-call response transform. Vendored from the monorepo (`optimizer/adapters/litellm/`); edit upstream, then re-copy. |
+| `config.yaml`         | LiteLLM config snippet; merge into yours                                                 |
 
 ## Installation
 
@@ -22,14 +23,14 @@ Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
    docker compose -f docker-compose.attach.yml up -d
    ```
 
-2. Copy `anyrayCallback.py` next to your LiteLLM `config.yaml`.
+2. Copy `anyray_optimizer.py` next to your LiteLLM `config.yaml`.
 
 3. Add to your LiteLLM `config.yaml` (merge with `config.yaml` in this directory):
 
    ```yaml
    litellm_settings:
      callbacks:
-       - anyrayCallback.anyray_callback
+       - anyray_optimizer.proxy_handler_instance
      success_callback:
        - langfuse
    ```
@@ -72,15 +73,19 @@ These pages show "Unable to load: request failed" — expected in attach mode.
 
 ## Privacy guarantee
 
-`anyrayCallback.py` never logs or persists request/response content. The optimizer
+`anyray_optimizer.py` never logs or persists request/response content. The optimizer
 holds content in memory for the duration of the call only. The trace backend
 receives metadata only when `TURN_OFF_MESSAGE_LOGGING=true` is set.
 
+## Caching
+
+Semantic-cache hits cannot be served in attach mode — LiteLLM's pre-call hook
+cannot short-circuit the provider request, so the adapter advertises
+`canShortCircuit: false` and the optimizer skips its cache strategy entirely.
+Use LiteLLM's built-in cache (`cache: true`) for response caching.
+
 ## Streaming
 
-The attach-mode adapter does not currently optimize streaming requests — the
-callback's `call_type` guard skips them; they pass through unmodified.
-Cached responses cannot be served to the caller in attach mode — LiteLLM's
-pre-call hook cannot short-circuit the provider request (the callback advertises
-`canShortCircuit: false`). Cache write-back still runs, so the semantic cache is
-populated for gateway deployments that share the same optimizer.
+Streaming requests still get the pre-call request transform; response
+optimization runs in `async_post_call_success_hook` and applies to
+non-streaming chat completions only.

@@ -31,6 +31,10 @@ assert last.get("max_tokens") == 99, (
     f"Expected max_tokens=99, got: {last.get('max_tokens')} "
     "— async_pre_call_hook did not apply the optimizer mutation"
 )
+assert "anyray" not in json.dumps(last), (
+    "Anyray adapter state leaked into the provider request body "
+    "— only REQUEST_FIELDS may reach the provider"
+)
 print("PASS: async_pre_call_hook ran and mutations reached the provider")
 
 # async_post_call_success_hook runs in the request path — no polling needed.

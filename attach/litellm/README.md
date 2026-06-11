@@ -88,4 +88,4 @@ Use LiteLLM's built-in cache (`cache: true`) for response caching.
 
 Streaming requests still get the pre-call request transform; response
 optimization runs in `async_post_call_success_hook` and applies to
-non-streaming responses only.
+non-streaming chat completions only.

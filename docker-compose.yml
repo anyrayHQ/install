@@ -1,0 +1,232 @@
+name: anyray
+
+# Anyray from published images. Generate secrets first: ./setup.sh
+# Console → http://<host>:3000   |   Gateway API → http://<host>:8787
+# Docs → https://docs.anyray.ai
+#
+# Only ports 3000 and 8787 are exposed. Open them to your org network only.
+
+services:
+  gateway:
+    image: ghcr.io/anyrayhq/gateway:v0.1.0
+    restart: always
+    depends_on:
+      - web
+      - optimizer
+    ports:
+      - "8787:8787"
+    environment:
+      ANYRAY_OBSERVABILITY_BASEURL: http://web:3000
+      ANYRAY_OBSERVABILITY_PUBLIC_KEY: ${ANYRAY_OBSERVABILITY_PUBLIC_KEY:?run ./setup.sh first}
+      ANYRAY_OBSERVABILITY_SECRET_KEY: ${ANYRAY_OBSERVABILITY_SECRET_KEY:?run ./setup.sh first}
+      ANYRAY_OPTIMIZER_URL: http://optimizer:8088
+      ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
+      ANYRAY_OPTIMIZER_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_TIMEOUT_MS:-800}
+      ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:?run ./setup.sh first}
+      ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
+      ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
+      ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
+      ANYRAY_PROVIDER_KEY_OPENAI: ${ANYRAY_PROVIDER_KEY_OPENAI:-}
+      ANYRAY_PROVIDER_KEY_ANTHROPIC: ${ANYRAY_PROVIDER_KEY_ANTHROPIC:-}
+      ANYRAY_PROVIDER_KEY_AZURE_OPENAI: ${ANYRAY_PROVIDER_KEY_AZURE_OPENAI:-}
+      ANYRAY_SETTINGS_FILE: /data/anyray-settings.json
+      ANYRAY_AUDIT_FILE: /data/anyray-settings-audit.log
+      ANYRAY_SPEND_FILE: /data/spend.jsonl
+      ANYRAY_PROVIDER_KEYS_FILE: /data/provider-keys.config.json
+      ANYRAY_PROVIDER_KEYS_AUDIT_FILE: /data/provider-keys-audit.log
+      ANYRAY_ROUTING_CONFIG_FILE: /data/routing.config.json
+      ANYRAY_ROUTING_CONFIG_AUDIT_FILE: /data/routing-config-audit.log
+      ANYRAY_PRICING_CONFIG: /data/pricing.config.json
+      ANYRAY_PRICING_AUDIT_FILE: /data/pricing-settings-audit.log
+    volumes:
+      - anyray_gateway_data:/data
+    healthcheck:
+      test: wget -qO- http://localhost:8787/ || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  optimizer:
+    image: ghcr.io/anyrayhq/optimizer:v0.1.0
+    restart: always
+    environment:
+      PORT: 8088
+      ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
+      ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
+      ANYRAY_OPTIMIZER_CONFIG: /data/optimizer.config.json
+      ANYRAY_OPTIMIZER_AUDIT_FILE: /data/optimizer-settings-audit.log
+    volumes:
+      - anyray_optimizer_data:/data
+    healthcheck:
+      test: wget -qO- http://localhost:8088/health || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  proxy:
+    image: ghcr.io/anyrayhq/proxy:v0.1.0
+    restart: always
+    # gateway healthy first: nginx auth_request hits gateway:8787 on every
+    # console load — starting earlier just serves 502s.
+    depends_on:
+      web:
+        condition: service_started
+      gateway:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+
+  # worker is declared before web on purpose: it defines the two YAML anchors
+  # (&anyray-depends-on, &anyray-backend-env) that web aliases — YAML requires
+  # an anchor to appear before its alias in document order.
+  worker:
+    image: docker.io/langfuse/langfuse-worker:3
+    restart: always
+    depends_on: &anyray-depends-on
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment: &anyray-backend-env
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?run ./setup.sh first}@postgres:5432/postgres
+      SALT: ${SALT:?run ./setup.sh first}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?run ./setup.sh first}
+      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-false}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run ./setup.sh first}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?run ./setup.sh first}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?run ./setup.sh first}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${REDIS_AUTH:?run ./setup.sh first}
+
+  web:
+    image: docker.io/langfuse/langfuse:3
+    restart: always
+    depends_on: *anyray-depends-on
+    expose:
+      - 3000
+    environment:
+      <<: *anyray-backend-env
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?run ./setup.sh first}
+      LANGFUSE_INIT_ORG_ID: ${ANYRAY_INIT_ORG_ID:-anyray}
+      LANGFUSE_INIT_ORG_NAME: ${ANYRAY_INIT_ORG_NAME:-Anyray}
+      LANGFUSE_INIT_PROJECT_ID: ${ANYRAY_INIT_PROJECT_ID:-anyray-gateway}
+      LANGFUSE_INIT_PROJECT_NAME: ${ANYRAY_INIT_PROJECT_NAME:-Anyray Gateway}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${ANYRAY_INIT_PROJECT_PUBLIC_KEY:?run ./setup.sh first}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${ANYRAY_INIT_PROJECT_SECRET_KEY:?run ./setup.sh first}
+      LANGFUSE_INIT_USER_EMAIL: ${ANYRAY_INIT_USER_EMAIL:-admin@anyray.local}
+      LANGFUSE_INIT_USER_NAME: ${ANYRAY_INIT_USER_NAME:-Admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${ANYRAY_INIT_USER_PASSWORD:?run ./setup.sh first}
+
+  # One-shot: registers model prices in the observability backend so cost
+  # tiles aren't $0. Idempotent; exits when done.
+  model-seeder:
+    image: docker.io/library/node:20-alpine
+    restart: "no"
+    depends_on:
+      - web
+    environment:
+      ANYRAY_OBSERVABILITY_BASEURL: http://web:3000
+      ANYRAY_OBSERVABILITY_PUBLIC_KEY: ${ANYRAY_OBSERVABILITY_PUBLIC_KEY:?run ./setup.sh first}
+      ANYRAY_OBSERVABILITY_SECRET_KEY: ${ANYRAY_OBSERVABILITY_SECRET_KEY:?run ./setup.sh first}
+    volumes:
+      - ./scripts:/seed:ro
+    command: node /seed/seedModelPrices.mjs
+
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server
+    restart: always
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run ./setup.sh first}
+    volumes:
+      - anyray_clickhouse_data:/var/lib/clickhouse
+      - anyray_clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  minio:
+    image: cgr.dev/chainguard/minio
+    restart: always
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?run ./setup.sh first}
+    volumes:
+      - anyray_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  redis:
+    image: docker.io/redis:7
+    restart: always
+    command: >
+      --requirepass ${REDIS_AUTH:?run ./setup.sh first}
+      --maxmemory-policy noeviction
+    volumes:
+      - anyray_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  postgres:
+    image: docker.io/postgres:17
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./setup.sh first}
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - anyray_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  anyray_gateway_data:
+  anyray_optimizer_data:
+  anyray_postgres_data:
+  anyray_clickhouse_data:
+  anyray_clickhouse_logs:
+  anyray_minio_data:
+  anyray_redis_data:

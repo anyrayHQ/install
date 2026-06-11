@@ -1,0 +1,40 @@
+name: Install smoke test
+
+# Installs Anyray exactly the way the README tells a human to, against the
+# published GHCR images, and probes the gateway + console + admin gate.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate secrets
+        run: ./setup.sh
+      - name: Start the stack
+        run: docker compose up -d --quiet-pull
+      - name: Wait for health
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fs http://localhost:8787/ >/dev/null 2>&1; then exit 0; fi
+            sleep 5
+          done
+          echo "gateway never became healthy"; docker compose ps; docker compose logs gateway; exit 1
+      - name: Probe surfaces
+        run: |
+          set -e
+          ADMIN=$(grep '^ANYRAY_ADMIN_TOKEN=' .env | cut -d= -f2)
+          curl -fs http://localhost:8787/ | grep -q "AI Gateway"
+          curl -fso /dev/null http://localhost:3000/anyray-login
+          test "$(curl -so /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN" http://localhost:8787/admin/auth)" = "200"
+          test "$(curl -so /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" http://localhost:8787/admin/auth)" = "401"
+      - name: Idempotent re-run of setup.sh
+        run: ./setup.sh | grep -q "already exists"
+      - name: Logs on failure
+        if: failure()
+        run: docker compose ps && docker compose logs

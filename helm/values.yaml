@@ -6,7 +6,7 @@
 host: ""
 
 image:
-  tag: "v0.1.0"
+  tag: "v1.5.0"
   pullPolicy: IfNotPresent
 
 # Name of the Kubernetes Secret created by: ./setup.sh --k8s

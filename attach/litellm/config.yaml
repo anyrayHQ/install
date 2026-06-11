@@ -14,12 +14,13 @@ model_list:
   # Add more models as needed.
 
 litellm_settings:
-  # Anyray optimizer hook: transforms requests before they reach the provider.
-  # Reference the module-level instance (anyray_callback), not the class —
-  # LiteLLM's get_instance_fn returns the named attribute as-is and appends it
-  # to litellm.callbacks; a class would be called without instantiation.
+  # Anyray optimizer hooks: transform the request pre-call and the response
+  # post-call. Reference the module-level instance (proxy_handler_instance),
+  # not the class — LiteLLM's get_instance_fn returns the named attribute
+  # as-is and appends it to litellm.callbacks; a class would be called
+  # without instantiation.
   callbacks:
-    - anyrayCallback.anyray_callback
+    - anyray_optimizer.proxy_handler_instance
 
   # Trace emission via LiteLLM's native Langfuse integration.
   # CRITICAL: turn_off_message_logging=true keeps prompt/response content out of
@@ -32,7 +33,7 @@ litellm_settings:
 #
 #   LANGFUSE_PUBLIC_KEY=<ANYRAY_OBSERVABILITY_PUBLIC_KEY from .env>
 #   LANGFUSE_SECRET_KEY=<ANYRAY_OBSERVABILITY_SECRET_KEY from .env>
-#   LANGFUSE_HOST=http://proxy:80
+#   LANGFUSE_HOST=http://<anyray-host>:3000   # LiteLLM runs outside the attach network
 #   LANGFUSE_TRACING_ENVIRONMENT=production
 #   TURN_OFF_MESSAGE_LOGGING=true
 #

@@ -2,14 +2,14 @@
 # Run from this directory: docker compose up --abort-on-container-exit
 #
 # What it proves:
-#   1. anyrayCallback.AnyrayCallback loads without error.
+#   1. anyray_optimizer.AnyrayOptimizer loads without error.
 #   2. async_pre_call_hook is called and mutations reach the provider.
-#   3. async_log_success_event runs and the _anyray_* keys stashed in `data`
-#      during the pre-call hook survive into its kwargs (cache write-back fires).
+#   3. async_post_call_success_hook sends the response to /v1/optimize-response
+#      and the transformed response reaches the client.
 #
-# The mock optimizer returns a canned /v1/optimize response with max_tokens=99
-# and cacheEligible=true; the test asserts the mock provider received
-# max_tokens=99 and that the mock optimizer received a /v1/cache write-back.
+# The mock optimizer returns a canned /v1/optimize response with max_tokens=99;
+# /v1/optimize-response rewrites the message content to "optimized-ok" with a
+# non-empty decisions list so the adapter rebuilds the ModelResponse.
 
 name: anyray-litellm-verify
 
@@ -49,7 +49,7 @@ services:
       - |
         pip install httpx --quiet &&
         mkdir -p /run/litellm &&
-        cp /app/anyray/anyrayCallback.py /run/litellm/ &&
+        cp /app/anyray/anyray_optimizer.py /run/litellm/ &&
         cp /app/verify/litellm-test-config.yaml /run/litellm/ &&
         litellm --config /run/litellm/litellm-test-config.yaml --port 4000
     depends_on:

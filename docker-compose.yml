@@ -14,7 +14,7 @@ services:
       - web
       - optimizer
     ports:
-      - "8787:8787"
+      - "${ANYRAY_GATEWAY_BIND:-0.0.0.0}:8787:8787"
     environment:
       ANYRAY_OBSERVABILITY_BASEURL: http://web:3000
       ANYRAY_OBSERVABILITY_PUBLIC_KEY: ${ANYRAY_OBSERVABILITY_PUBLIC_KEY:?run ./setup.sh first}
@@ -38,6 +38,26 @@ services:
       ANYRAY_ROUTING_CONFIG_AUDIT_FILE: /data/routing-config-audit.log
       ANYRAY_PRICING_CONFIG: /data/pricing.config.json
       ANYRAY_PRICING_AUDIT_FILE: /data/pricing-settings-audit.log
+      ANYRAY_CLIENT_KEYS_FILE: /data/client-keys.config.json
+      ANYRAY_CLIENT_KEYS_AUDIT_FILE: /data/client-keys-audit.log
+      ANYRAY_ENTITLEMENT_FILE: /data/entitlement.lease.json
+      # Optional hardening / features — set in .env to enable.
+      ANYRAY_RESPONSES_OPTIMIZE: ${ANYRAY_RESPONSES_OPTIMIZE:-}
+      ANYRAY_REQUIRE_CLIENT_KEYS: ${ANYRAY_REQUIRE_CLIENT_KEYS:-}
+      ANYRAY_RATE_LIMIT_RPM: ${ANYRAY_RATE_LIMIT_RPM:-}
+      ANYRAY_RATE_LIMIT_UNAUTH_RPM: ${ANYRAY_RATE_LIMIT_UNAUTH_RPM:-}
+      ANYRAY_AUTH_FAIL_LIMIT: ${ANYRAY_AUTH_FAIL_LIMIT:-}
+      ANYRAY_MAX_BODY_BYTES: ${ANYRAY_MAX_BODY_BYTES:-}
+      ANYRAY_TRUST_PROXY: ${ANYRAY_TRUST_PROXY:-}
+      ANYRAY_CUSTOM_HOST_ALLOWLIST: ${ANYRAY_CUSTOM_HOST_ALLOWLIST:-}
+      # Anyray Cloud metering (opt-in; content-free rollups only).
+      ANYRAY_METERING_ENABLED: ${ANYRAY_METERING_ENABLED:-}
+      ANYRAY_CONTROL_PLANE_URL: ${ANYRAY_CONTROL_PLANE_URL:-}
+      ANYRAY_DEPLOYMENT_TOKEN: ${ANYRAY_DEPLOYMENT_TOKEN:-}
+      ANYRAY_LICENSE_PUBLIC_KEY: ${ANYRAY_LICENSE_PUBLIC_KEY:-}
+      ANYRAY_PSEUDONYM_SALT: ${ANYRAY_PSEUDONYM_SALT:-}
+      ANYRAY_METERING_INTERVAL_MS: ${ANYRAY_METERING_INTERVAL_MS:-}
+      ANYRAY_ENTITLEMENT_GRACE_MS: ${ANYRAY_ENTITLEMENT_GRACE_MS:-}
     volumes:
       - anyray_gateway_data:/data
     healthcheck:

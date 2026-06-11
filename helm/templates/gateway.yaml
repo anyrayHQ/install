@@ -29,7 +29,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: ANYRAY_OBSERVABILITY_BASEURL
-              value: "http://{{ include "anyray.fullname" . }}-web:3000"
+              value: "http://web:3000"
             - name: ANYRAY_OBSERVABILITY_PUBLIC_KEY
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OBSERVABILITY_PUBLIC_KEY" "context" .) | nindent 16 }}
@@ -37,12 +37,14 @@ spec:
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OBSERVABILITY_SECRET_KEY" "context" .) | nindent 16 }}
             - name: ANYRAY_OPTIMIZER_URL
-              value: "http://{{ include "anyray.fullname" . }}-optimizer:8088"
+              value: "http://optimizer:8088"
             - name: ANYRAY_OPTIMIZER_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}
             - name: ANYRAY_OPTIMIZER_TIMEOUT_MS
               value: {{ .Values.gateway.optimizerTimeoutMs | quote }}
+            - name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS
+              value: {{ .Values.gateway.optimizerVisionTimeoutMs | quote }}
             - name: ANYRAY_CONTENT_KEY
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_CONTENT_KEY" "context" .) | nindent 16 }}
@@ -75,8 +77,15 @@ spec:
               value: /data/client-keys.config.json
             - name: ANYRAY_CLIENT_KEYS_AUDIT_FILE
               value: /data/client-keys-audit.log
+            - name: ANYRAY_USER_CAPS_FILE
+              value: /data/user-caps.config.json
+            - name: ANYRAY_USER_CAPS_AUDIT_FILE
+              value: /data/user-caps-audit.log
             - name: ANYRAY_ENTITLEMENT_FILE
               value: /data/entitlement.lease.json
+            {{- with .Values.gateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - containerPort: 8787
           readinessProbe:
@@ -124,7 +133,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "anyray.fullname" . }}-gateway
+  # Bare name: nginx in the proxy image hardcodes the upstream `gateway:8787`.
+  name: gateway
   labels:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway

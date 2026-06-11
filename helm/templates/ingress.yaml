@@ -32,14 +32,14 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "anyray.fullname" . }}-gateway
+                name: gateway
                 port:
                   number: 8787
           - path: /admin
             pathType: Prefix
             backend:
               service:
-                name: {{ include "anyray.fullname" . }}-gateway
+                name: gateway
                 port:
                   number: 8787
 {{- end }}

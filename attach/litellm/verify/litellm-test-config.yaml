@@ -1,0 +1,10 @@
+model_list:
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: sk-fake
+      api_base: http://mock-provider:9999
+
+litellm_settings:
+  callbacks:
+    - anyrayCallback.anyray_callback

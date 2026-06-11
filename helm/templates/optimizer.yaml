@@ -86,7 +86,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "anyray.fullname" . }}-optimizer
+  # Bare name: nginx in the proxy image hardcodes the upstream `optimizer:8088`.
+  name: optimizer
   labels:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: optimizer

@@ -17,8 +17,6 @@ Grab a deployment token (`adt_…`) from [app.anyray.ai](https://app.anyray.ai)
   then follow the in-console setup steps (~3 min).
 - Gateway → point AI tools/SDKs at http://<your-host>:8787/v1/...
 - Developers connect with: `npx anyray-connect http://<your-host>:8787`
-  (CLI not yet on npm — coming in a follow-up release; until then point each
-  tool's base URL at the gateway manually)
 
 `--connect` only sends the deployment token to Anyray Cloud and pulls back the
 license public key. Metering reports are content-free rollups; the pseudonym

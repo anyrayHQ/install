@@ -1,0 +1,64 @@
+name: Attach smoke test
+
+# Installs the attach stack (optimizer + observability only) and probes
+# the optimizer auth gate, the console login page, and the observability
+# read path (nginx → trace backend rewrite). No Anyray gateway is started.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+jobs:
+  smoke-attach:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate secrets
+        run: ./setup.sh
+      - name: Start the attach stack
+        run: docker compose -f docker-compose.attach.yml up -d --quiet-pull
+      - name: Wait for optimizer health
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fs http://127.0.0.1:8088/health >/dev/null 2>&1; then exit 0; fi
+            sleep 5
+          done
+          echo "optimizer never became healthy"
+          docker compose -f docker-compose.attach.yml ps
+          docker compose -f docker-compose.attach.yml logs optimizer
+          exit 1
+      - name: Wait for console (proxy + web)
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fso /dev/null http://127.0.0.1:3000/anyray-login 2>/dev/null; then exit 0; fi
+            sleep 5
+          done
+          echo "console never became reachable"
+          docker compose -f docker-compose.attach.yml ps
+          docker compose -f docker-compose.attach.yml logs proxy web
+          exit 1
+      - name: Probe surfaces
+        run: |
+          set -e
+          ADMIN=$(grep '^ANYRAY_ADMIN_TOKEN=' .env | cut -d= -f2)
+
+          # Optimizer auth gate
+          test "$(curl -so /dev/null -w '%{http_code}' http://127.0.0.1:8088/admin/auth -H "Authorization: Bearer $ADMIN")" = "200"
+          test "$(curl -so /dev/null -w '%{http_code}' http://127.0.0.1:8088/admin/auth -H "Authorization: Bearer wrong")" = "401"
+          test "$(curl -so /dev/null -w '%{http_code}' http://127.0.0.1:8088/admin/auth)" = "401"
+
+          # Console login page
+          curl -fso /dev/null http://127.0.0.1:3000/anyray-login
+
+          # Observability read path through nginx rewrite
+          test "$(curl -so /dev/null -w '%{http_code}' "http://127.0.0.1:3000/admin/observability/traces?page=1" -H "Cookie: anyray_key=$ADMIN")" = "200"
+
+          # Gateway-dependent route returns 502, not a redirect loop
+          test "$(curl -so /dev/null -w '%{http_code}' http://127.0.0.1:3000/admin/spend -H "Cookie: anyray_key=$ADMIN")" = "502"
+
+          echo "all attach probes passed"
+      - name: Logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.attach.yml ps && docker compose -f docker-compose.attach.yml logs

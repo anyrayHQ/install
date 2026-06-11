@@ -46,8 +46,12 @@ By default all Services are `ClusterIP`. To expose externally:
 **NodePort (simplest for on-prem / bare metal):**
 ```bash
 kubectl patch svc anyray-proxy -p '{"spec":{"type":"NodePort","ports":[{"port":3000,"nodePort":30000}]}}'
-kubectl patch svc anyray-gateway -p '{"spec":{"type":"NodePort","ports":[{"port":8787,"nodePort":30787}]}}'
+kubectl patch svc gateway -p '{"spec":{"type":"NodePort","ports":[{"port":8787,"nodePort":30787}]}}'
 ```
+
+Note: the `gateway`, `web`, and `optimizer` Services use bare (unprefixed) names
+because nginx inside the proxy image hardcodes those upstream hostnames. Install
+the chart in its own namespace to avoid name collisions.
 
 **LoadBalancer (cloud providers):**
 Edit `values.yaml` — change the `type:` for proxy and gateway Services to `LoadBalancer`.

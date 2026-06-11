@@ -6,8 +6,7 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: model-seeder
   annotations:
-    # Rerun after upgrade: kubectl delete job anyray-model-seeder && helm upgrade ...
-    "helm.sh/hook": post-install
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:
@@ -24,7 +23,7 @@ spec:
           command: ["node", "/seed/seedModelPrices.mjs"]
           env:
             - name: ANYRAY_OBSERVABILITY_BASEURL
-              value: "http://{{ include "anyray.fullname" . }}-web:3000"
+              value: "http://web:3000"
             - name: ANYRAY_OBSERVABILITY_PUBLIC_KEY
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OBSERVABILITY_PUBLIC_KEY" "context" .) | nindent 16 }}

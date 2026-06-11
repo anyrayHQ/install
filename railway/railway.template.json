@@ -1,5 +1,4 @@
 {
-  "$schema": "https://railway.com/railway.schema.json",
   "displayName": "Anyray",
   "description": "Self-hosted AI-spend optimizer — gateway, optimizer, and observability console.",
   "tags": ["ai", "gateway", "llm", "observability"],
@@ -15,6 +14,7 @@
         "healthcheckPath": "/",
         "restartPolicyType": "ON_FAILURE"
       },
+      "volumes": [{ "mountPath": "/data" }],
       "variables": {
         "ANYRAY_OBSERVABILITY_BASEURL": "http://${{web.RAILWAY_PRIVATE_DOMAIN}}:3000",
         "ANYRAY_OBSERVABILITY_PUBLIC_KEY": "${{web.LANGFUSE_INIT_PROJECT_PUBLIC_KEY}}",
@@ -22,6 +22,7 @@
         "ANYRAY_OPTIMIZER_URL": "http://${{optimizer.RAILWAY_PRIVATE_DOMAIN}}:8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{optimizer.ANYRAY_OPTIMIZER_TOKEN}}",
         "ANYRAY_OPTIMIZER_TIMEOUT_MS": "800",
+        "ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS": "10000",
         "ANYRAY_CONTENT_KEY": "${{secret()}}",
         "ANYRAY_CONTENT_MODE": "encrypted",
         "ANYRAY_ALLOW_PLAINTEXT": "false",
@@ -37,6 +38,8 @@
         "ANYRAY_PRICING_AUDIT_FILE": "/data/pricing-settings-audit.log",
         "ANYRAY_CLIENT_KEYS_FILE": "/data/client-keys.config.json",
         "ANYRAY_CLIENT_KEYS_AUDIT_FILE": "/data/client-keys-audit.log",
+        "ANYRAY_USER_CAPS_FILE": "/data/user-caps.config.json",
+        "ANYRAY_USER_CAPS_AUDIT_FILE": "/data/user-caps-audit.log",
         "ANYRAY_ENTITLEMENT_FILE": "/data/entitlement.lease.json"
       }
     },
@@ -49,6 +52,7 @@
         "healthcheckPath": "/health",
         "restartPolicyType": "ON_FAILURE"
       },
+      "volumes": [{ "mountPath": "/data" }],
       "variables": {
         "PORT": "8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{secret()}}",
@@ -63,6 +67,7 @@
         "image": "ghcr.io/anyrayhq/proxy:v1.5.0"
       },
       "deploy": {
+        "startCommand": "sh -c \"sed -e 's/gateway:8787/gateway.railway.internal:8787/g' -e 's/web:3000/web.railway.internal:3000/g' -e 's/optimizer:8088/optimizer.railway.internal:8088/g' /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'\"",
         "healthcheckPath": "/anyray-login",
         "restartPolicyType": "ON_FAILURE"
       },
@@ -156,13 +161,45 @@
       }
     },
     {
-      "name": "clickhouse",
+      "name": "Postgres",
       "source": {
-        "image": "docker.io/clickhouse/clickhouse-server:latest"
+        "image": "ghcr.io/railwayapp-templates/postgres-ssl:17"
       },
       "deploy": {
         "restartPolicyType": "ON_FAILURE"
       },
+      "volumes": [{ "mountPath": "/var/lib/postgresql/data" }],
+      "variables": {
+        "POSTGRES_USER": "postgres",
+        "POSTGRES_PASSWORD": "${{secret()}}",
+        "POSTGRES_DB": "postgres",
+        "PGDATA": "/var/lib/postgresql/data/pgdata",
+        "DATABASE_URL": "postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.POSTGRES_DB}}"
+      }
+    },
+    {
+      "name": "Redis",
+      "source": {
+        "image": "docker.io/redis:7"
+      },
+      "deploy": {
+        "startCommand": "sh -c 'exec redis-server --requirepass \"$REDIS_PASSWORD\" --maxmemory-policy noeviction --appendonly yes --dir /data'",
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "volumes": [{ "mountPath": "/data" }],
+      "variables": {
+        "REDIS_PASSWORD": "${{secret()}}"
+      }
+    },
+    {
+      "name": "clickhouse",
+      "source": {
+        "image": "docker.io/clickhouse/clickhouse-server:26.3"
+      },
+      "deploy": {
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "volumes": [{ "mountPath": "/var/lib/clickhouse" }],
       "variables": {
         "CLICKHOUSE_DB": "default",
         "CLICKHOUSE_USER": "clickhouse",
@@ -175,9 +212,10 @@
         "image": "docker.io/minio/minio:latest"
       },
       "deploy": {
-        "startCommand": "minio server /data",
+        "startCommand": "sh -c 'mkdir -p /data/langfuse && exec minio server --address \":9000\" /data'",
         "restartPolicyType": "ON_FAILURE"
       },
+      "volumes": [{ "mountPath": "/data" }],
       "variables": {
         "MINIO_ROOT_USER": "minio",
         "MINIO_ROOT_PASSWORD": "${{secret()}}"

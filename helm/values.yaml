@@ -27,6 +27,10 @@ gateway:
   contentMode: encrypted
   allowPlaintext: "false"
   optimizerTimeoutMs: "800"
+  optimizerVisionTimeoutMs: "10000"
+  # Extra env vars (provider-key fallbacks, rate limits, Anyray Cloud metering…)
+  # in plain k8s env syntax: [{name: ANYRAY_RATE_LIMIT_RPM, value: "600"}]
+  extraEnv: []
   # Persist /data (provider keys, routing config, spend + audit logs) across
   # pod restarts. Requires replicas: 1 — the PVC is ReadWriteOnce.
   persistence:

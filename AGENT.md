@@ -13,6 +13,9 @@ optimizer + observability console). Docs: https://docs.anyray.ai
 1. Where should Anyray run? (this machine / a remote VM with SSH — EC2, GCP,
    Hetzner, etc. / somewhere else)
 2. What hostname or IP will users reach it on?
+3. Their Anyray Cloud deployment token (starts with `adt_`) — they get it at
+   https://app.anyray.ai (Deployments → Connect a deployment). If they don't
+   want to connect to Anyray Cloud, install standalone (omit `--connect`).
 
 ## Step 2 — Platform preparation (your job)
 
@@ -27,8 +30,13 @@ optimizer + observability console). Docs: https://docs.anyray.ai
 On the target machine (or with DOCKER_HOST=ssh://user@<vm> from here):
 
     git clone https://github.com/anyrayHQ/install anyray && cd anyray
-    ./setup.sh --host <host>
+    ./setup.sh --host <host> --connect <adt_token>
     docker compose up -d
+
+(Standalone install: drop `--connect <adt_token>`. If the gateway will be
+reached at a URL other than http://<host>:8787 — e.g. behind TLS or a
+load balancer — add `--gateway-url <url>` so the portal shows developers
+the right connect URL.)
 
 Do NOT hand-assemble compose files, edit image tags, or generate secrets
 yourself — `setup.sh` and the pinned artifacts are the only install path.
@@ -42,7 +50,8 @@ yourself — `setup.sh` and the pinned artifacts are the only install path.
 Report to the operator: the console URL (http://<host>:3000), where the admin
 key lives (`.env`, `ANYRAY_ADMIN_TOKEN` — `setup.sh` printed it once), and that
 the next step is the in-console setup (~3 min): connect a provider key, send a
-test request, invite developers.
+test request, invite developers. If `--connect` was used, also tell them the
+deployment will appear as Connected at https://app.anyray.ai within a minute.
 
 ## Hard rules
 
@@ -51,4 +60,5 @@ test request, invite developers.
 - NEVER expose ports 3000/8787 publicly.
 - NEVER set ANYRAY_CONTENT_MODE to `plaintext` or ANYRAY_ALLOW_PLAINTEXT=true.
 - NEVER print the contents of `.env` into your conversation beyond confirming
-  it exists.
+  it exists. In particular ANYRAY_PSEUDONYM_SALT is privacy-critical and must
+  never leave the machine — `setup.sh --connect` generates it locally.

@@ -8,7 +8,7 @@ name: anyray
 
 services:
   gateway:
-    image: ghcr.io/anyrayhq/gateway:v0.1.0
+    image: ghcr.io/anyrayhq/gateway:v1.5.0
     restart: always
     depends_on:
       - web
@@ -22,6 +22,7 @@ services:
       ANYRAY_OPTIMIZER_URL: http://optimizer:8088
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
       ANYRAY_OPTIMIZER_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_TIMEOUT_MS:-800}
+      ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS:-10000}
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:?run ./setup.sh first}
       ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
@@ -40,6 +41,8 @@ services:
       ANYRAY_PRICING_AUDIT_FILE: /data/pricing-settings-audit.log
       ANYRAY_CLIENT_KEYS_FILE: /data/client-keys.config.json
       ANYRAY_CLIENT_KEYS_AUDIT_FILE: /data/client-keys-audit.log
+      ANYRAY_USER_CAPS_FILE: /data/user-caps.config.json
+      ANYRAY_USER_CAPS_AUDIT_FILE: /data/user-caps-audit.log
       ANYRAY_ENTITLEMENT_FILE: /data/entitlement.lease.json
       # Optional hardening / features — set in .env to enable.
       ANYRAY_RESPONSES_OPTIMIZE: ${ANYRAY_RESPONSES_OPTIMIZE:-}
@@ -68,7 +71,7 @@ services:
       start_period: 5s
 
   optimizer:
-    image: ghcr.io/anyrayhq/optimizer:v0.1.0
+    image: ghcr.io/anyrayhq/optimizer:v1.5.0
     restart: always
     environment:
       PORT: 8088
@@ -86,7 +89,7 @@ services:
       start_period: 5s
 
   proxy:
-    image: ghcr.io/anyrayhq/proxy:v0.1.0
+    image: ghcr.io/anyrayhq/proxy:v1.5.0
     restart: always
     # gateway healthy first: nginx auth_request hits gateway:8787 on every
     # console load — starting earlier just serves 502s.
@@ -97,6 +100,25 @@ services:
         condition: service_healthy
     ports:
       - "3000:80"
+
+  # TLS edge for public exposure — only started with `--profile public`.
+  # Set ANYRAY_PUBLIC_DOMAIN in .env and ANYRAY_GATEWAY_BIND=127.0.0.1 so the
+  # only public entry is Caddy on 443; the Caddyfile 403s the admin surface.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["public"]
+    restart: always
+    depends_on:
+      - gateway
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ANYRAY_PUBLIC_DOMAIN: ${ANYRAY_PUBLIC_DOMAIN:-}
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - anyray_caddy_data:/data
+      - anyray_caddy_config:/config
 
   # worker is declared before web on purpose: it defines the two YAML anchors
   # (&anyray-depends-on, &anyray-backend-env) that web aliases — YAML requires
@@ -177,7 +199,7 @@ services:
     command: node /seed/seedModelPrices.mjs
 
   clickhouse:
-    image: docker.io/clickhouse/clickhouse-server
+    image: docker.io/clickhouse/clickhouse-server:26.3
     restart: always
     user: "101:101"
     environment:
@@ -195,7 +217,8 @@ services:
       start_period: 1s
 
   minio:
-    image: cgr.dev/chainguard/minio
+    # Chainguard's free tier only publishes :latest — the digest is the pin.
+    image: cgr.dev/chainguard/minio:latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07
     restart: always
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
@@ -250,3 +273,5 @@ volumes:
   anyray_clickhouse_logs:
   anyray_minio_data:
   anyray_redis_data:
+  anyray_caddy_data:
+  anyray_caddy_config:

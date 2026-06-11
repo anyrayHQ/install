@@ -152,7 +152,7 @@ cat > my-values.yaml <<EOF
 host: "${HOST}"
 
 image:
-  tag: "v0.1.0"
+  tag: "v1.5.0"
 EOF
 
 echo "✓ Secrets generated → anyray-secrets.yaml"

@@ -24,11 +24,13 @@ spec:
             - name: NEXTAUTH_SECRET
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "NEXTAUTH_SECRET" "context" .) | nindent 16 }}
-            - name: DATABASE_URL
-              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
+            # POSTGRES_PASSWORD must precede DATABASE_URL: k8s only resolves
+            # $(VAR) against vars declared earlier in the env list.
             - name: POSTGRES_PASSWORD
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "POSTGRES_PASSWORD" "context" .) | nindent 16 }}
+            - name: DATABASE_URL
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
             - name: SALT
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "SALT" "context" .) | nindent 16 }}
@@ -121,7 +123,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "anyray.fullname" . }}-web
+  # Bare name: nginx in the proxy image hardcodes the upstream `web:3000`.
+  name: web
   labels:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: web

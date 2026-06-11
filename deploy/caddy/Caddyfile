@@ -1,0 +1,19 @@
+# Anyray public TLS edge (docker compose --profile public).
+# Caddy provisions Let's Encrypt certs automatically for the domain below —
+# it just needs a DNS A record pointing here and ports 80/443 open.
+
+{$ANYRAY_PUBLIC_DOMAIN} {
+	# The admin surface stays in-network / SSH-tunnel only: minting invites,
+	# console reads, and log endpoints are never reachable from the internet.
+	@admin path /admin/* /public/* /log/*
+	respond @admin 403
+
+	# Everything else (the OpenAI-compatible API) goes to the gateway.
+	reverse_proxy gateway:8787 {
+		# Overwrite (not append) X-Forwarded-For with the real peer so a client
+		# can't spoof its IP to dodge the gateway's per-IP rate limit and
+		# brute-force throttle. The gateway reads the first XFF value when
+		# ANYRAY_TRUST_PROXY=true; with this it is always the true client.
+		header_up X-Forwarded-For {remote_host}
+	}
+}

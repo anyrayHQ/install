@@ -1,0 +1,84 @@
+# Verification harness: LiteLLM + mock provider + mock optimizer.
+# Run from this directory: docker compose up --abort-on-container-exit
+#
+# What it proves:
+#   1. anyrayCallback.AnyrayCallback loads without error.
+#   2. async_pre_call_hook is called and mutations reach the provider.
+#   3. async_log_success_event runs and the _anyray_* keys stashed in `data`
+#      during the pre-call hook survive into its kwargs (cache write-back fires).
+#
+# The mock optimizer returns a canned /v1/optimize response with max_tokens=99
+# and cacheEligible=true; the test asserts the mock provider received
+# max_tokens=99 and that the mock optimizer received a /v1/cache write-back.
+
+name: anyray-litellm-verify
+
+services:
+  mock-provider:
+    image: python:3.11-slim
+    command: python /app/mock_provider.py
+    volumes:
+      - .:/app:ro
+    environment:
+      PORT: "9999"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9999/last')"]
+      interval: 2s
+      retries: 10
+      start_period: 3s
+
+  mock-optimizer:
+    image: python:3.11-slim
+    command: python /app/mock_optimizer.py
+    volumes:
+      - .:/app:ro
+    environment:
+      PORT: "8088"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8088/')"]
+      interval: 2s
+      retries: 10
+      start_period: 3s
+
+  litellm:
+    # Pinned to the digest the harness was verified against (litellm 1.82.6).
+    image: ghcr.io/berriai/litellm:main-latest@sha256:7c311546c25e7bb6e8cafede9fcd3d0d622ac636b5c9418befaa32e85dfb0186
+    # Override entrypoint so we can run pip install before starting litellm.
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        pip install httpx --quiet &&
+        mkdir -p /run/litellm &&
+        cp /app/anyray/anyrayCallback.py /run/litellm/ &&
+        cp /app/verify/litellm-test-config.yaml /run/litellm/ &&
+        litellm --config /run/litellm/litellm-test-config.yaml --port 4000
+    depends_on:
+      mock-provider:
+        condition: service_healthy
+      mock-optimizer:
+        condition: service_healthy
+    volumes:
+      - ..:/app/anyray:ro
+      - .:/app/verify:ro
+    environment:
+      ANYRAY_OPTIMIZER_URL: http://mock-optimizer:8088
+      ANYRAY_OPTIMIZER_TOKEN: ""
+      OPENAI_API_KEY: "sk-fake"
+      OPENAI_API_BASE: http://mock-provider:9999
+      TURN_OFF_MESSAGE_LOGGING: "true"
+      LANGFUSE_REDACT_ALL_INPUTS: "true"
+      LANGFUSE_REDACT_ALL_OUTPUTS: "true"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health')"]
+      interval: 5s
+      retries: 18
+      start_period: 30s
+
+  test-runner:
+    image: python:3.11-slim
+    depends_on:
+      litellm:
+        condition: service_healthy
+    volumes:
+      - .:/app:ro
+    command: python /app/run_test.py

@@ -34,10 +34,19 @@ try {
   Write-Host "anyray-connect: downloading $asset..." -ForegroundColor Cyan
   Invoke-WebRequest -Uri "$base/$asset" -OutFile $bin -UseBasicParsing
 
-  # Verify the checksum from the same release (best-effort).
+  # Verify the checksum from the same release (best-effort). Only the SHA256SUMS
+  # download is in a catch-all (any error type, incl. pwsh's HttpResponseException
+  # vs Windows PowerShell's WebException) — a genuine checksum MISMATCH is thrown
+  # OUTSIDE it so it always aborts the install.
+  $sumsPath = Join-Path $tmp 'SHA256SUMS'
+  $haveSums = $false
   try {
-    $sumsPath = Join-Path $tmp 'SHA256SUMS'
     Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
+    $haveSums = $true
+  } catch {
+    # SHA256SUMS not reachable — proceed without verification.
+  }
+  if ($haveSums) {
     $want = (Get-Content $sumsPath | ForEach-Object {
       $p = $_ -split '\s+'
       if ($p.Length -ge 2 -and ($p[1].TrimStart('*') -eq $asset)) { $p[0] }
@@ -46,8 +55,6 @@ try {
       $got = (Get-FileHash -Algorithm SHA256 -Path $bin).Hash.ToLower()
       if ($got -ne $want.ToLower()) { throw "checksum mismatch for $asset - refusing to run" }
     }
-  } catch [System.Net.WebException] {
-    # No SHA256SUMS published yet — proceed without verification.
   }
 
   & $bin @connectArgs

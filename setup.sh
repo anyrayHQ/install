@@ -6,7 +6,10 @@
 #   (token from https://app.anyray.ai). Safe to re-run to reconnect.
 # Idempotent: never overwrites existing secrets; --connect (re)writes only the
 # Anyray Cloud connect vars. Flags: --host <h> --k8s --connect <adt_token>
-# --control-plane <url> --gateway-url <url>.
+# --gateway-url <url>. (--control-plane <url> is DEV/INTERNAL ONLY: the vendor
+# host is pinned + defaulted in the gateway image, so a normal connect never
+# needs it; passing it only does anything for an internal/dev gateway build via
+# the unsafe override below.)
 set -euo pipefail
 
 HOST=""
@@ -155,11 +158,13 @@ EOF
     done
     grep -v '^# Anyray Cloud (--connect)' .env > .env.tmp || true; mv .env.tmp .env
 
-    # Common header + connect vars (no license key — it is pinned in the image).
+    # Common header + connect vars (no license key — it is pinned in the image;
+    # no ANYRAY_CONTROL_PLANE_URL — the vendor host is pinned + defaulted in the
+    # image, so a production connect needs only the deployment token. It is
+    # written ONLY in the dev-override branch below, where a custom host matters).
     cat >> .env <<EOF
 # Anyray Cloud (--connect) — re-run ./setup.sh --connect <token> to reconnect.
 ANYRAY_METERING_ENABLED=true
-ANYRAY_CONTROL_PLANE_URL=${CONTROL_PLANE}
 ANYRAY_DEPLOYMENT_TOKEN=${CONNECT_TOKEN}
 ANYRAY_PSEUDONYM_SALT=${PSEUDONYM_SALT}
 ANYRAY_GATEWAY_PUBLIC_URL=${GATEWAY_URL}
@@ -198,7 +203,10 @@ EOF
       esac
       cat >> .env <<EOF
 # Dev/staging ONLY — overrides the pinned vendor key + host. Never set in prod.
+# The URL is written here (not in the common block) because it only takes effect
+# under the override; a stock image ignores it and uses the pinned host.
 ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1
+ANYRAY_CONTROL_PLANE_URL=${CONTROL_PLANE}
 ANYRAY_LICENSE_PUBLIC_KEY="${LICENSE_PEM}"
 EOF
     fi

@@ -177,9 +177,18 @@ EOF
       echo "  A stock gateway image pins the vendor host + key and will REFUSE to meter against it."
       echo "  Enabling ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1 — honored ONLY by an internal/dev gateway build."
       command -v curl >/dev/null 2>&1 || { echo "✗ curl not found — needed to fetch the dev control plane's verify key" >&2; exit 1; }
-      LICENSE_ENDPOINT="${CP_NORM}/v1/license-public-key"
-      LICENSE_JSON="$(curl -fsSL --max-time 15 "$LICENSE_ENDPOINT")" || {
-        echo "✗ could not reach the control plane at ${CONTROL_PLANE} — check the URL / your network, then re-run ./setup.sh --connect <token> --control-plane <url>" >&2
+      # The verify key is no longer public — it is served only at the admin-gated
+      # /admin/license-public-key. A dev operator runs the dev control plane, so
+      # they hold its admin token: pass it as ANYRAY_CP_ADMIN_TOKEN. (Or skip the
+      # fetch entirely by exporting ANYRAY_LICENSE_PUBLIC_KEY yourself.)
+      if [ -z "${ANYRAY_CP_ADMIN_TOKEN:-}" ]; then
+        echo "✗ --control-plane needs the dev control plane's admin token to fetch its verify key." >&2
+        echo "  Set ANYRAY_CP_ADMIN_TOKEN=… and re-run, or set ANYRAY_LICENSE_PUBLIC_KEY=… yourself." >&2
+        exit 1
+      fi
+      LICENSE_ENDPOINT="${CP_NORM}/admin/license-public-key"
+      LICENSE_JSON="$(curl -fsSL --max-time 15 -H "Authorization: Bearer ${ANYRAY_CP_ADMIN_TOKEN}" "$LICENSE_ENDPOINT")" || {
+        echo "✗ could not reach ${LICENSE_ENDPOINT} (check the URL, your network, and ANYRAY_CP_ADMIN_TOKEN), then re-run ./setup.sh --connect <token> --control-plane <url>" >&2
         exit 1
       }
       LICENSE_PEM="$(printf '%s' "$LICENSE_JSON" | tr -d '\n\r' | sed -n 's/.*"publicKeyPem"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"

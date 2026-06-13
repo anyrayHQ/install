@@ -57,11 +57,12 @@ fi
 chmod +x "$bin"
 
 # Reconnect stdin to the terminal: this script arrived over a pipe (curl | sh),
-# so without this the binary's confirm prompt would see EOF. Falls back to
-# passing nothing special when there's no controlling TTY (CI) — in that case
-# pass --yes in your flags.
-if [ -e /dev/tty ]; then
-  exec "$bin" "$@" </dev/tty
+# so without this the binary's confirm prompt would see EOF. Test that /dev/tty
+# is actually openable — it exists as a device node even with no controlling
+# terminal (CI, sandboxes), where opening it fails — and fall back to running
+# without it. In that case the binary is non-interactive, so pass --yes.
+if { : < /dev/tty; } 2>/dev/null; then
+  exec "$bin" "$@" < /dev/tty
 else
   exec "$bin" "$@"
 fi

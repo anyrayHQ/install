@@ -60,9 +60,11 @@ chmod +x "$bin"
 # so without this the binary's confirm prompt would see EOF. Test that /dev/tty
 # is actually openable — it exists as a device node even with no controlling
 # terminal (CI, sandboxes), where opening it fails — and fall back to running
-# without it. In that case the binary is non-interactive, so pass --yes.
+# without it. In a real terminal the dev gets the normal confirm prompt; with no
+# terminal the binary can't prompt, so we auto-confirm with --yes (the dev
+# invoked the installer explicitly; harmless for --help/--dry-run/--revert).
 if { : < /dev/tty; } 2>/dev/null; then
   exec "$bin" "$@" < /dev/tty
 else
-  exec "$bin" "$@"
+  exec "$bin" "$@" --yes
 fi

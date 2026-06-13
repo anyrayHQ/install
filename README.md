@@ -87,6 +87,30 @@ To expose the gateway API over TLS, set in `.env`: `ANYRAY_PUBLIC_DOMAIN`
 Caddy terminates HTTPS on 443 with automatic Let's Encrypt certs and 403s the
 admin surface — the console and `/admin` stay in-network only.
 
+## More ways to deploy
+
+Docker Compose (above) is the default. The repo also ships:
+
+**Kubernetes (Helm)** — the full stack as a self-contained chart (no external chart
+dependencies):
+
+    ./setup.sh --k8s --host <hostname-or-ip>   # emits anyray-secrets.yaml + my-values.yaml
+    kubectl apply -f anyray-secrets.yaml
+    helm install anyray ./helm -f my-values.yaml
+
+See [`helm/README.md`](./helm/README.md).
+
+**Railway** — one-click deploy; Railway auto-generates every secret. The authoritative
+spec is [`railway/railway.template.json`](./railway); see [`railway/README.md`](./railway/README.md).
+
+**Attach mode (keep your existing gateway)** — already running LiteLLM / Kong / Envoy?
+Run only Anyray's optimizer + console and call it as a before/after-request hook, so you
+keep your gateway and still get prompt/tool/param optimization plus content-free traces:
+
+    docker compose -f docker-compose.attach.yml up -d
+
+See [`attach/litellm/README.md`](./attach/litellm/README.md).
+
 ## Install with your AI agent
 
 Paste [AGENT.md](./AGENT.md) into Claude Code / Codex on the machine with your

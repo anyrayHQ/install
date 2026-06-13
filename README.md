@@ -23,13 +23,20 @@ Grab a deployment token (`adt_…`) from [app.anyray.ai](https://app.anyray.ai)
 - Gateway → point AI tools/SDKs at http://<your-host>:8787/v1/...
 - Developers connect with: `npx anyray-connect http://<your-host>:8787`
 
-`--connect` only sends the deployment token to Anyray Cloud and pulls back the
-license public key. Metering reports are content-free rollups; the pseudonym
-salt that masks employee identifiers is generated locally and never leaves the
-machine. Useful extras: `--gateway-url <url>` to override the gateway URL shown
-to developers in the portal, `--control-plane <url>` for non-default control
-planes. Re-run `./setup.sh --connect <token>` any time to reconnect — it only
-rewrites the connect vars, never your secrets.
+`--connect` only sends the deployment token to Anyray Cloud. The control-plane
+host (`app.anyray.ai`) and the Ed25519 lease-verify key are **pinned in the
+gateway image**, so the signed billing kill-switch can't be bypassed by
+re-pointing the URL — nothing about the trust anchor is configured on your box.
+Metering reports are content-free rollups; the pseudonym salt that masks
+employee identifiers is generated locally and never leaves the machine. Re-run
+`./setup.sh --connect <token>` any time to reconnect — it only rewrites the
+connect vars, never your secrets.
+
+Useful extras: `--gateway-url <url>` overrides the gateway URL shown to
+developers in the portal. `--control-plane <url>` points at a non-default
+control plane — this is for **internal/dev gateway builds only**: it sets
+`ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1` and a stock image will still refuse to meter
+against a non-pinned host.
 
 ### Standalone (no Anyray Cloud)
 

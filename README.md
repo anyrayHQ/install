@@ -21,7 +21,30 @@ Grab a deployment token (`adt_…`) from [app.anyray.ai](https://app.anyray.ai)
   `ANYRAY_PROVIDER_KEY_AZURE_OPENAI=…`) followed by `docker compose up -d`.
   Developers never see this key — their tools use a placeholder.
 - Gateway → point AI tools/SDKs at http://<your-host>:8787/v1/...
-- Developers connect with: `npx anyray-connect http://<your-host>:8787`
+- Developers connect with **one line, nothing to install** (see below).
+
+## Developers connect — zero install
+
+A developer points their local AI tools (Claude Code, Codex, …) at the gateway
+with a single line. Nothing to install — no Node, no npm, no global package. The
+installer downloads a standalone `anyray-connect` binary for their OS, verifies
+its checksum, and runs it. Grab the **shareable setup link** (`https://app.anyray.ai/setup/dvl_…`)
+from the portal and hand it to your team:
+
+**macOS / Linux**
+
+    curl -fsSL https://app.anyray.ai/connect.sh | sh -s -- <setup-link>
+
+**Windows (PowerShell)**
+
+    & ([scriptblock]::Create((irm https://app.anyray.ai/connect.ps1))) "<setup-link>"
+
+Flags pass straight through (e.g. `--subscription` for seat/subscription auth —
+the setup link sets this automatically for subscription orgs). A subscription
+org's link turns on pass-through auth with no flag at all.
+
+> Prefer a package manager? `npx anyray-connect <setup-link>` still works (needs
+> Node). The one-liners above need only `curl`/PowerShell.
 
 `--connect` only sends the deployment token to Anyray Cloud. The control-plane
 host (`app.anyray.ai`) and the Ed25519 lease-verify key are **pinned in the

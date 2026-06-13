@@ -148,7 +148,22 @@ EOF
 
     # The URL developers reach the gateway at — reported to the control plane
     # so the portal can show them the connect URL.
-    [ -n "$GATEWAY_URL" ] || GATEWAY_URL="http://${HOST}:8787"
+    if [ -z "$GATEWAY_URL" ]; then
+      GATEWAY_URL="http://${HOST}:8787"
+      # The auto-detected host is often a private/internal address (e.g. an
+      # EC2/VPC 172.16–31.x or 10.x, or localhost). That is fine for devs ON the
+      # same network, but developers off-VPC (remote, laptops) can't reach it —
+      # and it's silently the URL the portal shows them. Flag it so the operator
+      # passes --gateway-url with a reachable host (public DNS / VPN address).
+      case "$HOST" in
+        10.*|192.168.*|127.*|localhost|169.254.* \
+          |172.1[6-9].*|172.2[0-9].*|172.3[0-1].*)
+          echo "⚠ Gateway URL for developers is http://${HOST}:8787 — a private/internal"
+          echo "  address. Devs off this network won't reach it. Re-run with"
+          echo "  --gateway-url http://<reachable-host>:8787 (public DNS or VPN address)"
+          echo "  to set the URL the portal shows them." ;;
+      esac
+    fi
 
     strip_env() { grep -v "^${1}=" .env > .env.tmp || true; mv .env.tmp .env; }
     for k in ANYRAY_METERING_ENABLED ANYRAY_CONTROL_PLANE_URL ANYRAY_DEPLOYMENT_TOKEN \
@@ -158,10 +173,7 @@ EOF
     done
     grep -v '^# Anyray Cloud (--connect)' .env > .env.tmp || true; mv .env.tmp .env
 
-    # Common header + connect vars (no license key — it is pinned in the image;
-    # no ANYRAY_CONTROL_PLANE_URL — the vendor host is pinned + defaulted in the
-    # image, so a production connect needs only the deployment token. It is
-    # written ONLY in the dev-override branch below, where a custom host matters).
+    # Common header + connect vars.
     cat >> .env <<EOF
 # Anyray Cloud (--connect) — re-run ./setup.sh --connect <token> to reconnect.
 ANYRAY_METERING_ENABLED=true
@@ -174,7 +186,27 @@ ANYRAY_METERING_INTERVAL_MS=900000
 ANYRAY_ENTITLEMENT_GRACE_MS=86400000
 EOF
 
-    if [ "$CP_NORM" != "$CANONICAL_CP" ]; then
+    if [ "$CP_NORM" = "$CANONICAL_CP" ]; then
+      # Production connect. Newer gateway images PIN the control-plane host and
+      # the Ed25519 verify key in the image, so they need neither here. But the
+      # published images that customers pull TODAY read both from the
+      # environment and SILENTLY skip metering (no log, no phone-home, no
+      # billing) if either is missing — so we write the canonical host and the
+      # vendor's verify-only key explicitly. This is safe and forward-compatible:
+      #   • The host is the canonical vendor host — a pinned image validates it
+      #     against its allowlist (passes) and a non-canonical host is REFUSED,
+      #     so this never becomes a re-pointable trust knob.
+      #   • The key is the vendor's PUBLIC verify-only key (it cannot sign
+      #     leases). A pinned image ignores it entirely (an env key is honored
+      #     only under ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1, which we do NOT set);
+      #     an older image verifies real vendor leases against it.
+      # Keep this key in sync with PINNED_LICENSE_PUBLIC_KEY in the gateway's
+      # licenseAnchor.ts (same key, distributed two ways).
+      cat >> .env <<EOF
+ANYRAY_CONTROL_PLANE_URL=${CANONICAL_CP}
+ANYRAY_LICENSE_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAOScd41AewtCOmQSkT9N7Jn9V1u+uFykC/Vf8hnfKVPQ=\n-----END PUBLIC KEY-----\n"
+EOF
+    else
       # Custom control plane → dev/internal builds only. Enable the unsafe
       # override and fetch that control plane's verify key into .env (a stock
       # image ignores both; only a dev build honors them).

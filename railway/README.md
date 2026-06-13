@@ -19,7 +19,7 @@ cross-service references), start commands, and volume mount paths.
    (target port 80 — nginx listens there, not on $PORT).
    This is your console URL.
 6. Open the `gateway` service → "Settings" → "Public Networking" → Generate domain.
-   This is your gateway API URL (use this in `npx anyray-connect`).
+   This is your gateway API URL (use this in the developer connect one-liner (see the main README)).
 
 ## Seeding model prices (one-time, after first deploy)
 

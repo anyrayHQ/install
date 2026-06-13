@@ -1,0 +1,79 @@
+name: Release anyray-connect binaries
+
+# Compiles the published `anyray-connect` npm package into standalone,
+# zero-dependency executables (no Node required on the developer's machine) and
+# attaches them to a GitHub Release here. The hosted `connect.sh` / `connect.ps1`
+# installers download these so a developer can connect with a single curl/irm
+# line — nothing to install.
+#
+# Source of truth is the PUBLIC npm package (anyray-connect), so this workflow
+# never needs access to the private monorepo. Run it after publishing a new
+# anyray-connect version to npm.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'anyray-connect npm version to compile (e.g. 0.3.0, or "latest")'
+        required: true
+        default: 'latest'
+
+permissions:
+  contents: write # create the release + upload assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.5'
+
+      - name: Fetch the published package
+        id: pkg
+        env:
+          # Via env (not inline) so the dispatch input can't be shell-injected.
+          VERSION_INPUT: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          # Validate the input shape: a semver or the literal 'latest'.
+          case "$VERSION_INPUT" in
+            latest|[0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "::error::invalid version input: $VERSION_INPUT"; exit 1 ;;
+          esac
+          npm pack "anyray-connect@${VERSION_INPUT}"
+          tar xzf anyray-connect-*.tgz
+          # Resolve the concrete version even when 'latest' was requested.
+          VERSION="$(node -p "require('./package/package.json').version")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          test -f package/dist/index.js
+
+      - name: Compile standalone binaries (Bun)
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # Bun target -> output asset name. Windows gets a .exe.
+          build() {
+            bun build --compile --minify --target="$1" package/dist/index.js --outfile "out/$2"
+          }
+          build bun-darwin-arm64  anyray-connect-darwin-arm64
+          build bun-darwin-x64    anyray-connect-darwin-x64
+          build bun-linux-x64     anyray-connect-linux-x64
+          build bun-linux-arm64   anyray-connect-linux-arm64
+          build bun-windows-x64   anyray-connect-windows-x64.exe
+          # Checksums so the installers can verify integrity before running.
+          ( cd out && sha256sum * > SHA256SUMS )
+          ls -lh out
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="connect-v${VERSION}"
+          # Idempotent: replace an existing release for this version.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" \
+            --title "anyray-connect ${VERSION} (binaries)" \
+            --notes "Standalone \`anyray-connect\` ${VERSION} executables for the zero-install \`connect.sh\` / \`connect.ps1\` installers. No Node required. Built from the public npm package." \
+            out/*

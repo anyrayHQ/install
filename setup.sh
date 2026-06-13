@@ -122,25 +122,20 @@ EOF
   # ── Anyray Cloud connect (--connect) ───────────────────────────────────────
   # (Re)writes only the connect vars below — every other line of .env is kept.
   if [ -n "$CONNECT_TOKEN" ]; then
-    command -v curl >/dev/null 2>&1 || { echo "✗ curl not found — needed for --connect" >&2; exit 1; }
     case "$CONNECT_TOKEN" in
       adt_*) : ;;
       *) echo "⚠ deployment token does not start with adt_ — double-check it against app.anyray.ai" ;;
     esac
 
-    # Fetch the Ed25519 license public key from the control plane. The JSON
-    # string already carries the PEM newlines as literal \n escapes, which is
-    # exactly the single-line form .env needs (the gateway unescapes them).
-    LICENSE_ENDPOINT="${CONTROL_PLANE%/}/v1/license-public-key"
-    LICENSE_JSON="$(curl -fsSL --max-time 15 "$LICENSE_ENDPOINT")" || {
-      echo "✗ could not reach the control plane at ${CONTROL_PLANE} — check the URL / your network, then re-run ./setup.sh --connect <token>" >&2
-      exit 1
-    }
-    LICENSE_PEM="$(printf '%s' "$LICENSE_JSON" | tr -d '\n\r' | sed -n 's/.*"publicKeyPem"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-    case "$LICENSE_PEM" in
-      *"BEGIN PUBLIC KEY"*) : ;;
-      *) echo "✗ unexpected response from ${LICENSE_ENDPOINT} (no publicKeyPem) — is ${CONTROL_PLANE} really the Anyray control plane?" >&2; exit 1 ;;
-    esac
+    # The vendor's Ed25519 verify key and the control-plane host are PINNED in
+    # the gateway image — they are no longer fetched or written here. That is
+    # what makes the billing kill-switch tamper-resistant: re-pointing the URL
+    # at a look-alike control plane gets nowhere, because the stock image won't
+    # phone home to a non-pinned host and verifies leases only against the
+    # baked-in key. So a custom --control-plane only works with an INTERNAL/DEV
+    # gateway build, gated behind the unsafe override below.
+    CANONICAL_CP="https://app.anyray.ai"
+    CP_NORM="${CONTROL_PLANE%/}"
 
     # Pseudonym salt: generated locally and NEVER sent anywhere — it
     # pseudonymizes employee identifiers before metering. Reconnecting keeps
@@ -154,25 +149,50 @@ EOF
 
     strip_env() { grep -v "^${1}=" .env > .env.tmp || true; mv .env.tmp .env; }
     for k in ANYRAY_METERING_ENABLED ANYRAY_CONTROL_PLANE_URL ANYRAY_DEPLOYMENT_TOKEN \
-             ANYRAY_LICENSE_PUBLIC_KEY ANYRAY_PSEUDONYM_SALT ANYRAY_GATEWAY_PUBLIC_URL \
-             ANYRAY_METERING_INTERVAL_MS ANYRAY_ENTITLEMENT_GRACE_MS; do
+             ANYRAY_LICENSE_PUBLIC_KEY ANYRAY_DEV_UNSAFE_CONTROL_PLANE ANYRAY_PSEUDONYM_SALT \
+             ANYRAY_GATEWAY_PUBLIC_URL ANYRAY_METERING_INTERVAL_MS ANYRAY_ENTITLEMENT_GRACE_MS; do
       strip_env "$k"
     done
     grep -v '^# Anyray Cloud (--connect)' .env > .env.tmp || true; mv .env.tmp .env
 
+    # Common header + connect vars (no license key — it is pinned in the image).
     cat >> .env <<EOF
 # Anyray Cloud (--connect) — re-run ./setup.sh --connect <token> to reconnect.
 ANYRAY_METERING_ENABLED=true
 ANYRAY_CONTROL_PLANE_URL=${CONTROL_PLANE}
 ANYRAY_DEPLOYMENT_TOKEN=${CONNECT_TOKEN}
-ANYRAY_LICENSE_PUBLIC_KEY="${LICENSE_PEM}"
 ANYRAY_PSEUDONYM_SALT=${PSEUDONYM_SALT}
 ANYRAY_GATEWAY_PUBLIC_URL=${GATEWAY_URL}
 # Explicit values: docker-compose passes unset optional vars as empty strings,
 # which gateways before v1.5.1 parse as 0 (metering every tick / zero grace).
 ANYRAY_METERING_INTERVAL_MS=900000
-ANYRAY_ENTITLEMENT_GRACE_MS=259200000
+ANYRAY_ENTITLEMENT_GRACE_MS=86400000
 EOF
+
+    if [ "$CP_NORM" != "$CANONICAL_CP" ]; then
+      # Custom control plane → dev/internal builds only. Enable the unsafe
+      # override and fetch that control plane's verify key into .env (a stock
+      # image ignores both; only a dev build honors them).
+      echo "⚠ --control-plane ${CONTROL_PLANE} is not the Anyray control plane (${CANONICAL_CP})."
+      echo "  A stock gateway image pins the vendor host + key and will REFUSE to meter against it."
+      echo "  Enabling ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1 — honored ONLY by an internal/dev gateway build."
+      command -v curl >/dev/null 2>&1 || { echo "✗ curl not found — needed to fetch the dev control plane's verify key" >&2; exit 1; }
+      LICENSE_ENDPOINT="${CP_NORM}/v1/license-public-key"
+      LICENSE_JSON="$(curl -fsSL --max-time 15 "$LICENSE_ENDPOINT")" || {
+        echo "✗ could not reach the control plane at ${CONTROL_PLANE} — check the URL / your network, then re-run ./setup.sh --connect <token> --control-plane <url>" >&2
+        exit 1
+      }
+      LICENSE_PEM="$(printf '%s' "$LICENSE_JSON" | tr -d '\n\r' | sed -n 's/.*"publicKeyPem"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+      case "$LICENSE_PEM" in
+        *"BEGIN PUBLIC KEY"*) : ;;
+        *) echo "✗ unexpected response from ${LICENSE_ENDPOINT} (no publicKeyPem) — is ${CONTROL_PLANE} really an Anyray control plane?" >&2; exit 1 ;;
+      esac
+      cat >> .env <<EOF
+# Dev/staging ONLY — overrides the pinned vendor key + host. Never set in prod.
+ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1
+ANYRAY_LICENSE_PUBLIC_KEY="${LICENSE_PEM}"
+EOF
+    fi
     chmod 600 .env
 
     echo "✓ Connected to Anyray Cloud → .env (metering on; pseudonym salt stays local)"

@@ -53,15 +53,19 @@ services:
       ANYRAY_MAX_BODY_BYTES: ${ANYRAY_MAX_BODY_BYTES:-}
       ANYRAY_TRUST_PROXY: ${ANYRAY_TRUST_PROXY:-}
       ANYRAY_CUSTOM_HOST_ALLOWLIST: ${ANYRAY_CUSTOM_HOST_ALLOWLIST:-}
-      # Anyray Cloud metering (opt-in; content-free rollups only).
+      # Anyray Cloud metering (opt-in; content-free rollups only). The vendor
+      # verify key and the control-plane host are PINNED in the gateway image,
+      # so there is no license key to configure here.
       ANYRAY_METERING_ENABLED: ${ANYRAY_METERING_ENABLED:-}
       ANYRAY_CONTROL_PLANE_URL: ${ANYRAY_CONTROL_PLANE_URL:-}
       ANYRAY_DEPLOYMENT_TOKEN: ${ANYRAY_DEPLOYMENT_TOKEN:-}
-      ANYRAY_LICENSE_PUBLIC_KEY: ${ANYRAY_LICENSE_PUBLIC_KEY:-}
       ANYRAY_PSEUDONYM_SALT: ${ANYRAY_PSEUDONYM_SALT:-}
       ANYRAY_GATEWAY_PUBLIC_URL: ${ANYRAY_GATEWAY_PUBLIC_URL:-}
       ANYRAY_METERING_INTERVAL_MS: ${ANYRAY_METERING_INTERVAL_MS:-}
       ANYRAY_ENTITLEMENT_GRACE_MS: ${ANYRAY_ENTITLEMENT_GRACE_MS:-}
+      # Dev/staging ONLY — override the pinned key + host for an internal build.
+      ANYRAY_DEV_UNSAFE_CONTROL_PLANE: ${ANYRAY_DEV_UNSAFE_CONTROL_PLANE:-}
+      ANYRAY_LICENSE_PUBLIC_KEY: ${ANYRAY_LICENSE_PUBLIC_KEY:-}
     volumes:
       - anyray_gateway_data:/data
     healthcheck:

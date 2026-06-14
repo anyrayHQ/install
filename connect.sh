@@ -33,10 +33,10 @@ esac
 ASSET="anyray-connect-${OS}-${ARCH}"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/anyray-connect.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
-bin="${tmp}/anyray-connect"
+dl="${tmp}/anyray-connect"
 
 echo "anyray-connect: downloading ${ASSET}…" >&2
-curl -fSL --proto '=https' "${BASE}/${ASSET}" -o "$bin" \
+curl -fSL --proto '=https' "${BASE}/${ASSET}" -o "$dl" \
   || err "download failed (${BASE}/${ASSET}) — check your connection or use: npx anyray-connect <url>"
 
 # Verify the checksum from the same release (best-effort: skip only if absent).
@@ -44,9 +44,9 @@ if curl -fsSL --proto '=https' "${BASE}/SHA256SUMS" -o "${tmp}/SHA256SUMS" 2>/de
   want="$(awk -v a="$ASSET" '$2==a || $2=="*"a {print $1}' "${tmp}/SHA256SUMS" | head -n1)"
   if [ -n "$want" ]; then
     if command -v sha256sum >/dev/null 2>&1; then
-      got="$(sha256sum "$bin" | awk '{print $1}')"
+      got="$(sha256sum "$dl" | awk '{print $1}')"
     elif command -v shasum >/dev/null 2>&1; then
-      got="$(shasum -a 256 "$bin" | awk '{print $1}')"
+      got="$(shasum -a 256 "$dl" | awk '{print $1}')"
     else
       got=""
     fi
@@ -54,6 +54,15 @@ if curl -fsSL --proto '=https' "${BASE}/SHA256SUMS" -o "${tmp}/SHA256SUMS" 2>/de
   fi
 fi
 
+# Install to a PERSISTENT location, then run from there. anyray-connect installs
+# a Claude Code PostToolUse hook that references this binary by absolute path on
+# every tool call — so it must survive after the OS reaps /tmp. Running straight
+# from the mktemp dir would leave that hook pointing at a deleted file. The
+# verified download sits in $tmp; move it into place.
+INSTALL_DIR="${ANYRAY_HOME:-$HOME/.anyray}/bin"
+bin="${INSTALL_DIR}/anyray-connect"
+mkdir -p "$INSTALL_DIR" || err "could not create ${INSTALL_DIR}"
+mv -f "$dl" "$bin" || err "could not install anyray-connect to ${bin}"
 chmod +x "$bin"
 
 # Reconnect stdin to the terminal: this script arrived over a pipe (curl | sh),

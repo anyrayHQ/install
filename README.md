@@ -120,6 +120,13 @@ infra access and it will drive this install for you.
 
     git pull && docker compose pull && docker compose up -d
 
+New optimizer **default profiles** (e.g. the cache-aware profile for subscription
+seats) ship inside the optimizer image but seed the config volume only on first
+run, so an existing deployment keeps its saved optimizer config after an upgrade.
+To adopt new defaults on an existing box, update the optimizer config from the
+console (or the admin `PUT /admin/optimizer/settings` API) — your secrets and
+other `.env` values are untouched.
+
 ## Repair / status
 
     docker compose ps          # service health

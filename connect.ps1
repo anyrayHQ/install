@@ -28,11 +28,11 @@ if ($connectArgs.Count -eq 0 -and $env:ANYRAY_CONNECT) {
 
 $tmp = Join-Path $env:TEMP ("anyray-connect-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-$bin = Join-Path $tmp 'anyray-connect.exe'
+$dl = Join-Path $tmp 'anyray-connect.exe'
 
 try {
   Write-Host "anyray-connect: downloading $asset..." -ForegroundColor Cyan
-  Invoke-WebRequest -Uri "$base/$asset" -OutFile $bin -UseBasicParsing
+  Invoke-WebRequest -Uri "$base/$asset" -OutFile $dl -UseBasicParsing
 
   # Verify the checksum from the same release (best-effort). Only the SHA256SUMS
   # download is in a catch-all (any error type, incl. pwsh's HttpResponseException
@@ -52,10 +52,18 @@ try {
       if ($p.Length -ge 2 -and ($p[1].TrimStart('*') -eq $asset)) { $p[0] }
     } | Select-Object -First 1)
     if ($want) {
-      $got = (Get-FileHash -Algorithm SHA256 -Path $bin).Hash.ToLower()
+      $got = (Get-FileHash -Algorithm SHA256 -Path $dl).Hash.ToLower()
       if ($got -ne $want.ToLower()) { throw "checksum mismatch for $asset - refusing to run" }
     }
   }
+
+  # Install to a PERSISTENT location, then run from there. anyray-connect installs
+  # a Claude Code PostToolUse hook that references this exe by absolute path on
+  # every tool call, so it must survive after $tmp is cleaned in `finally`.
+  $installDir = if ($env:ANYRAY_HOME) { Join-Path $env:ANYRAY_HOME 'bin' } else { Join-Path $env:USERPROFILE '.anyray\bin' }
+  New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+  $bin = Join-Path $installDir 'anyray-connect.exe'
+  Move-Item -Force -Path $dl -Destination $bin
 
   & $bin @connectArgs
   exit $LASTEXITCODE

@@ -22,6 +22,17 @@ services:
       ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
       ANYRAY_OPTIMIZER_CONFIG: /data/optimizer.config.json
       ANYRAY_OPTIMIZER_AUDIT_FILE: /data/optimizer-settings-audit.log
+      # BYO trace persistence (opt-in): the optimizer's /v1/record writes the same
+      # Langfuse traces the Anyray gateway writes in-process. Set ONLY in attach/BYO
+      # mode (no Anyray gateway in the path) — never on the optimizer in an
+      # Anyray-gateway deployment, or every call would be recorded twice. Unset keys
+      # leave the endpoint disabled (404); a missing content key degrades to 'off'.
+      ANYRAY_OBSERVABILITY_BASEURL: ${ANYRAY_OBSERVABILITY_BASEURL:-http://web:3000}
+      ANYRAY_OBSERVABILITY_PUBLIC_KEY: ${ANYRAY_OBSERVABILITY_PUBLIC_KEY:-}
+      ANYRAY_OBSERVABILITY_SECRET_KEY: ${ANYRAY_OBSERVABILITY_SECRET_KEY:-}
+      ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:-}
+      ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
+      ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
     volumes:
       - anyray_attach_optimizer_data:/data
     healthcheck:

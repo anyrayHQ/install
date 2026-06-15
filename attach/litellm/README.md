@@ -6,7 +6,9 @@ Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
 
 - Prompt compression, tool pruning, and param tuning before each request.
 - Response (output) optimization after each request.
-- Content-free traces (metadata only) in the Anyray console — no prompt/response content.
+- Per-call traces in the Anyray console — spend, model/provider, latency, and the
+  optimizer's before/after — via the optimizer's `/v1/record`. Prompt/response content
+  is gated server-side by the optimizer's content mode (default: encrypted at rest).
 
 ## Files
 
@@ -31,8 +33,6 @@ Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
    litellm_settings:
      callbacks:
        - anyray_optimizer.proxy_handler_instance
-     success_callback:
-       - langfuse
    ```
 
 4. Set these env vars in your LiteLLM process (or add to its Docker environment):
@@ -40,16 +40,12 @@ Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
    ```
    ANYRAY_OPTIMIZER_URL=http://<anyray-host>:8088
    ANYRAY_OPTIMIZER_TOKEN=<ANYRAY_OPTIMIZER_TOKEN from .env>
-   LANGFUSE_PUBLIC_KEY=<ANYRAY_OBSERVABILITY_PUBLIC_KEY from .env>
-   LANGFUSE_SECRET_KEY=<ANYRAY_OBSERVABILITY_SECRET_KEY from .env>
-   LANGFUSE_HOST=http://<anyray-host>:3000
-   LANGFUSE_TRACING_ENVIRONMENT=production
-   TURN_OFF_MESSAGE_LOGGING=true
-   LANGFUSE_REDACT_ALL_INPUTS=true
-   LANGFUSE_REDACT_ALL_OUTPUTS=true
    ```
 
-   **The `TURN_OFF_MESSAGE_LOGGING`, `LANGFUSE_REDACT_ALL_INPUTS`, and `LANGFUSE_REDACT_ALL_OUTPUTS` vars are required.** Without them, LiteLLM sends prompt/response content to Langfuse, violating the Anyray privacy model.
+   That's all LiteLLM needs. Traces are written by the **optimizer**, not LiteLLM
+   (see [Traces & spend](#traces--spend)), so no `LANGFUSE_*` vars belong here — and
+   you should **not** add a native `success_callback: langfuse`, which would record
+   every call twice.
 
 5. Open the console at http://<anyray-host>:3000, sign in with `ANYRAY_ADMIN_TOKEN`.
 
@@ -57,7 +53,7 @@ Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
 
 Working in attach mode:
 
-- Traces page — every LiteLLM request appears as a trace (metadata only).
+- Traces page — every LiteLLM request appears as a trace (spend, model/provider, latency, optimizer before/after; prompt/response content per the optimizer's content mode).
 - Sessions page — requests grouped by LiteLLM session.
 - Dashboard — daily token/cost charts.
 - Optimizer page — toggle strategies, tune parameters.
@@ -71,11 +67,41 @@ Not available (gateway-dependent):
 - Playground — requires the Anyray gateway.
 These pages show "Unable to load: request failed" — expected in attach mode.
 
-## Privacy guarantee
+## Traces & spend
 
-`anyray_optimizer.py` never logs or persists request/response content. The optimizer
-holds content in memory for the duration of the call only. The trace backend
-receives metadata only when `TURN_OFF_MESSAGE_LOGGING=true` is set.
+Traces are produced by the **optimizer**, not LiteLLM. The adapter's log hooks POST
+every call — streaming, embeddings, and errors included — to the optimizer's
+`/v1/record`, which writes the same Langfuse trace the Anyray gateway writes
+in-process. So BYO traffic shows the same spend, model/provider, cost, and the
+optimizer's before/after.
+
+The attach stack enables this for you: `docker-compose.attach.yml` sets
+`ANYRAY_OBSERVABILITY_*` on the optimizer service and `setup.sh` seeds the keys into
+`.env`. The optimizer then ships traces to the in-network Langfuse at `web:3000` — your
+LiteLLM proxy never needs Langfuse access.
+
+- **Opt-out:** leave `ANYRAY_OBSERVABILITY_PUBLIC_KEY` / `ANYRAY_OBSERVABILITY_SECRET_KEY`
+  empty in `.env` and `/v1/record` returns `404` — recording is disabled and the adapter
+  fails open silently.
+- **Never set these on the optimizer when an Anyray gateway is in the path** — the gateway
+  already records in-process, so both writing would record every call twice. This is a
+  full-gateway concern only; attach mode has no gateway.
+
+## Privacy
+
+Prompt/response content is gated **server-side by the optimizer**, controlled by
+`ANYRAY_CONTENT_MODE` on the optimizer service (default `encrypted`):
+
+| Mode | Stored content |
+|------|----------------|
+| `off`       | Metadata only — no prompt/response content persisted. |
+| `encrypted` | Content persisted **AES-256-GCM encrypted at rest** (needs `ANYRAY_CONTENT_KEY`; degrades to `off` if unset). **Default.** |
+| `plaintext` | Content persisted in the clear — deploy-gated, only when `ANYRAY_ALLOW_PLAINTEXT=true`. |
+
+The adapter sends content raw to the optimizer over the `/v1/record` call (loopback-bound
+and `ANYRAY_OPTIMIZER_TOKEN`-authed by default); the optimizer applies the mode before
+anything is written to the trace backend. For metadata-only traces, set
+`ANYRAY_CONTENT_MODE=off` in `.env` and restart the optimizer.
 
 ## Caching
 

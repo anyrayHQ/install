@@ -2,9 +2,8 @@
 # Merge into your existing config.yaml or use as a standalone example.
 #
 # Required env vars (set in your .env or shell, then: docker compose -f docker-compose.attach.yml up -d):
-#   ANYRAY_OPTIMIZER_URL          e.g. http://optimizer:8088
+#   ANYRAY_OPTIMIZER_URL          e.g. http://<anyray-host>:8088
 #   ANYRAY_OPTIMIZER_TOKEN        from ./setup.sh → .env
-#   Langfuse env vars: see the comment block at the bottom of this file.
 
 model_list:
   - model_name: gpt-4o
@@ -14,29 +13,16 @@ model_list:
   # Add more models as needed.
 
 litellm_settings:
-  # Anyray optimizer hooks: transform the request pre-call and the response
-  # post-call. Reference the module-level instance (proxy_handler_instance),
-  # not the class — LiteLLM's get_instance_fn returns the named attribute
-  # as-is and appends it to litellm.callbacks; a class would be called
-  # without instantiation.
+  # Anyray optimizer hooks: transform the request pre-call, transform the
+  # response post-call, and record each call as a trace. Reference the
+  # module-level instance (proxy_handler_instance), not the class — LiteLLM's
+  # get_instance_fn returns the named attribute as-is and appends it to
+  # litellm.callbacks; a class would be called without instantiation.
   callbacks:
     - anyray_optimizer.proxy_handler_instance
 
-  # Trace emission via LiteLLM's native Langfuse integration.
-  # CRITICAL: turn_off_message_logging=true keeps prompt/response content out of
-  # the trace backend — only metadata (tokens, cost, model, latency) is stored.
-  success_callback:
-    - langfuse
-
-# Langfuse env vars tell LiteLLM where to send traces.
-# Set these in your shell / .env; LiteLLM reads LANGFUSE_* automatically.
-#
-#   LANGFUSE_PUBLIC_KEY=<ANYRAY_OBSERVABILITY_PUBLIC_KEY from .env>
-#   LANGFUSE_SECRET_KEY=<ANYRAY_OBSERVABILITY_SECRET_KEY from .env>
-#   LANGFUSE_HOST=http://<anyray-host>:3000   # LiteLLM runs outside the attach network
-#   LANGFUSE_TRACING_ENVIRONMENT=production
-#   TURN_OFF_MESSAGE_LOGGING=true
-#
-# The TURN_OFF_MESSAGE_LOGGING env var is the LiteLLM-wide toggle; the
-# Langfuse callback also honours LANGFUSE_REDACT_ALL_INPUTS=true and
-# LANGFUSE_REDACT_ALL_OUTPUTS=true for belt-and-suspenders redaction.
+# Traces/spend are emitted by the OPTIMIZER, not LiteLLM: the adapter's log hooks
+# POST each call to the optimizer's /v1/record, which writes the Langfuse trace.
+# The attach stack already wires this (ANYRAY_OBSERVABILITY_* on the optimizer
+# service in docker-compose.attach.yml), so nothing Langfuse-related is needed
+# here. Do NOT add a native `success_callback: langfuse` — it would record twice.

@@ -279,10 +279,13 @@ class AnyrayOptimizer(CustomLogger):
             "optimizationLatencyMs": optimize_latency_ms,
             "attribution": self._attribution_from_kwargs(kwargs),
             "decisions": decisions,
-            # RAW content — the optimizer gates/encrypts it per content mode. Embedding
-            # outputs (vectors) are huge and never crossed the wire before, so skip them.
+            # RAW content — the optimizer gates/encrypts it per content mode. Input shape
+            # varies by call type: messages (chat), prompt (text), input (embeddings).
+            # Embedding outputs (vectors) are huge and never crossed the wire, so skip them.
             "content": {
-                "input": kwargs.get("messages"),
+                "input": kwargs.get("messages")
+                or kwargs.get("prompt")
+                or kwargs.get("input"),
                 "output": None if is_embedding else self._output_of(response_for_record),
             },
         }

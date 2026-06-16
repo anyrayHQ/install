@@ -307,7 +307,7 @@ else
 host: "${HOST}"
 
 image:
-  tag: "v1.9.0"
+  tag: "v1.9.1"
 EOF
   echo "✓ Helm values stub → my-values.yaml"
 fi

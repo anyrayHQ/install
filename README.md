@@ -87,6 +87,15 @@ To expose the gateway API over TLS, set in `.env`: `ANYRAY_PUBLIC_DOMAIN`
 Caddy terminates HTTPS on 443 with automatic Let's Encrypt certs and 403s the
 admin surface — the console and `/admin` stay in-network only.
 
+This HTTPS URL is what editor BYOK ("bring your own key") endpoints point at.
+For **GitHub Copilot Chat** (VS Code), `anyray-connect --tools copilot` prints the
+exact *Manage Language Models → Custom Endpoint* steps: endpoint
+`https://<ANYRAY_PUBLIC_DOMAIN>/v1/chat/completions`, a per-user key as the API
+key (issued via an invite, since public exposure sets
+`ANYRAY_REQUIRE_CLIENT_KEYS=true`), and a `requestHeaders` entry carrying
+`x-anyray-metadata` for spend attribution. Copilot Chat routes through Anyray;
+inline completions still go to GitHub. **Cursor** chat works the same way.
+
 ## More ways to deploy
 
 Docker Compose (above) is the default. The repo also ships:

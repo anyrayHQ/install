@@ -40,7 +40,10 @@
         "ANYRAY_CLIENT_KEYS_AUDIT_FILE": "/data/client-keys-audit.log",
         "ANYRAY_USER_CAPS_FILE": "/data/user-caps.config.json",
         "ANYRAY_USER_CAPS_AUDIT_FILE": "/data/user-caps-audit.log",
-        "ANYRAY_ENTITLEMENT_FILE": "/data/entitlement.lease.json"
+        "ANYRAY_ENTITLEMENT_FILE": "/data/entitlement.lease.json",
+        "ANYRAY_UPSTREAM_URL": "",
+        "ANYRAY_CUSTOM_HOST_ALLOWLIST": "",
+        "TRUSTED_CUSTOM_HOSTS": ""
       }
     },
     {

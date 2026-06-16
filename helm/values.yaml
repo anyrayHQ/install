@@ -28,6 +28,14 @@ gateway:
   allowPlaintext: "false"
   optimizerTimeoutMs: "800"
   optimizerVisionTimeoutMs: "10000"
+  # On-top mode: point Anyray at an existing OpenAI-compatible gateway (LiteLLM,
+  # OpenRouter, …) so clients send NO per-request x-anyray-config header — the
+  # gateway seeds its default routing config from this URL on first boot. For an
+  # internal/loopback upstream, also set customHostAllowlist (hostname, no port)
+  # and trustedCustomHosts so the host clears the SSRF proxy guard.
+  upstreamUrl: ""
+  customHostAllowlist: ""
+  trustedCustomHosts: ""
   # Extra env vars (provider-key fallbacks, rate limits, Anyray Cloud metering…)
   # in plain k8s env syntax: [{name: ANYRAY_RATE_LIMIT_RPM, value: "600"}]
   extraEnv: []

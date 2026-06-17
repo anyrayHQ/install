@@ -34,11 +34,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ "$K8S" -eq 1 ] && [ -n "$CONNECT_TOKEN" ]; then
-  echo "✗ --connect supports the docker compose flow only (set the connect vars in anyray-secrets.yaml by hand for Helm)" >&2
-  exit 1
-fi
-
 if [ "$K8S" -eq 1 ] && [ -n "$UPSTREAM_URL" ]; then
   echo "✗ --upstream supports the docker compose flow only (set upstream.url in my-values.yaml for Helm)" >&2
   exit 1
@@ -320,8 +315,25 @@ EOF
 fi
 
 # ── Kubernetes / Helm mode (--k8s) ───────────────────────────────────────────
+# --connect <token> works here too: the deployment token + a locally-generated
+# pseudonym salt are folded into anyray-secrets.yaml, and gateway.metering.enabled
+# is turned on in my-values.yaml. The control-plane host and the vendor verify key
+# stay PINNED in the gateway image — never written here.
+if [ -n "$CONNECT_TOKEN" ]; then
+  case "$CONNECT_TOKEN" in
+    adt_*) : ;;
+    *) echo "⚠ deployment token does not start with adt_ — double-check it against app.anyray.ai" ;;
+  esac
+fi
+
 if [ -f anyray-secrets.yaml ]; then
   echo "✓ anyray-secrets.yaml already exists — leaving it untouched (delete it to regenerate)"
+  if [ -n "$CONNECT_TOKEN" ]; then
+    echo "  To connect this existing Secret, add these two keys under data: in"
+    echo "  anyray-secrets.yaml and set gateway.metering.enabled: true in my-values.yaml:"
+    echo "    ANYRAY_DEPLOYMENT_TOKEN: $(b64enc "$CONNECT_TOKEN")"
+    echo "    ANYRAY_PSEUDONYM_SALT: $(b64enc "$(hex 32)")"
+  fi
   exit 0
 fi
 
@@ -361,20 +373,41 @@ data:
   REDIS_AUTH: $(b64enc "$REDIS_PW")
   MINIO_ROOT_PASSWORD: $(b64enc "$MINIO_PW")
 EOF
+
+# Anyray Cloud connect (--connect): fold the deployment token + a locally-generated
+# pseudonym salt into the Secret. The salt NEVER leaves your cluster — it
+# pseudonymizes employee identifiers before the content-free usage rollup. The
+# gateway reads these only when gateway.metering.enabled is set (below).
+if [ -n "$CONNECT_TOKEN" ]; then
+  PSEUDONYM_SALT="$(hex 32)"
+  cat >> anyray-secrets.yaml <<EOF
+  ANYRAY_DEPLOYMENT_TOKEN: $(b64enc "$CONNECT_TOKEN")
+  ANYRAY_PSEUDONYM_SALT: $(b64enc "$PSEUDONYM_SALT")
+EOF
+fi
 chmod 600 anyray-secrets.yaml
 
 echo "✓ Secrets generated → anyray-secrets.yaml"
+[ -n "$CONNECT_TOKEN" ] && echo "  ✓ Anyray Cloud connect vars folded in (deployment token + pseudonym salt)"
 
 if [ -f my-values.yaml ]; then
   echo "✓ my-values.yaml already exists — leaving it untouched"
+  [ -n "$CONNECT_TOKEN" ] && echo "  To meter, set gateway.metering.enabled: true in my-values.yaml"
 else
-  cat > my-values.yaml <<EOF
-# Anyray Helm values — safe to commit (no secrets here).
-host: "${HOST}"
-
-image:
-  tag: "v1.10.2"
-EOF
+  {
+    echo "# Anyray Helm values — safe to commit (no secrets here)."
+    echo "host: \"${HOST}\""
+    echo ""
+    echo "image:"
+    echo "  tag: \"v1.10.2\""
+    if [ -n "$CONNECT_TOKEN" ]; then
+      echo ""
+      echo "# Anyray Cloud metering — deployment token + pseudonym salt live in anyray-secrets.yaml."
+      echo "gateway:"
+      echo "  metering:"
+      echo "    enabled: true"
+    fi
+  } > my-values.yaml
   echo "✓ Helm values stub → my-values.yaml"
 fi
 echo ""
@@ -385,3 +418,4 @@ echo ""
 echo "  Admin key: ${ADMIN_TOKEN}   (base64-encoded in anyray-secrets.yaml)"
 echo "  Console:   http://${HOST}:3000  (after pods are ready)"
 echo "  Gateway:   http://${HOST}:8787"
+[ -n "$CONNECT_TOKEN" ] && echo "  Then:      this deployment appears as Connected at ${CONTROL_PLANE} within a minute"

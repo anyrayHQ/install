@@ -68,13 +68,19 @@ proxy:
 # Observability backend web (trace API + UI engine)
 web:
   replicas: 1
+  # The Langfuse console (Next.js) sizes its V8 heap from the container memory
+  # limit; at the previous 1Gi it capped old-space near ~512MB and OOM'd during
+  # init, crashlooping and timing out the post-install model-seeder hook. Pin the
+  # heap explicitly (deterministic regardless of cgroup detection) and give the
+  # container 2Gi of headroom. Set nodeOptions to "" to let Node auto-size.
+  nodeOptions: "--max-old-space-size=1536"
   resources:
     requests:
       cpu: "200m"
-      memory: "512Mi"
+      memory: "1Gi"
     limits:
       cpu: "1000m"
-      memory: "1Gi"
+      memory: "2Gi"
 
 # Observability backend worker
 worker:

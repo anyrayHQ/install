@@ -23,6 +23,26 @@ Grab a deployment token (`adt_…`) from [app.anyray.ai](https://app.anyray.ai)
 - Gateway → point AI tools/SDKs at http://<your-host>:8787/v1/...
 - Developers connect with **one line, nothing to install** (see below).
 
+## Point Anyray at an existing gateway (on-top mode)
+
+Already running LiteLLM / OpenRouter / your own OpenAI-compatible gateway? Run
+Anyray in front of it with `--upstream <url>`:
+
+    ./setup.sh --connect adt_XXXX --upstream http://host.docker.internal:4000
+    docker compose up -d
+
+On first boot the gateway seeds its default route to that upstream, so your
+tools just point at the Anyray gateway (`http://<host>:8787/v1`) and send normal
+requests — **no `x-anyray-config` header on each request**. `--upstream` also
+clears the proxy guard for the upstream host (allowlist + trusted hosts)
+automatically.
+
+> Inside Docker, `localhost` is the gateway container itself — use
+> `host.docker.internal:4000` (or the host's LAN IP) for an upstream running on
+> the host. To change the upstream later, re-run `./setup.sh --upstream <url>`,
+> or edit the route in the console (Routing). On Helm set `gateway.upstreamUrl`
+> (plus `customHostAllowlist` / `trustedCustomHosts` for an internal upstream).
+
 ## Developers connect — zero install
 
 A developer points their local AI tools (Claude Code, Codex, …) at the gateway

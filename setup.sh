@@ -4,12 +4,16 @@
 # With --k8s: writes anyray-secrets.yaml + my-values.yaml for Helm.
 # With --connect <adt_token>: also links this deployment to Anyray Cloud
 #   (token from https://app.anyray.ai). Safe to re-run to reconnect.
+# With --upstream <url>: point Anyray at an existing OpenAI-compatible gateway
+#   (LiteLLM, OpenRouter, …) so clients send plain requests with NO per-request
+#   x-anyray-config header. Safe to re-run to change the upstream.
 # Idempotent: never overwrites existing secrets; --connect (re)writes only the
-# Anyray Cloud connect vars. Flags: --host <h> --k8s --connect <adt_token>
-# --gateway-url <url>. (--control-plane <url> is DEV/INTERNAL ONLY: the vendor
-# host is pinned + defaulted in the gateway image, so a normal connect never
-# needs it; passing it only does anything for an internal/dev gateway build via
-# the unsafe override below.)
+# Anyray Cloud connect vars and --upstream only the upstream vars. Flags: --host
+# <h> --k8s --connect <adt_token> --gateway-url <url> --upstream <url>.
+# (--control-plane <url> is DEV/INTERNAL ONLY: the vendor host is pinned +
+# defaulted in the gateway image, so a normal connect never needs it; passing it
+# only does anything for an internal/dev gateway build via the unsafe override
+# below.)
 set -euo pipefail
 
 HOST=""
@@ -17,6 +21,7 @@ K8S=0
 CONNECT_TOKEN=""
 CONTROL_PLANE="https://app.anyray.ai"
 GATEWAY_URL=""
+UPSTREAM_URL=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --host) HOST="${2:?--host needs a value}"; shift 2 ;;
@@ -24,12 +29,18 @@ while [ $# -gt 0 ]; do
     --connect)       CONNECT_TOKEN="${2:?--connect needs a deployment token (adt_…)}"; shift 2 ;;
     --control-plane) CONTROL_PLANE="${2:?--control-plane needs a URL}"; shift 2 ;;
     --gateway-url)   GATEWAY_URL="${2:?--gateway-url needs a URL}"; shift 2 ;;
-    *) echo "✗ unknown flag: $1 (supported: --host <hostname-or-ip> --k8s --connect <adt_token> --control-plane <url> --gateway-url <url>)" >&2; exit 1 ;;
+    --upstream)      UPSTREAM_URL="${2:?--upstream needs a URL (e.g. http://host.docker.internal:4000)}"; shift 2 ;;
+    *) echo "✗ unknown flag: $1 (supported: --host <hostname-or-ip> --k8s --connect <adt_token> --control-plane <url> --gateway-url <url> --upstream <url>)" >&2; exit 1 ;;
   esac
 done
 
 if [ "$K8S" -eq 1 ] && [ -n "$CONNECT_TOKEN" ]; then
   echo "✗ --connect supports the docker compose flow only (set the connect vars in anyray-secrets.yaml by hand for Helm)" >&2
+  exit 1
+fi
+
+if [ "$K8S" -eq 1 ] && [ -n "$UPSTREAM_URL" ]; then
+  echo "✗ --upstream supports the docker compose flow only (set upstream.url in my-values.yaml for Helm)" >&2
   exit 1
 fi
 
@@ -57,7 +68,7 @@ if [ "$K8S" -eq 0 ]; then
   if [ -f .env ]; then
     echo "✓ .env already exists — leaving it untouched (delete it to regenerate)"
     grep '^# Console:' .env | sed 's/^# //' || true
-    [ -n "$CONNECT_TOKEN" ] || exit 0
+    [ -n "$CONNECT_TOKEN" ] || [ -n "$UPSTREAM_URL" ] || exit 0
   else
     if [ -z "${DOCKER_HOST:-}" ] && command -v lsof >/dev/null 2>&1; then
       for p in 3000 8787; do
@@ -249,6 +260,61 @@ EOF
     echo "  Next:      docker compose up -d"
     echo "  Then:      your deployment will appear as Connected at ${CONTROL_PLANE} within a minute"
     echo "  Gateway:   ${GATEWAY_URL}   (shown to developers in the portal)"
+  fi
+
+  # ── Upstream gateway (--upstream) ──────────────────────────────────────────
+  # Point Anyray at an existing OpenAI-compatible gateway so clients send plain
+  # requests with no x-anyray-config header: the gateway seeds its default
+  # routing config from ANYRAY_UPSTREAM_URL on first boot, and the allowlist /
+  # trusted-hosts vars clear the SSRF proxy guard for that host. (Re)writes only
+  # these three vars — every other line of .env is kept.
+  if [ -n "$UPSTREAM_URL" ]; then
+    case "$UPSTREAM_URL" in
+      http://*|https://*) : ;;
+      *) echo "✗ --upstream must be a full URL, e.g. http://host.docker.internal:4000" >&2; exit 1 ;;
+    esac
+
+    # Hostname only — no scheme, userinfo, port, or path. The gateway matches the
+    # allowlist on URL hostname, so a host:port entry would never match.
+    up_rest="${UPSTREAM_URL#*://}"
+    up_rest="${up_rest%%/*}"      # strip /path
+    up_rest="${up_rest##*@}"      # strip user:pass@
+    UP_HOST="${up_rest%%:*}"      # strip :port
+    [ -n "$UP_HOST" ] || { echo "✗ could not parse a hostname from --upstream ${UPSTREAM_URL}" >&2; exit 1; }
+
+    is_internal_host() {
+      case "$1" in
+        localhost|127.*|::1|host.docker.internal|10.*|192.168.* \
+          |172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|*.internal|*.local|*.corp) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+
+    for k in ANYRAY_UPSTREAM_URL ANYRAY_CUSTOM_HOST_ALLOWLIST TRUSTED_CUSTOM_HOSTS; do
+      grep -v "^${k}=" .env > .env.tmp 2>/dev/null || true; mv .env.tmp .env
+    done
+    grep -v '^# Anyray upstream (--upstream)' .env > .env.tmp || true; mv .env.tmp .env
+
+    {
+      echo "# Anyray upstream (--upstream) — re-run ./setup.sh --upstream <url> to change."
+      echo "ANYRAY_UPSTREAM_URL=${UPSTREAM_URL}"
+      echo "ANYRAY_CUSTOM_HOST_ALLOWLIST=${UP_HOST}"
+      if is_internal_host "$UP_HOST"; then
+        # Gateway defaults to these when TRUSTED_CUSTOM_HOSTS is unset; setting it
+        # replaces that set, so re-list the defaults and add the upstream host.
+        trusted="localhost,127.0.0.1,::1,host.docker.internal"
+        case ",${trusted}," in
+          *",${UP_HOST},"*) : ;;
+          *) trusted="${trusted},${UP_HOST}" ;;
+        esac
+        echo "TRUSTED_CUSTOM_HOSTS=${trusted}"
+      fi
+    } >> .env
+    chmod 600 .env
+
+    echo "✓ Upstream set → ${UPSTREAM_URL}  (clients need no x-anyray-config header)"
+    is_internal_host "$UP_HOST" && echo "  Proxy guard cleared for internal host ${UP_HOST}"
+    [ -n "$CONNECT_TOKEN" ] || { echo ""; echo "  Next:      docker compose up -d"; }
   fi
   exit 0
 fi

@@ -53,6 +53,10 @@ services:
       ANYRAY_MAX_BODY_BYTES: ${ANYRAY_MAX_BODY_BYTES:-}
       ANYRAY_TRUST_PROXY: ${ANYRAY_TRUST_PROXY:-}
       ANYRAY_CUSTOM_HOST_ALLOWLIST: ${ANYRAY_CUSTOM_HOST_ALLOWLIST:-}
+      TRUSTED_CUSTOM_HOSTS: ${TRUSTED_CUSTOM_HOSTS:-}
+      # On-top mode: seed the default routing config from an existing upstream
+      # gateway so clients send no x-anyray-config header (./setup.sh --upstream).
+      ANYRAY_UPSTREAM_URL: ${ANYRAY_UPSTREAM_URL:-}
       # Anyray Cloud metering (opt-in; content-free rollups only). The vendor
       # verify key and the control-plane host are PINNED in the gateway image,
       # so there is no license key to configure here.

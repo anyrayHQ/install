@@ -83,6 +83,18 @@ spec:
               value: /data/user-caps-audit.log
             - name: ANYRAY_ENTITLEMENT_FILE
               value: /data/entitlement.lease.json
+            {{- with .Values.gateway.upstreamUrl }}
+            - name: ANYRAY_UPSTREAM_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.customHostAllowlist }}
+            - name: ANYRAY_CUSTOM_HOST_ALLOWLIST
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.trustedCustomHosts }}
+            - name: TRUSTED_CUSTOM_HOSTS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.gateway.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -36,7 +36,15 @@ gateway:
   upstreamUrl: ""
   customHostAllowlist: ""
   trustedCustomHosts: ""
-  # Extra env vars (provider-key fallbacks, rate limits, Anyray Cloud metering…)
+  # Anyray Cloud metering. `setup.sh --k8s --connect <token>` turns this on and folds
+  # ANYRAY_DEPLOYMENT_TOKEN + ANYRAY_PSEUDONYM_SALT into the Secret. The control-plane
+  # host and the vendor verify key are pinned in the gateway image, so they are NOT set
+  # here. Leave enabled: false for a standalone (unmetered) install.
+  metering:
+    enabled: false
+    intervalMs: "900000"
+    graceMs: "86400000"
+  # Extra env vars (provider-key fallbacks, rate limits, …)
   # in plain k8s env syntax: [{name: ANYRAY_RATE_LIMIT_RPM, value: "600"}]
   extraEnv: []
   # Persist /data (provider keys, routing config, spend + audit logs) across

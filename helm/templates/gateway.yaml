@@ -83,6 +83,31 @@ spec:
               value: /data/user-caps-audit.log
             - name: ANYRAY_ENTITLEMENT_FILE
               value: /data/entitlement.lease.json
+            {{- if .Values.gateway.metering.enabled }}
+            # Anyray Cloud metering. The deployment token + pseudonym salt come from
+            # the Secret (folded in by setup.sh --connect); the control-plane host and
+            # verify key are pinned in the gateway image, so they are not set here.
+            # optional: true keeps the pod up if a key is missing — the gateway then
+            # logs "metering enabled but not configured" instead of crashlooping.
+            - name: ANYRAY_METERING_ENABLED
+              value: "true"
+            - name: ANYRAY_DEPLOYMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: ANYRAY_DEPLOYMENT_TOKEN
+                  optional: true
+            - name: ANYRAY_PSEUDONYM_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: ANYRAY_PSEUDONYM_SALT
+                  optional: true
+            - name: ANYRAY_METERING_INTERVAL_MS
+              value: {{ .Values.gateway.metering.intervalMs | quote }}
+            - name: ANYRAY_ENTITLEMENT_GRACE_MS
+              value: {{ .Values.gateway.metering.graceMs | quote }}
+            {{- end }}
             {{- with .Values.gateway.upstreamUrl }}
             - name: ANYRAY_UPSTREAM_URL
               value: {{ . | quote }}

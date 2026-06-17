@@ -19,6 +19,14 @@ spec:
         - name: web
           image: docker.io/langfuse/langfuse:3
           env:
+            {{- if .Values.web.nodeOptions }}
+            # Pin the V8 heap so the console doesn't OOM during init. Langfuse
+            # (Next.js) otherwise sizes old-space from the cgroup limit and capped
+            # near ~512MB at the old 1Gi limit, crashlooping init and timing out
+            # the post-install model-seeder hook.
+            - name: NODE_OPTIONS
+              value: {{ .Values.web.nodeOptions | quote }}
+            {{- end }}
             - name: NEXTAUTH_URL
               value: "http://{{ .Values.host }}:3000"
             - name: NEXTAUTH_SECRET

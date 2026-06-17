@@ -66,6 +66,12 @@ org's link turns on pass-through auth with no flag at all.
 > Prefer a package manager? `npx anyray-connect <setup-link>` still works (needs
 > Node). The one-liners above need only `curl`/PowerShell.
 
+When the operator turns on verified-developer access (see *Public exposure*
+below), the first `anyray-connect` run provisions a per-device key and enrolls
+the developer automatically — passwordless, no SSO login. It's offline
+public-key verification against the trust anchor the gateway already pins, so
+there's nothing extra for the developer to configure.
+
 `--connect` only sends the deployment token to Anyray Cloud. The control-plane
 host (`app.anyray.ai`) and the Ed25519 lease-verify key are **pinned in the
 gateway image**, so the signed billing kill-switch can't be bypassed by
@@ -106,6 +112,14 @@ To expose the gateway API over TLS, set in `.env`: `ANYRAY_PUBLIC_DOMAIN`
 
 Caddy terminates HTTPS on 443 with automatic Let's Encrypt certs and 403s the
 admin surface — the console and `/admin` stay in-network only.
+
+To restrict the gateway to verified developers, set
+`ANYRAY_REQUIRE_VERIFIED_DEV=true` in `.env` (default off). It's opt-in,
+passwordless hardening: only developers whose `anyray-connect` run enrolled a
+per-device public key against the trust anchor the gateway already pins may use
+the gateway. Verified developers bypass rate limits; everyone else is blocked
+with a 403. Verification is offline — the gateway checks each request against
+the pinned key, with no SSO and no extra outbound calls.
 
 This HTTPS URL is what editor BYOK ("bring your own key") endpoints point at.
 For **GitHub Copilot Chat** (VS Code), `anyray-connect --tools copilot` prints the

@@ -137,7 +137,9 @@ Docker Compose (above) is the default. The repo also ships:
 **Kubernetes (Helm)** — the full stack as a self-contained chart (no external chart
 dependencies):
 
-    ./setup.sh --k8s --host <hostname-or-ip>   # emits anyray-secrets.yaml + my-values.yaml
+    ./setup.sh --k8s --host <hostname-or-ip>   # standalone; emits anyray-secrets.yaml + my-values.yaml
+    # …or meter via Anyray Cloud (folds the token + salt into the Secret, sets gateway.metering.enabled):
+    ./setup.sh --k8s --connect adt_XXXX --host <hostname-or-ip>
     kubectl apply -f anyray-secrets.yaml
     helm install anyray ./helm -f my-values.yaml
 

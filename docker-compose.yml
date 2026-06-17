@@ -8,7 +8,7 @@ name: anyray
 
 services:
   gateway:
-    image: ghcr.io/anyrayhq/gateway:${ANYRAY_IMAGE_TAG:-v1.10.1}
+    image: ghcr.io/anyrayhq/gateway:${ANYRAY_IMAGE_TAG:-v1.10.2}
     restart: always
     depends_on:
       - web
@@ -80,7 +80,7 @@ services:
       start_period: 5s
 
   optimizer:
-    image: ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.1}
+    image: ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.2}
     restart: always
     environment:
       PORT: 8088
@@ -98,7 +98,7 @@ services:
       start_period: 5s
 
   proxy:
-    image: ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.1}
+    image: ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.2}
     restart: always
     # gateway healthy first: nginx auth_request hits gateway:8787 on every
     # console load — starting earlier just serves 502s.

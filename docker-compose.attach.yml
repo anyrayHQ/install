@@ -11,7 +11,7 @@ name: anyray-attach
 
 services:
   optimizer:
-    image: ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.9.1}
+    image: ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.1}
     restart: always
     ports:
       # Exposed so the org's gateway plugin can reach it from outside Docker.
@@ -43,7 +43,7 @@ services:
       start_period: 5s
 
   proxy:
-    image: ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.9.1}
+    image: ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.1}
     restart: always
     depends_on:
       web:

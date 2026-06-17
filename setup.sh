@@ -399,7 +399,7 @@ else
     echo "host: \"${HOST}\""
     echo ""
     echo "image:"
-    echo "  tag: \"v1.10.2\""
+    echo "  tag: \"v1.10.3\""
     if [ -n "$CONNECT_TOKEN" ]; then
       echo ""
       echo "# Anyray Cloud metering — deployment token + pseudonym salt live in anyray-secrets.yaml."

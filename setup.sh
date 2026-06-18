@@ -46,7 +46,23 @@ if [ "$K8S" -eq 0 ]; then
   docker compose version >/dev/null 2>&1 || { echo "✗ docker compose v2 not found — https://docs.docker.com/compose/install/" >&2; exit 1; }
 fi
 
-if [ -z "$HOST" ]; then
+if [ "$K8S" -eq 1 ]; then
+  # On Kubernetes, --host is the cluster's external Ingress/LoadBalancer DNS
+  # endpoint. It is baked into the chart's Ingress host: rule, which matches on
+  # the HTTP Host header — a raw IP is invalid there. Never auto-detect: the
+  # machine running setup.sh is usually a kubectl client, not a cluster node, so
+  # its local IP is meaningless to the cluster.
+  if [ -z "$HOST" ]; then
+    echo "✗ --host is required with --k8s — pass your cluster's external ingress hostname" >&2
+    echo "  e.g. ./setup.sh --k8s --host anyray.example.com" >&2
+    exit 1
+  fi
+  case "$HOST" in
+    *[!0-9.]*) : ;;  # has a non-IPv4 character → a hostname, good
+    *) echo "⚠ --host \"$HOST\" looks like an IP — that only works for the NodePort dev" >&2
+       echo "  fallback. For Ingress/LoadBalancer, use the cluster's DNS endpoint." >&2 ;;
+  esac
+elif [ -z "$HOST" ]; then
   HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   # macOS: hostname has no -I — fall back to the primary interface address so
   # the gateway URL shown to developers is reachable, not "localhost".

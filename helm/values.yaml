@@ -2,7 +2,9 @@
 # Run setup.sh --k8s to generate anyray-secrets.yaml + a starter my-values.yaml,
 # then: kubectl apply -f anyray-secrets.yaml && helm install anyray ./helm -f my-values.yaml
 
-# The hostname users will reach (console + gateway). Required.
+# The cluster's external Ingress/LoadBalancer DNS endpoint (console + gateway).
+# Required. Must be a hostname, not a node IP — it becomes the Ingress host: rule,
+# which matches on the HTTP Host header.
 host: ""
 
 image:

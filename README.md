@@ -138,13 +138,17 @@ Docker Compose (above) is the default. The repo also ships:
 dependencies):
 
     export ANYRAY_NAMESPACE="team-ai"          # optional; replace with your target namespace
-    kubectl create namespace "$ANYRAY_NAMESPACE"   # optional: only if it does not already exist
     ./setup.sh --k8s --host <hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
     # emits anyray-secrets.yaml + my-values.yaml
     # …or meter via Anyray Cloud (folds the token + salt into the Secret, sets gateway.metering.enabled):
     ./setup.sh --k8s --connect adt_XXXX --host <hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
     kubectl apply -n "$ANYRAY_NAMESPACE" -f anyray-secrets.yaml
     helm install anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
+
+Use an existing namespace unless your cluster policy says this installer should
+create one. If so, run `kubectl create namespace "$ANYRAY_NAMESPACE"` explicitly
+before applying the Secret. Omit the namespace flags only when you intentionally
+want the current kubectl/Helm namespace.
 
 See [`helm/README.md`](./helm/README.md).
 

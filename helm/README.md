@@ -16,7 +16,6 @@ dependencies — all services are self-contained in this chart.
 ```bash
 # 1. Choose the namespace (optional, but recommended)
 export ANYRAY_NAMESPACE="team-ai"   # replace with your target namespace
-kubectl create namespace "$ANYRAY_NAMESPACE"   # optional: only if it does not already exist
 
 # 2. Generate secrets
 ./setup.sh --k8s --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
@@ -37,8 +36,12 @@ kubectl rollout status -n "$ANYRAY_NAMESPACE" deployment/anyray-web
 #   Gateway: http://<host>:8787
 ```
 
+Use an existing namespace unless your cluster policy says the installer should
+create one. If you are allowed to create it, run
+`kubectl create namespace "$ANYRAY_NAMESPACE"` before applying the Secret.
 Omit `--namespace` and the `-n` / `--namespace` flags to use your current kubectl
-and Helm namespace. `setup.sh` never creates a namespace automatically.
+and Helm namespace. `setup.sh` never creates a namespace automatically and never
+assumes `default`.
 
 ## Upgrade
 

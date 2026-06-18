@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  Anyray one-click deploy. Brings up the full self-hosted stack
+  (gateway + console + optimizer + Langfuse trace backend + datastores) on a
+  single EC2 host with Docker Compose, using the published images and setup.sh
+  from github.com/anyrayHQ/install. Console on :3000, gateway API on :8787 —
+  both scoped to the CIDR you provide (never 0.0.0.0/0). Content stays encrypted
+  at rest; only metadata is logged.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Host }
+        Parameters: [InstanceType, VolumeSize, ImageTag]
+      - Label: { default: Network }
+        Parameters: [VpcId, SubnetId, AllowedCidr]
+      - Label: { default: Access }
+        Parameters: [KeyName]
+    ParameterLabels:
+      AllowedCidr: { default: "Allowed CIDR (your office/VPN range)" }
+      SubnetId: { default: "Public subnet (auto-assign public IP)" }
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to launch the Anyray host into.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A PUBLIC subnet that auto-assigns a public IPv4 — otherwise the console
+      and gateway won't be reachable.
+  AllowedCidr:
+    Type: String
+    Description: >-
+      CIDR range allowed to reach the console (:3000), gateway (:8787) and SSH
+      (:22). Scope this to your office / VPN range. Do NOT use 0.0.0.0/0.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be a CIDR like 203.0.113.0/24 (not 0.0.0.0/0).
+  InstanceType:
+    Type: String
+    Default: t3.xlarge
+    AllowedValues: [t3.large, t3.xlarge, m6i.xlarge, m6i.2xlarge]
+    Description: >-
+      t3.large = 8 GB (small team), t3.xlarge = 16 GB (recommended). The stack
+      needs ~8 GB free; smaller types will OOM on first boot.
+  VolumeSize:
+    Type: Number
+    Default: 40
+    MinValue: 30
+    Description: Root EBS volume size in GiB (datastores live here).
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: >-
+      EC2 key pair for SSH — used once to read the generated admin token.
+  ImageTag:
+    Type: String
+    Default: v1.10.3
+    Description: Anyray image tag to deploy (see github.com/anyrayHQ/install releases).
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI (resolved per-region; leave as default).
+
+Resources:
+  AnyraySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Anyray console / gateway / SSH from a scoped CIDR.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: !Ref AllowedCidr
+          Description: Anyray console
+        - IpProtocol: tcp
+          FromPort: 8787
+          ToPort: 8787
+          CidrIp: !Ref AllowedCidr
+          Description: Gateway API
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedCidr
+          Description: SSH (read admin token once)
+      Tags:
+        - { Key: Name, Value: anyray }
+
+  AnyrayInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref AnyraySecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Tags:
+        - { Key: Name, Value: anyray }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf update -y
+          dnf install -y docker git openssl
+          systemctl enable --now docker
+          # Docker Compose v2 plugin
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+          # Public IPv4 via IMDSv2 — this is the host developers will reach.
+          IMDS=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" \
+            -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          PUBIP=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS" \
+            http://169.254.169.254/latest/meta-data/public-ipv4)
+          cd /opt
+          git clone --depth 1 https://github.com/anyrayHQ/install anyray
+          cd anyray
+          export ANYRAY_IMAGE_TAG='${ImageTag}'
+          ./setup.sh --host "$PUBIP"
+          docker compose up -d
+
+Outputs:
+  ConsoleURL:
+    Description: Open this and sign in with the admin token (see AdminToken below).
+    Value: !Sub 'http://${AnyrayInstance.PublicIp}:3000'
+  GatewayURL:
+    Description: Gateway API base URL — use this in `anyray-connect <url>`.
+    Value: !Sub 'http://${AnyrayInstance.PublicIp}:8787'
+  AdminToken:
+    Description: >-
+      Fetch the generated admin key (it is NOT printed here — keep it out of the
+      stack outputs). Run this from your workstation.
+    Value: !Sub 'ssh ec2-user@${AnyrayInstance.PublicIp} "sudo grep ANYRAY_ADMIN_TOKEN /opt/anyray/.env"'
+  FirstBootNote:
+    Description: First boot pulls images + seeds prices; allow ~3-5 min before the console responds.
+    Value: 'docker compose ps on the host shows all services healthy when ready.'

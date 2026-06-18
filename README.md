@@ -145,6 +145,13 @@ dependencies):
 
 See [`helm/README.md`](./helm/README.md).
 
+**AWS** — one-click deploy via a CloudFormation quick-launch stack: the full stack on a
+single EC2 host (Docker Compose), with the console/gateway scoped to a CIDR you provide.
+The template is [`aws/anyray-quicklaunch.template.yaml`](./aws/anyray-quicklaunch.template.yaml),
+hosted for the Launch button at
+`https://anyray-quicklaunch.s3.us-east-1.amazonaws.com/anyray-quicklaunch.template.yaml`
+(re-upload after editing). See the docs "AWS (CloudFormation)" install page.
+
 **Railway** — one-click deploy; Railway auto-generates every secret. The authoritative
 spec is [`railway/railway.template.json`](./railway); see [`railway/README.md`](./railway/README.md).
 

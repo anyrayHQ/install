@@ -13,9 +13,61 @@ host: ""
 image:
   tag: "v1.10.3"
   pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# Per-component image repository overrides. Empty app tags inherit image.tag.
+images:
+  gateway:
+    repository: ghcr.io/anyrayhq/gateway
+    tag: ""
+  optimizer:
+    repository: ghcr.io/anyrayhq/optimizer
+    tag: ""
+  proxy:
+    repository: ghcr.io/anyrayhq/proxy
+    tag: ""
+  web:
+    repository: docker.io/langfuse/langfuse
+    tag: "3"
+  worker:
+    repository: docker.io/langfuse/langfuse-worker
+    tag: "3"
+  modelSeeder:
+    repository: docker.io/library/node
+    tag: "20-alpine"
+  postgres:
+    repository: docker.io/postgres
+    tag: "17"
+  clickhouse:
+    repository: docker.io/clickhouse/clickhouse-server
+    tag: "26.3"
+  minio:
+    repository: cgr.dev/chainguard/minio
+    # Chainguard's free tier publishes only :latest, so keep the digest pin.
+    tag: "latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07"
+  redis:
+    repository: docker.io/redis
+    tag: "7"
 
 # Name of the Kubernetes Secret created by: ./setup.sh --k8s
 secretName: anyray-secrets
+
+# Common pod/runtime controls. These apply to all workload pods unless a template
+# has a component-specific security context, such as ClickHouse.
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+containerSecurityContext: {}
+nodeSelector: {}
+affinity: {}
+tolerations: []
+topologySpreadConstraints: []
+priorityClassName: ""
 
 # Gateway
 gateway:
@@ -47,6 +99,17 @@ gateway:
   upstreamUrl: ""
   customHostAllowlist: ""
   trustedCustomHosts: ""
+  publicUrl: ""
+  consolePublicUrl: ""
+  requireClientKeys: ""
+  requireVerifiedDev: ""
+  hsts: ""
+  trustProxy: ""
+  responsesOptimize: ""
+  rateLimitRpm: ""
+  rateLimitUnauthRpm: ""
+  authFailLimit: ""
+  maxBodyBytes: ""
   # Anyray Cloud metering. `setup.sh --k8s --connect <token>` turns this on and folds
   # ANYRAY_DEPLOYMENT_TOKEN + ANYRAY_PSEUDONYM_SALT into the Secret. The control-plane
   # host and the vendor verify key are pinned in the gateway image, so they are NOT set
@@ -80,6 +143,7 @@ optimizer:
     limits:
       cpu: "250m"
       memory: "256Mi"
+  extraEnv: []
 
 # Proxy (nginx reverse proxy / console)
 proxy:
@@ -97,10 +161,12 @@ proxy:
     limits:
       cpu: "100m"
       memory: "128Mi"
+  extraEnv: []
 
 # Observability backend web (trace API + UI engine)
 web:
   replicas: 1
+  nextauthUrl: ""
   # The Langfuse console (Next.js) sizes its V8 heap from the container memory
   # limit; at the previous 1Gi it capped old-space near ~512MB and OOM'd during
   # init, crashlooping and timing out the post-install model-seeder hook. Pin the
@@ -114,6 +180,7 @@ web:
     limits:
       cpu: "1000m"
       memory: "2Gi"
+  extraEnv: []
 
 # Observability backend worker
 worker:
@@ -125,9 +192,11 @@ worker:
     limits:
       cpu: "500m"
       memory: "512Mi"
+  extraEnv: []
 
 # Postgres
 postgres:
+  enabled: true
   storage: 10Gi
   storageClass: ""
   resources:
@@ -137,11 +206,22 @@ postgres:
     limits:
       cpu: "500m"
       memory: "512Mi"
+  external:
+    # Prefer databaseUrlSecretKeyRef for production credentials.
+    databaseUrl: ""
+    databaseUrlSecretKeyRef: {}
+    # name: anyray-external-postgres
+    # key: DATABASE_URL
 
 # ClickHouse
 clickhouse:
+  enabled: true
   storage: 20Gi
   storageClass: ""
+  podSecurityContext:
+    runAsUser: 101
+    runAsGroup: 101
+    fsGroup: 101
   resources:
     requests:
       cpu: "200m"
@@ -149,9 +229,18 @@ clickhouse:
     limits:
       cpu: "1000m"
       memory: "2Gi"
+  external:
+    migrationUrl: ""
+    url: ""
+    user: clickhouse
+    password: ""
+    passwordSecretKeyRef: {}
+    # name: anyray-external-clickhouse
+    # key: CLICKHOUSE_PASSWORD
 
 # MinIO
 minio:
+  enabled: true
   storage: 10Gi
   storageClass: ""
   resources:
@@ -162,8 +251,30 @@ minio:
       cpu: "250m"
       memory: "256Mi"
 
+# S3-compatible object storage used by the observability backend. Defaults point
+# at the in-chart MinIO service. For external S3, set minio.enabled=false and
+# override the endpoint/bucket/credentials below.
+objectStorage:
+  accessKeyId: minio
+  accessKeyIdSecretKeyRef: {}
+  secretAccessKey: ""
+  secretAccessKeySecretKeyRef: {}
+  eventUpload:
+    bucket: langfuse
+    region: auto
+    endpoint: ""
+    forcePathStyle: "true"
+    prefix: events/
+  mediaUpload:
+    bucket: langfuse
+    region: auto
+    endpoint: ""
+    forcePathStyle: "true"
+    prefix: media/
+
 # Redis
 redis:
+  enabled: true
   storage: 2Gi
   storageClass: ""
   resources:
@@ -173,12 +284,26 @@ redis:
     limits:
       cpu: "200m"
       memory: "128Mi"
+  external:
+    host: ""
+    port: "6379"
+    auth: ""
+    authSecretKeyRef: {}
+    # name: anyray-external-redis
+    # key: REDIS_AUTH
 
 # Ingress — disabled by default; fill in and set enabled: true to expose externally.
 ingress:
   enabled: false
   className: ""
   annotations: {}
+  hosts: []
+  # Optional override for one or more hosts. Leave empty to use `host`.
+  # - host: anyray.example.com
+  #   paths:
+  #     console: /
+  #     gateway: /v1
+  #     admin: /admin
   # Example annotations for nginx ingress:
   #   kubernetes.io/ingress.class: nginx
   #   cert-manager.io/cluster-issuer: letsencrypt-prod

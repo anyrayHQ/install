@@ -1,3 +1,4 @@
+{{- if .Values.redis.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -13,12 +14,14 @@ spec:
       {{- include "anyray.selectorLabels" (dict "component" "redis" "context" .) | nindent 6 }}
   template:
     metadata:
-      labels:
-        {{- include "anyray.selectorLabels" (dict "component" "redis" "context" .) | nindent 8 }}
+      {{- include "anyray.podMetadata" (dict "component" "redis" "context" .) | nindent 6 }}
     spec:
+      {{- include "anyray.podSpecCommon" . | nindent 6 }}
       containers:
         - name: redis
-          image: docker.io/redis:7
+          image: {{ include "anyray.image" (dict "component" "redis" "context" .) }}
+          imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "redis" "context" .) }}
+          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
           command: ["sh", "-c"]
           args:
             - "redis-server --requirepass \"$(REDIS_AUTH)\" --maxmemory-policy noeviction"
@@ -70,3 +73,4 @@ spec:
   ports:
     - port: 6379
       targetPort: 6379
+{{- end }}

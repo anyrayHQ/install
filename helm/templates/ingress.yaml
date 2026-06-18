@@ -18,28 +18,35 @@ spec:
     {{- toYaml . | nindent 4 }}
   {{- end }}
   rules:
-    - host: {{ .Values.host }}
+    {{- $hosts := .Values.ingress.hosts }}
+    {{- if not $hosts }}
+    {{- $hosts = list (dict "host" .Values.host "paths" (dict "console" "/" "gateway" "/v1" "admin" "/admin")) }}
+    {{- end }}
+    {{- range $entry := $hosts }}
+    {{- $paths := default dict $entry.paths }}
+    - host: {{ default $.Values.host $entry.host }}
       http:
         paths:
-          - path: /
+          - path: {{ default "/" $paths.console }}
             pathType: Prefix
             backend:
               service:
-                name: {{ include "anyray.fullname" . }}-proxy
+                name: {{ include "anyray.fullname" $ }}-proxy
                 port:
                   number: 3000
-          - path: /v1
+          - path: {{ default "/v1" $paths.gateway }}
             pathType: Prefix
             backend:
               service:
                 name: gateway
                 port:
                   number: 8787
-          - path: /admin
+          - path: {{ default "/admin" $paths.admin }}
             pathType: Prefix
             backend:
               service:
                 name: gateway
                 port:
                   number: 8787
+    {{- end }}
 {{- end }}

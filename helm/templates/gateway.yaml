@@ -20,13 +20,14 @@ spec:
       {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 6 }}
   template:
     metadata:
-      labels:
-        {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 8 }}
+      {{- include "anyray.podMetadata" (dict "component" "gateway" "context" .) | nindent 6 }}
     spec:
+      {{- include "anyray.podSpecCommon" . | nindent 6 }}
       containers:
         - name: gateway
-          image: ghcr.io/anyrayhq/gateway:{{ .Values.image.tag }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "anyray.image" (dict "component" "gateway" "context" .) }}
+          imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "gateway" "context" .) }}
+          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
           env:
             - name: ANYRAY_OBSERVABILITY_BASEURL
               value: "http://web:3000"
@@ -118,6 +119,50 @@ spec:
             {{- end }}
             {{- with .Values.gateway.trustedCustomHosts }}
             - name: TRUSTED_CUSTOM_HOSTS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.publicUrl }}
+            - name: ANYRAY_GATEWAY_PUBLIC_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.consolePublicUrl }}
+            - name: ANYRAY_CONSOLE_PUBLIC_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.requireClientKeys }}
+            - name: ANYRAY_REQUIRE_CLIENT_KEYS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.requireVerifiedDev }}
+            - name: ANYRAY_REQUIRE_VERIFIED_DEV
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.hsts }}
+            - name: ANYRAY_HSTS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.trustProxy }}
+            - name: ANYRAY_TRUST_PROXY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.responsesOptimize }}
+            - name: ANYRAY_RESPONSES_OPTIMIZE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.rateLimitRpm }}
+            - name: ANYRAY_RATE_LIMIT_RPM
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.rateLimitUnauthRpm }}
+            - name: ANYRAY_RATE_LIMIT_UNAUTH_RPM
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.authFailLimit }}
+            - name: ANYRAY_AUTH_FAIL_LIMIT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.maxBodyBytes }}
+            - name: ANYRAY_MAX_BODY_BYTES
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.gateway.extraEnv }}

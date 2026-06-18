@@ -58,6 +58,50 @@ hex() { openssl rand -hex "$1"; }
 b64() { openssl rand -base64 32; }
 b64enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
 
+# Helm values stub (no secrets). With --connect, also turns metering on; the
+# deployment token + pseudonym salt live in anyray-secrets.yaml.
+write_values_stub() {
+  {
+    echo "# Anyray Helm values — safe to commit (no secrets here)."
+    echo "host: \"${HOST}\""
+    echo ""
+    echo "image:"
+    echo "  tag: \"v1.10.3\""
+    if [ -n "$CONNECT_TOKEN" ]; then
+      echo ""
+      echo "# Anyray Cloud metering — deployment token + pseudonym salt live in anyray-secrets.yaml."
+      echo "gateway:"
+      echo "  metering:"
+      echo "    enabled: true"
+    fi
+  } > my-values.yaml
+}
+
+# Ensure gateway.metering.enabled: true in an existing Helm values file while
+# keeping every other line — used when --connect re-runs against a my-values.yaml
+# that's already there. Assumes the 2-space structure setup.sh emits; handles a
+# missing gateway: block, a gateway: without metering:, and an existing enabled:
+# flag (flipped to true).
+enable_metering() {
+  awk '
+    function flush_gw() {
+      if (in_gw && !done) {
+        if (!met_seen)     { print "  metering:"; print "    enabled: true"; done=1 }
+        else if (!en_seen) { print "    enabled: true"; done=1 }
+      }
+    }
+    /^[^[:space:]#]/ && !/^gateway:[[:space:]]*$/ { flush_gw(); in_gw=0; in_met=0 }
+    /^gateway:[[:space:]]*$/ { flush_gw(); in_gw=1; gw_seen=1; met_seen=0; en_seen=0; print; next }
+    in_gw && /^  metering:[[:space:]]*$/ { in_met=1; met_seen=1; print; next }
+    in_gw && in_met && /^    enabled:/ { print "    enabled: true"; en_seen=1; done=1; next }
+    { print }
+    END {
+      flush_gw()
+      if (!gw_seen) { print "gateway:"; print "  metering:"; print "    enabled: true" }
+    }
+  ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
 # ── Docker Compose mode ──────────────────────────────────────────────────────
 if [ "$K8S" -eq 0 ]; then
   if [ -f .env ]; then
@@ -327,12 +371,41 @@ if [ -n "$CONNECT_TOKEN" ]; then
 fi
 
 if [ -f anyray-secrets.yaml ]; then
-  echo "✓ anyray-secrets.yaml already exists — leaving it untouched (delete it to regenerate)"
   if [ -n "$CONNECT_TOKEN" ]; then
-    echo "  To connect this existing Secret, add these two keys under data: in"
-    echo "  anyray-secrets.yaml and set gateway.metering.enabled: true in my-values.yaml:"
-    echo "    ANYRAY_DEPLOYMENT_TOKEN: $(b64enc "$CONNECT_TOKEN")"
-    echo "    ANYRAY_PSEUDONYM_SALT: $(b64enc "$(hex 32)")"
+    # Fold the Anyray Cloud connect vars into the existing Secret IN PLACE — every
+    # other key is kept, only the connect keys are (re)written. Reuse the existing
+    # pseudonym salt so usage history stays attributable; mint one only on first
+    # connect. (Mirrors the docker .env --connect path: re-runnable, idempotent.)
+    EXISTING_SALT="$(sed -n 's/^[[:space:]]*ANYRAY_PSEUDONYM_SALT:[[:space:]]*//p' anyray-secrets.yaml | head -n 1)"
+    grep -v -E '^[[:space:]]*ANYRAY_(DEPLOYMENT_TOKEN|PSEUDONYM_SALT):' anyray-secrets.yaml > anyray-secrets.yaml.tmp || true
+    mv anyray-secrets.yaml.tmp anyray-secrets.yaml
+    {
+      echo "  ANYRAY_DEPLOYMENT_TOKEN: $(b64enc "$CONNECT_TOKEN")"
+      if [ -n "$EXISTING_SALT" ]; then
+        echo "  ANYRAY_PSEUDONYM_SALT: ${EXISTING_SALT}"
+      else
+        echo "  ANYRAY_PSEUDONYM_SALT: $(b64enc "$(hex 32)")"
+      fi
+    } >> anyray-secrets.yaml
+    chmod 600 anyray-secrets.yaml
+    echo "✓ anyray-secrets.yaml already existed — folded in Anyray Cloud connect vars (deployment token + pseudonym salt)"
+    [ -n "$EXISTING_SALT" ] && echo "  (kept the existing pseudonym salt so usage history stays attributable)"
+
+    if [ -f my-values.yaml ]; then
+      enable_metering my-values.yaml
+      echo "✓ my-values.yaml already existed — ensured gateway.metering.enabled: true"
+    else
+      write_values_stub
+      echo "✓ Helm values stub → my-values.yaml (metering on)"
+    fi
+    echo ""
+    echo "  Next:"
+    echo "    kubectl apply -f anyray-secrets.yaml"
+    echo "    helm upgrade anyray ./helm -f my-values.yaml"
+    echo ""
+    echo "  Then:      this deployment appears as Connected at ${CONTROL_PLANE} within a minute"
+  else
+    echo "✓ anyray-secrets.yaml already exists — leaving it untouched (delete it to regenerate)"
   fi
   exit 0
 fi
@@ -391,23 +464,14 @@ echo "✓ Secrets generated → anyray-secrets.yaml"
 [ -n "$CONNECT_TOKEN" ] && echo "  ✓ Anyray Cloud connect vars folded in (deployment token + pseudonym salt)"
 
 if [ -f my-values.yaml ]; then
-  echo "✓ my-values.yaml already exists — leaving it untouched"
-  [ -n "$CONNECT_TOKEN" ] && echo "  To meter, set gateway.metering.enabled: true in my-values.yaml"
+  if [ -n "$CONNECT_TOKEN" ]; then
+    enable_metering my-values.yaml
+    echo "✓ my-values.yaml already existed — ensured gateway.metering.enabled: true"
+  else
+    echo "✓ my-values.yaml already exists — leaving it untouched"
+  fi
 else
-  {
-    echo "# Anyray Helm values — safe to commit (no secrets here)."
-    echo "host: \"${HOST}\""
-    echo ""
-    echo "image:"
-    echo "  tag: \"v1.10.3\""
-    if [ -n "$CONNECT_TOKEN" ]; then
-      echo ""
-      echo "# Anyray Cloud metering — deployment token + pseudonym salt live in anyray-secrets.yaml."
-      echo "gateway:"
-      echo "  metering:"
-      echo "    enabled: true"
-    fi
-  } > my-values.yaml
+  write_values_stub
   echo "✓ Helm values stub → my-values.yaml"
 fi
 echo ""

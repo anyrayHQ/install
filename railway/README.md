@@ -43,6 +43,27 @@ Or open the `web` service shell in the Railway UI and run the seeder inline.
 | `LANGFUSE_INIT_PROJECT_PUBLIC_KEY` | `${{secret()}}` on web          | Shared with gateway as `ANYRAY_OBSERVABILITY_PUBLIC_KEY`. |
 | All datastore passwords            | `${{secret()}}` on each service | Never leave Railway's environment.                        |
 
+After generating public domains, set or confirm these gateway variables:
+
+```bash
+ANYRAY_GATEWAY_PUBLIC_URL=https://<gateway-domain>
+ANYRAY_CONSOLE_PUBLIC_URL=https://<proxy-domain>
+ANYRAY_TRUST_PROXY=true
+ANYRAY_HSTS=true
+```
+
+Optional hardening and traffic controls:
+
+```bash
+ANYRAY_REQUIRE_CLIENT_KEYS=true
+ANYRAY_REQUIRE_VERIFIED_DEV=true
+ANYRAY_RATE_LIMIT_RPM=600
+ANYRAY_RATE_LIMIT_IP_RPM=1200
+ANYRAY_RATE_LIMIT_UNAUTH_RPM=60
+ANYRAY_MAX_CONCURRENT_REQUESTS=20
+ANYRAY_MAX_BODY_BYTES=10485760
+```
+
 ## Manual verification (required after template is first published)
 
 The template can only be verified by deploying it. After composing it in the

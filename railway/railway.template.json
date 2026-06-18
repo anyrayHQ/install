@@ -42,6 +42,18 @@
         "ANYRAY_USER_CAPS_FILE": "/data/user-caps.config.json",
         "ANYRAY_USER_CAPS_AUDIT_FILE": "/data/user-caps-audit.log",
         "ANYRAY_ENTITLEMENT_FILE": "/data/entitlement.lease.json",
+        "ANYRAY_GATEWAY_PUBLIC_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
+        "ANYRAY_CONSOLE_PUBLIC_URL": "https://${{proxy.RAILWAY_PUBLIC_DOMAIN}}",
+        "ANYRAY_REQUIRE_CLIENT_KEYS": "",
+        "ANYRAY_REQUIRE_VERIFIED_DEV": "",
+        "ANYRAY_HSTS": "true",
+        "ANYRAY_TRUST_PROXY": "true",
+        "ANYRAY_RATE_LIMIT_RPM": "",
+        "ANYRAY_RATE_LIMIT_IP_RPM": "",
+        "ANYRAY_RATE_LIMIT_UNAUTH_RPM": "",
+        "ANYRAY_MAX_CONCURRENT_REQUESTS": "",
+        "ANYRAY_AUTH_FAIL_LIMIT": "",
+        "ANYRAY_MAX_BODY_BYTES": "",
         "ANYRAY_UPSTREAM_URL": "",
         "ANYRAY_CUSTOM_HOST_ALLOWLIST": "",
         "TRUSTED_CUSTOM_HOSTS": ""
@@ -213,7 +225,7 @@
     {
       "name": "minio",
       "source": {
-        "image": "docker.io/minio/minio:latest"
+        "image": "cgr.dev/chainguard/minio:latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07"
       },
       "deploy": {
         "startCommand": "sh -c 'mkdir -p /data/langfuse && exec minio server --address \":9000\" /data'",

@@ -17,6 +17,23 @@ Metadata:
         Parameters: [VpcId, SubnetId, AllowedCidr]
       - Label: { default: Access }
         Parameters: [KeyName]
+      - Label: { default: Anyray Cloud }
+        Parameters: [DeploymentToken, GatewayPublicUrl, ConsolePublicUrl]
+      - Label: { default: Gateway hardening }
+        Parameters:
+          [
+            RequireClientKeys,
+            RequireVerifiedDev,
+            TrustProxy,
+            Hsts,
+            RateLimitRpm,
+            RateLimitIpRpm,
+            RateLimitUnauthRpm,
+            MaxConcurrentRequests,
+            MaxBodyBytes,
+          ]
+      - Label: { default: Optimizer }
+        Parameters: [OptimizerTimeoutMs, OptimizerVisionTimeoutMs]
     ParameterLabels:
       AllowedCidr: { default: "Allowed CIDR (your office/VPN range)" }
       SubnetId: { default: "Public subnet (auto-assign public IP)" }
@@ -61,6 +78,83 @@ Parameters:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
     Description: Amazon Linux 2023 AMI (resolved per-region; leave as default).
+  DeploymentToken:
+    Type: String
+    Default: ''
+    NoEcho: true
+    AllowedPattern: '^$|^adt_[A-Za-z0-9_-]+$'
+    Description: Optional Anyray Cloud deployment token (adt_...). Leave empty for standalone.
+  GatewayPublicUrl:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^https?://\S+$'
+    Description: Optional externally reachable gateway URL shown to developers and the portal.
+  ConsolePublicUrl:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^https?://\S+$'
+    Description: Optional externally reachable console URL reported in metering metadata.
+  RequireClientKeys:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Require minted Anyray client keys for gateway requests.
+  RequireVerifiedDev:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Restrict /v1 traffic to verified developers.
+  TrustProxy:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Trust x-forwarded-for from a trusted reverse proxy.
+  Hsts:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Emit HSTS headers when Anyray is served over HTTPS.
+  RateLimitRpm:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: Optional per-identity /v1 request limit per minute.
+  RateLimitIpRpm:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: Optional per-source-IP /v1 request limit per minute.
+  RateLimitUnauthRpm:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: Optional unauthenticated endpoint request limit per minute.
+  MaxConcurrentRequests:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: Optional max concurrent /v1 requests per identity or IP.
+  MaxBodyBytes:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: Optional max request body size in bytes.
+  OptimizerTimeoutMs:
+    Type: String
+    Default: '800'
+    AllowedPattern: '^[0-9]+$'
+    Description: Optimizer timeout for normal requests in milliseconds.
+  OptimizerVisionTimeoutMs:
+    Type: String
+    Default: '10000'
+    AllowedPattern: '^[0-9]+$'
+    Description: Optimizer timeout for vision requests in milliseconds.
+
+Rules:
+  AllowedCidrMustNotBePublic:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AllowedCidr, '0.0.0.0/0']]
+        AssertDescription: AllowedCidr must be scoped to your org or VPN, not 0.0.0.0/0.
 
 Resources:
   AnyraySecurityGroup:
@@ -125,7 +219,34 @@ Resources:
           git clone --depth 1 https://github.com/anyrayHQ/install anyray
           cd anyray
           export ANYRAY_IMAGE_TAG='${ImageTag}'
-          ./setup.sh --host "$PUBIP"
+          SETUP_ARGS=(--host "$PUBIP")
+          if [ -n '${DeploymentToken}' ]; then
+            SETUP_ARGS+=(--connect '${DeploymentToken}')
+          fi
+          if [ -n '${GatewayPublicUrl}' ]; then
+            SETUP_ARGS+=(--gateway-url '${GatewayPublicUrl}')
+          fi
+          ./setup.sh "${!SETUP_ARGS[@]}"
+          set_env() {
+            key="$1"
+            value="$2"
+            grep -v "^${!key}=" .env > .env.tmp || true
+            printf '%s=%s\n' "$key" "$value" >> .env.tmp
+            mv .env.tmp .env
+          }
+          set_env ANYRAY_GATEWAY_PUBLIC_URL '${GatewayPublicUrl}'
+          set_env ANYRAY_CONSOLE_PUBLIC_URL '${ConsolePublicUrl}'
+          set_env ANYRAY_REQUIRE_CLIENT_KEYS '${RequireClientKeys}'
+          set_env ANYRAY_REQUIRE_VERIFIED_DEV '${RequireVerifiedDev}'
+          set_env ANYRAY_TRUST_PROXY '${TrustProxy}'
+          set_env ANYRAY_HSTS '${Hsts}'
+          set_env ANYRAY_RATE_LIMIT_RPM '${RateLimitRpm}'
+          set_env ANYRAY_RATE_LIMIT_IP_RPM '${RateLimitIpRpm}'
+          set_env ANYRAY_RATE_LIMIT_UNAUTH_RPM '${RateLimitUnauthRpm}'
+          set_env ANYRAY_MAX_CONCURRENT_REQUESTS '${MaxConcurrentRequests}'
+          set_env ANYRAY_MAX_BODY_BYTES '${MaxBodyBytes}'
+          set_env ANYRAY_OPTIMIZER_TIMEOUT_MS '${OptimizerTimeoutMs}'
+          set_env ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS '${OptimizerVisionTimeoutMs}'
           docker compose up -d
 
 Outputs:

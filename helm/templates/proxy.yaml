@@ -39,9 +39,16 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: proxy
 spec:
-  type: ClusterIP
+  type: {{ .Values.proxy.service.type }}
+  {{- with .Values.proxy.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     {{- include "anyray.selectorLabels" (dict "component" "proxy" "context" .) | nindent 4 }}
   ports:
     - port: 3000
       targetPort: 80
+      {{- with .Values.proxy.service.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}

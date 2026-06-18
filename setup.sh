@@ -9,7 +9,8 @@
 #   x-anyray-config header. Safe to re-run to change the upstream.
 # Idempotent: never overwrites existing secrets; --connect (re)writes only the
 # Anyray Cloud connect vars and --upstream only the upstream vars. Flags: --host
-# <h> --k8s --connect <adt_token> --gateway-url <url> --upstream <url>.
+# <h> --k8s --namespace <namespace> --connect <adt_token>
+# --gateway-url <url> --upstream <url>.
 # (--control-plane <url> is DEV/INTERNAL ONLY: the vendor host is pinned +
 # defaulted in the gateway image, so a normal connect never needs it; passing it
 # only does anything for an internal/dev gateway build via the unsafe override
@@ -22,21 +23,35 @@ CONNECT_TOKEN=""
 CONTROL_PLANE="https://app.anyray.ai"
 GATEWAY_URL=""
 UPSTREAM_URL=""
+NAMESPACE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --host) HOST="${2:?--host needs a value}"; shift 2 ;;
     --k8s)  K8S=1; shift ;;
+    --namespace)     NAMESPACE="${2:?--namespace needs a Kubernetes namespace}"; shift 2 ;;
     --connect)       CONNECT_TOKEN="${2:?--connect needs a deployment token (adt_…)}"; shift 2 ;;
     --control-plane) CONTROL_PLANE="${2:?--control-plane needs a URL}"; shift 2 ;;
     --gateway-url)   GATEWAY_URL="${2:?--gateway-url needs a URL}"; shift 2 ;;
     --upstream)      UPSTREAM_URL="${2:?--upstream needs a URL (e.g. http://host.docker.internal:4000)}"; shift 2 ;;
-    *) echo "✗ unknown flag: $1 (supported: --host <hostname-or-ip> --k8s --connect <adt_token> --control-plane <url> --gateway-url <url> --upstream <url>)" >&2; exit 1 ;;
+    *) echo "✗ unknown flag: $1 (supported: --host <hostname-or-ip> --k8s --namespace <namespace> --connect <adt_token> --control-plane <url> --gateway-url <url> --upstream <url>)" >&2; exit 1 ;;
   esac
 done
 
 if [ "$K8S" -eq 1 ] && [ -n "$UPSTREAM_URL" ]; then
   echo "✗ --upstream supports the docker compose flow only (set upstream.url in my-values.yaml for Helm)" >&2
   exit 1
+fi
+
+if [ "$K8S" -eq 0 ] && [ -n "$NAMESPACE" ]; then
+  echo "✗ --namespace supports the Kubernetes/Helm flow only; add --k8s or remove --namespace" >&2
+  exit 1
+fi
+
+if [ -n "$NAMESPACE" ]; then
+  if [ ${#NAMESPACE} -gt 63 ] || ! printf '%s' "$NAMESPACE" | grep -Eq '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'; then
+    echo "✗ --namespace must be a valid Kubernetes namespace name (DNS label, max 63 chars)" >&2
+    exit 1
+  fi
 fi
 
 command -v openssl >/dev/null 2>&1 || { echo "✗ openssl not found" >&2; exit 1; }
@@ -79,6 +94,9 @@ b64enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
 write_values_stub() {
   {
     echo "# Anyray Helm values — safe to commit (no secrets here)."
+    if [ -n "$NAMESPACE" ]; then
+      echo "# Namespace: ${NAMESPACE} (set with kubectl -n / helm --namespace; not a Helm value)."
+    fi
     echo "host: \"${HOST}\""
     echo ""
     echo "image:"
@@ -116,6 +134,56 @@ enable_metering() {
       if (!gw_seen) { print "gateway:"; print "  metering:"; print "    enabled: true" }
     }
   ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+set_secret_namespace() {
+  [ -n "$NAMESPACE" ] || return 0
+  awk -v ns="$NAMESPACE" '
+    /^metadata:[[:space:]]*$/ { in_meta=1; wrote=0; print; next }
+    in_meta && /^[[:space:]]+namespace:[[:space:]]*/ {
+      if (!wrote) { print "  namespace: " ns; wrote=1 }
+      next
+    }
+    in_meta && /^[[:space:]]+name:[[:space:]]*/ {
+      print
+      if (!wrote) { print "  namespace: " ns; wrote=1 }
+      next
+    }
+    in_meta && /^[^[:space:]]/ {
+      if (!wrote) { print "  namespace: " ns; wrote=1 }
+      in_meta=0
+      print
+      next
+    }
+    { print }
+    END {
+      if (in_meta && !wrote) { print "  namespace: " ns }
+    }
+  ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+kubectl_apply_command() {
+  if [ -n "$NAMESPACE" ]; then
+    echo "kubectl apply -n ${NAMESPACE} -f anyray-secrets.yaml"
+  else
+    echo "kubectl apply -f anyray-secrets.yaml"
+  fi
+}
+
+helm_install_command() {
+  if [ -n "$NAMESPACE" ]; then
+    echo "helm install anyray ./helm -f my-values.yaml --namespace ${NAMESPACE}"
+  else
+    echo "helm install anyray ./helm -f my-values.yaml"
+  fi
+}
+
+helm_upgrade_command() {
+  if [ -n "$NAMESPACE" ]; then
+    echo "helm upgrade anyray ./helm -f my-values.yaml --namespace ${NAMESPACE}"
+  else
+    echo "helm upgrade anyray ./helm -f my-values.yaml"
+  fi
 }
 
 # ── Docker Compose mode ──────────────────────────────────────────────────────
@@ -387,6 +455,11 @@ if [ -n "$CONNECT_TOKEN" ]; then
 fi
 
 if [ -f anyray-secrets.yaml ]; then
+  if [ -n "$NAMESPACE" ]; then
+    set_secret_namespace anyray-secrets.yaml
+    echo "✓ anyray-secrets.yaml already existed — set metadata.namespace to ${NAMESPACE} (secrets unchanged)"
+  fi
+
   if [ -n "$CONNECT_TOKEN" ]; then
     # Fold the Anyray Cloud connect vars into the existing Secret IN PLACE — every
     # other key is kept, only the connect keys are (re)written. Reuse the existing
@@ -416,12 +489,14 @@ if [ -f anyray-secrets.yaml ]; then
     fi
     echo ""
     echo "  Next:"
-    echo "    kubectl apply -f anyray-secrets.yaml"
-    echo "    helm upgrade anyray ./helm -f my-values.yaml"
+    echo "    $(kubectl_apply_command)"
+    echo "    $(helm_upgrade_command)"
     echo ""
     echo "  Then:      this deployment appears as Connected at ${CONTROL_PLANE} within a minute"
   else
-    echo "✓ anyray-secrets.yaml already exists — leaving it untouched (delete it to regenerate)"
+    if [ -z "$NAMESPACE" ]; then
+      echo "✓ anyray-secrets.yaml already exists — leaving it untouched (delete it to regenerate)"
+    fi
   fi
   exit 0
 fi
@@ -474,9 +549,11 @@ if [ -n "$CONNECT_TOKEN" ]; then
   ANYRAY_PSEUDONYM_SALT: $(b64enc "$PSEUDONYM_SALT")
 EOF
 fi
+set_secret_namespace anyray-secrets.yaml
 chmod 600 anyray-secrets.yaml
 
 echo "✓ Secrets generated → anyray-secrets.yaml"
+[ -n "$NAMESPACE" ] && echo "  Namespace: ${NAMESPACE} (must already exist; setup.sh does not create it)"
 [ -n "$CONNECT_TOKEN" ] && echo "  ✓ Anyray Cloud connect vars folded in (deployment token + pseudonym salt)"
 
 if [ -f my-values.yaml ]; then
@@ -492,8 +569,8 @@ else
 fi
 echo ""
 echo "  Next:"
-echo "    kubectl apply -f anyray-secrets.yaml"
-echo "    helm install anyray ./helm -f my-values.yaml"
+echo "    $(kubectl_apply_command)"
+echo "    $(helm_install_command)"
 echo ""
 echo "  Admin key: ${ADMIN_TOKEN}   (base64-encoded in anyray-secrets.yaml)"
 echo "  Console:   http://${HOST}:3000  (after pods are ready)"

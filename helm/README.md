@@ -8,35 +8,43 @@ dependencies — all services are self-contained in this chart.
 - Kubernetes 1.24+
 - Helm 3.10+
 - A default StorageClass (or set `*.storageClass` in values)
+- A target namespace that already exists, if you install outside your current namespace
 - `setup.sh --k8s` run locally to generate the Secret manifest
 
 ## Install
 
 ```bash
-# 1. Generate secrets
-./setup.sh --k8s --host <your-hostname-or-ip>
+# 1. Choose the namespace (optional, but recommended)
+export ANYRAY_NAMESPACE=<your-namespace>
+kubectl create namespace "$ANYRAY_NAMESPACE"   # optional: only if it does not already exist
+
+# 2. Generate secrets
+./setup.sh --k8s --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
 # Emits: anyray-secrets.yaml  my-values.yaml
 
-# 2. Apply the Secret
-kubectl apply -f anyray-secrets.yaml
+# 3. Apply the Secret
+kubectl apply -n "$ANYRAY_NAMESPACE" -f anyray-secrets.yaml
 
-# 3. Install the chart
-helm install anyray ./helm -f my-values.yaml
+# 4. Install the chart
+helm install anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 
-# 4. Wait for pods
-kubectl rollout status deployment/anyray-gateway
-kubectl rollout status deployment/anyray-web
+# 5. Wait for pods
+kubectl rollout status -n "$ANYRAY_NAMESPACE" deployment/anyray-gateway
+kubectl rollout status -n "$ANYRAY_NAMESPACE" deployment/anyray-web
 
-# 5. Access
+# 6. Access
 #   Console: http://<host>:3000  (via NodePort or Ingress — see values.yaml)
 #   Gateway: http://<host>:8787
 ```
+
+Omit `--namespace` and the `-n` / `--namespace` flags to use your current kubectl
+and Helm namespace. `setup.sh` never creates a namespace automatically.
 
 ## Upgrade
 
 ```bash
 git pull
-helm upgrade anyray ./helm -f my-values.yaml
+helm upgrade anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 ```
 
 ## Connect to Anyray Cloud (metering)
@@ -45,7 +53,7 @@ To meter usage and receive a signed entitlement lease (so the deployment shows
 **Connected** in the portal), generate the manifests with `--connect`:
 
 ```bash
-./setup.sh --k8s --connect adt_XXXX --host <your-hostname-or-ip>
+./setup.sh --k8s --connect adt_XXXX --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
 ```
 
 This folds `ANYRAY_DEPLOYMENT_TOKEN` and a locally-generated `ANYRAY_PSEUDONYM_SALT`
@@ -63,9 +71,15 @@ before the content-free usage rollup is sent. Tune cadence with
 By default all Services are `ClusterIP`. To expose externally:
 
 **NodePort (simplest for on-prem / bare metal):**
-```bash
-kubectl patch svc anyray-proxy -p '{"spec":{"type":"NodePort","ports":[{"port":3000,"nodePort":30000}]}}'
-kubectl patch svc gateway -p '{"spec":{"type":"NodePort","ports":[{"port":8787,"nodePort":30787}]}}'
+```yaml
+proxy:
+  service:
+    type: NodePort
+    nodePort: 30000
+gateway:
+  service:
+    type: NodePort
+    nodePort: 30787
 ```
 
 Note: the `gateway`, `web`, and `optimizer` Services use bare (unprefixed) names
@@ -73,7 +87,19 @@ because nginx inside the proxy image hardcodes those upstream hostnames. Install
 the chart in its own namespace to avoid name collisions.
 
 **LoadBalancer (cloud providers):**
-Edit `values.yaml` — change the `type:` for proxy and gateway Services to `LoadBalancer`.
+Set the proxy and gateway service type in `my-values.yaml`, and scope traffic to your org/VPN:
+```yaml
+proxy:
+  service:
+    type: LoadBalancer
+    loadBalancerSourceRanges:
+      - 203.0.113.0/24
+gateway:
+  service:
+    type: LoadBalancer
+    loadBalancerSourceRanges:
+      - 203.0.113.0/24
+```
 
 **Ingress:** Set `ingress.enabled: true` in your values file and fill in `ingress.className`
 and any cert-manager annotations. See the commented example in `values.yaml`.
@@ -107,3 +133,6 @@ kubectl delete -f anyray-secrets.yaml
 # To also delete PVC data (destructive):
 kubectl delete pvc -l app.kubernetes.io/instance=anyray
 ```
+
+Add `--namespace "$ANYRAY_NAMESPACE"` to `helm uninstall` and `-n "$ANYRAY_NAMESPACE"`
+to `kubectl delete` commands when you installed into a specific namespace.

@@ -17,6 +17,12 @@ secretName: anyray-secrets
 # Gateway
 gateway:
   replicas: 1
+  service:
+    type: ClusterIP
+    # Set for NodePort installs, for example: 30787
+    nodePort: null
+    # Set for LoadBalancer installs to keep the gateway private to your org/VPN.
+    loadBalancerSourceRanges: []
   resources:
     requests:
       cpu: "100m"
@@ -75,6 +81,12 @@ optimizer:
 # Proxy (nginx reverse proxy / console)
 proxy:
   replicas: 1
+  service:
+    type: ClusterIP
+    # Set for NodePort installs, for example: 30000
+    nodePort: null
+    # Set for LoadBalancer installs to keep the console private to your org/VPN.
+    loadBalancerSourceRanges: []
   resources:
     requests:
       cpu: "25m"

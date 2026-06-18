@@ -580,3 +580,4 @@ echo "  Admin key: ${ADMIN_TOKEN}   (base64-encoded in anyray-secrets.yaml)"
 echo "  Console:   http://${HOST}:3000  (after pods are ready)"
 echo "  Gateway:   http://${HOST}:8787"
 [ -n "$CONNECT_TOKEN" ] && echo "  Then:      this deployment appears as Connected at ${CONTROL_PLANE} within a minute"
+exit 0

@@ -1,3 +1,4 @@
+{{- if .Values.minio.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -13,13 +14,14 @@ spec:
       {{- include "anyray.selectorLabels" (dict "component" "minio" "context" .) | nindent 6 }}
   template:
     metadata:
-      labels:
-        {{- include "anyray.selectorLabels" (dict "component" "minio" "context" .) | nindent 8 }}
+      {{- include "anyray.podMetadata" (dict "component" "minio" "context" .) | nindent 6 }}
     spec:
+      {{- include "anyray.podSpecCommon" . | nindent 6 }}
       containers:
         - name: minio
-          # digest pin: Chainguard's free tier publishes only :latest, no version tags
-          image: cgr.dev/chainguard/minio:latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07
+          image: {{ include "anyray.image" (dict "component" "minio" "context" .) }}
+          imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "minio" "context" .) }}
+          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
           command: ["/bin/sh", "-c"]
           args:
             - "mkdir -p /data/langfuse && minio server --address :9000 /data"
@@ -70,3 +72,4 @@ spec:
   ports:
     - port: 9000
       targetPort: 9000
+{{- end }}

@@ -12,13 +12,18 @@ spec:
       {{- include "anyray.selectorLabels" (dict "component" "proxy" "context" .) | nindent 6 }}
   template:
     metadata:
-      labels:
-        {{- include "anyray.selectorLabels" (dict "component" "proxy" "context" .) | nindent 8 }}
+      {{- include "anyray.podMetadata" (dict "component" "proxy" "context" .) | nindent 6 }}
     spec:
+      {{- include "anyray.podSpecCommon" . | nindent 6 }}
       containers:
         - name: proxy
-          image: ghcr.io/anyrayhq/proxy:{{ .Values.image.tag }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "anyray.image" (dict "component" "proxy" "context" .) }}
+          imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "proxy" "context" .) }}
+          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
+          {{- with .Values.proxy.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: 80
           readinessProbe:

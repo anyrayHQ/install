@@ -20,13 +20,14 @@ spec:
       {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 6 }}
   template:
     metadata:
-      labels:
-        {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 8 }}
+      {{- include "anyray.podMetadata" (dict "component" "optimizer" "context" .) | nindent 6 }}
     spec:
+      {{- include "anyray.podSpecCommon" . | nindent 6 }}
       containers:
         - name: optimizer
-          image: ghcr.io/anyrayhq/optimizer:{{ .Values.image.tag }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "anyray.image" (dict "component" "optimizer" "context" .) }}
+          imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "optimizer" "context" .) }}
+          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
           env:
             - name: PORT
               value: "8088"
@@ -40,6 +41,9 @@ spec:
               value: /data/optimizer.config.json
             - name: ANYRAY_OPTIMIZER_AUDIT_FILE
               value: /data/optimizer-settings-audit.log
+            {{- with .Values.optimizer.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - containerPort: 8088
           readinessProbe:

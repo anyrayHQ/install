@@ -107,6 +107,146 @@ gateway:
 **Ingress:** Set `ingress.enabled: true` in your values file and fill in `ingress.className`
 and any cert-manager annotations. See the commented example in `values.yaml`.
 
+For TLS / Ingress installs, set the console's public URL explicitly so auth
+callbacks use the externally reachable scheme and host:
+
+```yaml
+web:
+  nextauthUrl: https://anyray.example.com
+gateway:
+  publicUrl: https://anyray.example.com
+  consolePublicUrl: https://anyray.example.com
+```
+
+If you need multiple Ingress hosts or non-default paths, use `ingress.hosts`:
+
+```yaml
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: anyray.example.com
+      paths:
+        console: /
+        gateway: /v1
+        admin: /admin
+```
+
+## Cluster policy knobs
+
+Set these values when your cluster requires a specific service account, private
+registry pull secret, scheduling constraints, or pod security context:
+
+```yaml
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/anyray
+
+image:
+  pullSecrets:
+    - name: ghcr-pull-secret
+
+nodeSelector:
+  workload: ai-platform
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: ai-platform
+    effect: NoSchedule
+podSecurityContext:
+  runAsNonRoot: true
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+```
+
+All component images can be redirected to an internal registry:
+
+```yaml
+images:
+  gateway:
+    repository: registry.example.com/anyray/gateway
+    tag: v1.10.3
+  optimizer:
+    repository: registry.example.com/anyray/optimizer
+    tag: v1.10.3
+  web:
+    repository: registry.example.com/langfuse/langfuse
+    tag: "3"
+```
+
+## Gateway runtime knobs
+
+Gateway security and traffic controls are first-class Helm values:
+
+```yaml
+gateway:
+  requireClientKeys: "true"
+  requireVerifiedDev: "true"
+  hsts: "true"
+  trustProxy: "true"
+  rateLimitRpm: "600"
+  rateLimitUnauthRpm: "60"
+  maxBodyBytes: "10485760"
+```
+
+Use `gateway.extraEnv`, `optimizer.extraEnv`, `web.extraEnv`, `worker.extraEnv`,
+or `proxy.extraEnv` for advanced environment variables not modeled directly.
+
+## External backing services
+
+The chart is self-contained by default. To use managed services, disable the
+bundled StatefulSet and point the web/worker pods at your external endpoint.
+Prefer Secret references for credentials:
+
+```yaml
+postgres:
+  enabled: false
+  external:
+    databaseUrlSecretKeyRef:
+      name: anyray-external-postgres
+      key: DATABASE_URL
+
+clickhouse:
+  enabled: false
+  external:
+    migrationUrl: clickhouse://clickhouse.example.com:9000
+    url: https://clickhouse.example.com:8123
+    user: clickhouse
+    passwordSecretKeyRef:
+      name: anyray-external-clickhouse
+      key: CLICKHOUSE_PASSWORD
+
+minio:
+  enabled: false
+objectStorage:
+  accessKeyIdSecretKeyRef:
+    name: anyray-external-s3
+    key: AWS_ACCESS_KEY_ID
+  secretAccessKeySecretKeyRef:
+    name: anyray-external-s3
+    key: AWS_SECRET_ACCESS_KEY
+  eventUpload:
+    bucket: anyray-langfuse
+    region: us-east-1
+    endpoint: https://s3.amazonaws.com
+    forcePathStyle: "false"
+  mediaUpload:
+    bucket: anyray-langfuse
+    region: us-east-1
+    endpoint: https://s3.amazonaws.com
+    forcePathStyle: "false"
+
+redis:
+  enabled: false
+  external:
+    host: redis.example.com
+    port: "6379"
+    authSecretKeyRef:
+      name: anyray-external-redis
+      key: REDIS_AUTH
+```
+
 ## v1 limitations to be aware of
 
 - **Gateway and optimizer state is on single-attach PVCs.** Provider keys, routing
@@ -117,10 +257,9 @@ and any cert-manager annotations. See the commented example in `values.yaml`.
   the chart fails fast if you raise replicas with persistence enabled. Scaling
   beyond one replica requires moving gateway state out of files (planned follow-up).
   Set `gateway.persistence.enabled: false` to fall back to ephemeral `emptyDir`.
-- **Single-replica datastores.** Postgres, ClickHouse, MinIO, Redis are all `replicas: 1`
-  StatefulSets — adequate for most orgs, but not HA. Use managed cloud equivalents
-  (RDS, Cloud SQL, etc.) by pointing the env vars at an external host and removing the
-  corresponding StatefulSet from the chart.
+- **Single-replica bundled datastores.** Postgres, ClickHouse, MinIO, Redis are
+  all `replicas: 1` StatefulSets when enabled — adequate for most orgs, but not
+  HA. Use the external-service values above for managed cloud equivalents.
 
 ## Secrets
 

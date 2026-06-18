@@ -12,12 +12,14 @@ spec:
       {{- include "anyray.selectorLabels" (dict "component" "web" "context" .) | nindent 6 }}
   template:
     metadata:
-      labels:
-        {{- include "anyray.selectorLabels" (dict "component" "web" "context" .) | nindent 8 }}
+      {{- include "anyray.podMetadata" (dict "component" "web" "context" .) | nindent 6 }}
     spec:
+      {{- include "anyray.podSpecCommon" . | nindent 6 }}
       containers:
         - name: web
-          image: docker.io/langfuse/langfuse:3
+          image: {{ include "anyray.image" (dict "component" "web" "context" .) }}
+          imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "web" "context" .) }}
+          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
           env:
             {{- if .Values.web.nodeOptions }}
             # Pin the V8 heap so the console doesn't OOM during init. Langfuse
@@ -28,17 +30,11 @@ spec:
               value: {{ .Values.web.nodeOptions | quote }}
             {{- end }}
             - name: NEXTAUTH_URL
-              value: "http://{{ .Values.host }}:3000"
+              value: {{ default (printf "http://%s:3000" .Values.host) .Values.web.nextauthUrl | quote }}
             - name: NEXTAUTH_SECRET
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "NEXTAUTH_SECRET" "context" .) | nindent 16 }}
-            # POSTGRES_PASSWORD must precede DATABASE_URL: k8s only resolves
-            # $(VAR) against vars declared earlier in the env list.
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                {{- include "anyray.secretRef" (dict "key" "POSTGRES_PASSWORD" "context" .) | nindent 16 }}
-            - name: DATABASE_URL
-              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
+            {{- include "anyray.postgresEnv" . | nindent 12 }}
             - name: SALT
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "SALT" "context" .) | nindent 16 }}
@@ -47,54 +43,9 @@ spec:
                 {{- include "anyray.secretRef" (dict "key" "ENCRYPTION_KEY" "context" .) | nindent 16 }}
             - name: TELEMETRY_ENABLED
               value: "false"
-            - name: CLICKHOUSE_MIGRATION_URL
-              value: "clickhouse://{{ include "anyray.fullname" . }}-clickhouse:9000"
-            - name: CLICKHOUSE_URL
-              value: "http://{{ include "anyray.fullname" . }}-clickhouse:8123"
-            - name: CLICKHOUSE_USER
-              value: clickhouse
-            - name: CLICKHOUSE_PASSWORD
-              valueFrom:
-                {{- include "anyray.secretRef" (dict "key" "CLICKHOUSE_PASSWORD" "context" .) | nindent 16 }}
-            - name: CLICKHOUSE_CLUSTER_ENABLED
-              value: "false"
-            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
-              value: langfuse
-            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
-              value: auto
-            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
-              value: minio
-            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
-              valueFrom:
-                {{- include "anyray.secretRef" (dict "key" "MINIO_ROOT_PASSWORD" "context" .) | nindent 16 }}
-            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
-              value: "http://{{ include "anyray.fullname" . }}-minio:9000"
-            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
-              value: "true"
-            - name: LANGFUSE_S3_EVENT_UPLOAD_PREFIX
-              value: events/
-            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
-              value: langfuse
-            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
-              value: auto
-            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
-              value: minio
-            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
-              valueFrom:
-                {{- include "anyray.secretRef" (dict "key" "MINIO_ROOT_PASSWORD" "context" .) | nindent 16 }}
-            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
-              value: "http://{{ include "anyray.fullname" . }}-minio:9000"
-            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
-              value: "true"
-            - name: LANGFUSE_S3_MEDIA_UPLOAD_PREFIX
-              value: media/
-            - name: REDIS_HOST
-              value: "{{ include "anyray.fullname" . }}-redis"
-            - name: REDIS_PORT
-              value: "6379"
-            - name: REDIS_AUTH
-              valueFrom:
-                {{- include "anyray.secretRef" (dict "key" "REDIS_AUTH" "context" .) | nindent 16 }}
+            {{- include "anyray.clickhouseEnv" . | nindent 12 }}
+            {{- include "anyray.objectStorageEnv" . | nindent 12 }}
+            {{- include "anyray.redisEnv" . | nindent 12 }}
             - name: LANGFUSE_INIT_ORG_ID
               value: anyray
             - name: LANGFUSE_INIT_ORG_NAME
@@ -116,6 +67,9 @@ spec:
             - name: LANGFUSE_INIT_USER_PASSWORD
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_INIT_USER_PASSWORD" "context" .) | nindent 16 }}
+            {{- with .Values.web.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - containerPort: 3000
           readinessProbe:

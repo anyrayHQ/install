@@ -13,13 +13,15 @@ spec:
   backoffLimit: 5
   template:
     metadata:
-      labels:
-        {{- include "anyray.selectorLabels" (dict "component" "model-seeder" "context" .) | nindent 8 }}
+      {{- include "anyray.podMetadata" (dict "component" "model-seeder" "context" .) | nindent 6 }}
     spec:
+      {{- include "anyray.podSpecCommon" . | nindent 6 }}
       restartPolicy: OnFailure
       containers:
         - name: model-seeder
-          image: docker.io/library/node:20-alpine
+          image: {{ include "anyray.image" (dict "component" "modelSeeder" "context" .) }}
+          imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "modelSeeder" "context" .) }}
+          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
           command: ["node", "/seed/seedModelPrices.mjs"]
           env:
             - name: ANYRAY_OBSERVABILITY_BASEURL

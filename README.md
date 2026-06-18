@@ -162,13 +162,19 @@ hosted for the Launch button at
 **Railway** — one-click deploy; Railway auto-generates every secret. The authoritative
 spec is [`railway/railway.template.json`](./railway); see [`railway/README.md`](./railway/README.md).
 
-**Attach mode (keep your existing gateway)** — already running LiteLLM / Kong / Envoy?
-Run only Anyray's optimizer + console and call it as a before/after-request hook, so you
-keep your gateway and still get prompt/tool/param optimization plus content-free traces:
+**Optional LiteLLM attach mode** — the default Anyray install runs the Anyray
+gateway. Use attach mode only when an existing LiteLLM endpoint must remain the
+developer-facing gateway. It runs only Anyray's optimizer + console and calls the
+optimizer as a LiteLLM before/after-request hook:
 
+    ./setup.sh --host <anyray-host>
     docker compose -f docker-compose.attach.yml up -d
 
-See [`attach/litellm/README.md`](./attach/litellm/README.md).
+Attach mode does not run the Anyray gateway on `:8787`, so `anyray-connect` is
+not used; developers keep pointing at LiteLLM. If LiteLLM runs on a different
+machine, set `ANYRAY_OPTIMIZER_BIND=0.0.0.0` in `.env` and expose `:8088` only
+over a private network or VPN. See
+[`attach/litellm/README.md`](./attach/litellm/README.md).
 
 ## Install with your AI agent
 

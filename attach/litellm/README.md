@@ -1,8 +1,12 @@
-# Anyray attach mode — LiteLLM integration
+# Optional Anyray attach mode — LiteLLM integration
 
 **Requirements:** Python 3.9+, `httpx` package (`pip install httpx`).
 
-Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
+The default Anyray install runs the **Anyray gateway** and developer tools point
+at Anyray. Use this optional attach mode only when an existing LiteLLM proxy must
+remain the developer-facing gateway.
+
+Drop-in Anyray optimizer integration for that existing LiteLLM proxy gives you:
 
 - Prompt compression, tool pruning, and param tuning before each request.
 - Response (output) optimization after each request.
@@ -19,15 +23,30 @@ Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
 
 ## Installation
 
-1. Run the Anyray attach stack:
+1. Generate the Anyray secrets:
+
+   ```
+   ./setup.sh --host <anyray-host>
+   ```
+
+   `setup.sh` writes `.env`, including `ANYRAY_ADMIN_TOKEN`,
+   `ANYRAY_OPTIMIZER_TOKEN`, Langfuse project keys, and the content-encryption
+   key. It is safe to re-run; it does not overwrite existing secrets.
+
+2. Run the Anyray attach stack:
 
    ```
    docker compose -f docker-compose.attach.yml up -d
    ```
 
-2. Copy `anyray_optimizer.py` next to your LiteLLM `config.yaml`.
+   By default the optimizer is published on `127.0.0.1:8088`, which is correct
+   when LiteLLM runs on the same host. If LiteLLM runs on another machine, set
+   `ANYRAY_OPTIMIZER_BIND=0.0.0.0` in `.env`, keep `:8088` reachable only over a
+   private network or VPN, and restart the stack.
 
-3. Add to your LiteLLM `config.yaml` (merge with `config.yaml` in this directory):
+3. Copy `anyray_optimizer.py` next to your LiteLLM `config.yaml`.
+
+4. Add to your LiteLLM `config.yaml` (merge with `config.yaml` in this directory):
 
    ```yaml
    litellm_settings:
@@ -35,7 +54,7 @@ Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
        - anyray_optimizer.proxy_handler_instance
    ```
 
-4. Set these env vars in your LiteLLM process (or add to its Docker environment):
+5. Set these env vars in your LiteLLM process (or add to its Docker environment):
 
    ```
    ANYRAY_OPTIMIZER_URL=http://<anyray-host>:8088
@@ -47,7 +66,11 @@ Drop-in Anyray optimizer integration for an existing LiteLLM proxy. Gives you:
    you should **not** add a native `success_callback: langfuse`, which would record
    every call twice.
 
-5. Open the console at http://<anyray-host>:3000, sign in with `ANYRAY_ADMIN_TOKEN`.
+6. Open the console at http://<anyray-host>:3000, sign in with `ANYRAY_ADMIN_TOKEN`.
+
+Do not run `anyray-connect` for attach mode. `anyray-connect` points developer
+tools at the Anyray gateway (`:8787`), and attach mode intentionally does not run
+that gateway. Developers keep using your existing LiteLLM endpoint.
 
 ## What you see in the console
 
@@ -65,6 +88,11 @@ Not available (gateway-dependent):
 - Routing page — requires the Anyray gateway's routing config.
 - Users page — requires the Anyray gateway's user-caps config.
 - Playground — requires the Anyray gateway.
+- Pricing page — requires the Anyray gateway's pricing config.
+- Content privacy page — requires the Anyray gateway's settings API; attach mode
+  privacy is controlled by `ANYRAY_CONTENT_MODE` on the optimizer service.
+- Invite developers / connect links — require the Anyray gateway; developers keep
+  pointing at your existing LiteLLM endpoint.
 These pages show "Unable to load: request failed" — expected in attach mode.
 
 ## Traces & spend

@@ -15,7 +15,7 @@ dependencies — all services are self-contained in this chart.
 
 ```bash
 # 1. Choose the namespace (optional, but recommended)
-export ANYRAY_NAMESPACE=<your-namespace>
+export ANYRAY_NAMESPACE="team-ai"   # replace with your target namespace
 kubectl create namespace "$ANYRAY_NAMESPACE"   # optional: only if it does not already exist
 
 # 2. Generate secrets

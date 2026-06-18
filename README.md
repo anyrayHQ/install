@@ -137,7 +137,7 @@ Docker Compose (above) is the default. The repo also ships:
 **Kubernetes (Helm)** — the full stack as a self-contained chart (no external chart
 dependencies):
 
-    export ANYRAY_NAMESPACE=<your-namespace>   # optional; use an existing namespace
+    export ANYRAY_NAMESPACE="team-ai"          # optional; replace with your target namespace
     kubectl create namespace "$ANYRAY_NAMESPACE"   # optional: only if it does not already exist
     ./setup.sh --k8s --host <hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
     # emits anyray-secrets.yaml + my-values.yaml

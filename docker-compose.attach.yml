@@ -11,7 +11,7 @@ name: anyray-attach
 
 services:
   optimizer:
-    image: ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.3}
+    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.3}}"
     restart: always
     ports:
       # Exposed so the org's gateway plugin can reach it from outside Docker.
@@ -43,7 +43,7 @@ services:
       start_period: 5s
 
   proxy:
-    image: ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.3}
+    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.3}}"
     restart: always
     depends_on:
       web:
@@ -51,7 +51,7 @@ services:
       optimizer:
         condition: service_healthy
     ports:
-      - "3000:80"
+      - "${ANYRAY_CONSOLE_BIND:-0.0.0.0}:3000:80"
     environment:
       # nginx.conf.template uses this to inject Basic auth for /admin/observability/*;
       # computed at container start by the command below.
@@ -73,7 +73,7 @@ services:
   # (&anyray-attach-depends-on, &anyray-attach-backend-env) that web aliases — YAML requires
   # an anchor to appear before its alias in document order.
   worker:
-    image: docker.io/langfuse/langfuse-worker:3
+    image: "${ANYRAY_WORKER_IMAGE:-docker.io/langfuse/langfuse-worker:3}"
     restart: always
     depends_on: &anyray-attach-depends-on
       postgres:
@@ -86,35 +86,35 @@ services:
         condition: service_healthy
     environment: &anyray-attach-backend-env
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?run ./setup.sh first}@postgres:5432/postgres
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
       SALT: ${SALT:?run ./setup.sh first}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?run ./setup.sh first}
       TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-false}
-      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
-      CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run ./setup.sh first}
-      CLICKHOUSE_CLUSTER_ENABLED: "false"
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
-      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?run ./setup.sh first}
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
-      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
-      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
-      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?run ./setup.sh first}
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
-      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
-      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
+      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL:-clickhouse://clickhouse:9000}
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-${CLICKHOUSE_PASSWORD:-}}
+      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED:-false}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-auto}
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-}}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT:-http://minio:9000}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE:-true}
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_UPLOAD_PREFIX:-events/}
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:-langfuse}
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_MEDIA_UPLOAD_REGION:-auto}
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-}}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://minio:9000}
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE:-true}
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:-media/}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
       REDIS_AUTH: ${REDIS_AUTH:?run ./setup.sh first}
 
   web:
-    image: docker.io/langfuse/langfuse:3
+    image: "${ANYRAY_WEB_IMAGE:-docker.io/langfuse/langfuse:3}"
     restart: always
     depends_on: *anyray-attach-depends-on
     expose:
@@ -133,7 +133,7 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: ${ANYRAY_INIT_USER_PASSWORD:?run ./setup.sh first}
 
   clickhouse:
-    image: docker.io/clickhouse/clickhouse-server:26.3
+    image: "${ANYRAY_CLICKHOUSE_IMAGE:-docker.io/clickhouse/clickhouse-server:26.3}"
     restart: always
     user: "101:101"
     environment:
@@ -152,7 +152,7 @@ services:
 
   minio:
     # Chainguard's free tier only publishes :latest — the digest is the pin.
-    image: cgr.dev/chainguard/minio:latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07
+    image: "${ANYRAY_MINIO_IMAGE:-cgr.dev/chainguard/minio:latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07}"
     restart: always
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
@@ -169,7 +169,7 @@ services:
       start_period: 1s
 
   redis:
-    image: docker.io/redis:7
+    image: "${ANYRAY_REDIS_IMAGE:-docker.io/redis:7}"
     restart: always
     command: >
       --requirepass ${REDIS_AUTH:?run ./setup.sh first}
@@ -188,7 +188,7 @@ services:
       retries: 10
 
   postgres:
-    image: docker.io/postgres:17
+    image: "${ANYRAY_POSTGRES_IMAGE:-docker.io/postgres:17}"
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]

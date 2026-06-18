@@ -77,6 +77,10 @@ if [ "$K8S" -eq 1 ]; then
     *) echo "⚠ --host \"$HOST\" looks like an IP — that only works for the NodePort dev" >&2
        echo "  fallback. For Ingress/LoadBalancer, use the cluster's DNS endpoint." >&2 ;;
   esac
+  if [ -z "$NAMESPACE" ]; then
+    echo "ℹ No --namespace set; using your current kubectl/Helm namespace."
+    echo "  To install elsewhere, pass --namespace <existing-namespace>."
+  fi
 elif [ -z "$HOST" ]; then
   HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   # macOS: hostname has no -I — fall back to the primary interface address so

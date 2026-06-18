@@ -176,9 +176,16 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
 spec:
-  type: ClusterIP
+  type: {{ .Values.gateway.service.type }}
+  {{- with .Values.gateway.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 4 }}
   ports:
     - port: 8787
       targetPort: 8787
+      {{- with .Values.gateway.service.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}

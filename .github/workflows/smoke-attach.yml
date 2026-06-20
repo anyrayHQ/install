@@ -51,22 +51,6 @@ jobs:
           docker compose -f docker-compose.attach.yml ps
           docker compose -f docker-compose.attach.yml logs proxy web
           exit 1
-      - name: DIAGNOSE observability 400 (temporary)
-        if: failure()
-        run: |
-          ADMIN=$(grep '^ANYRAY_ADMIN_TOKEN=' .env | cut -d= -f2)
-          PK=$(grep '^ANYRAY_OBSERVABILITY_PUBLIC_KEY=' .env | cut -d= -f2)
-          SK=$(grep '^ANYRAY_OBSERVABILITY_SECRET_KEY=' .env | cut -d= -f2)
-          echo "=== A) via proxy /admin/observability/traces (full response) ==="
-          curl -isS "http://127.0.0.1:3000/admin/observability/traces?page=1" -H "Cookie: anyray_key=$ADMIN" | head -40 || true
-          echo "=== B) proxy: rendered Authorization line + OBS env ==="
-          docker compose -f docker-compose.attach.yml exec -T proxy sh -c 'env | grep -i OBS; echo ---; grep -n "Authorization" /etc/nginx/conf.d/default.conf' || true
-          echo "=== C) direct to langfuse web /api/public/traces with .env keys (Basic pk:sk) ==="
-          docker compose -f docker-compose.attach.yml exec -T proxy sh -c "curl -isS -u '$PK:$SK' 'http://web:3000/api/public/traces?page=1'" | head -40 || true
-          echo "=== D) langfuse health + projects/keys (no auth) ==="
-          docker compose -f docker-compose.attach.yml exec -T proxy sh -c "curl -isS 'http://web:3000/api/public/health' | head -10; echo; curl -isS 'http://web:3000/api/public/traces?page=1' | head -10" || true
-          echo "=== E) web init-script provisioning lines ==="
-          docker compose -f docker-compose.attach.yml logs web 2>&1 | grep -iE "init|seed|project|org|api[- ]?key|created|skip|already|headless|error" | grep -ivE "migration|_idx" | head -30 || true
       - name: Probe surfaces
         run: |
           set -e

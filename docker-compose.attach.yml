@@ -53,19 +53,15 @@ services:
     ports:
       - "${ANYRAY_CONSOLE_BIND:-0.0.0.0}:3000:80"
     environment:
-      # nginx.conf.template uses this to inject Basic auth for /admin/observability/*;
-      # computed at container start by the command below.
-      ANYRAY_OBS_BASIC_AUTH: ""
-      ANYRAY_OBSERVABILITY_PUBLIC_KEY: ${ANYRAY_OBSERVABILITY_PUBLIC_KEY:?run ./setup.sh first}
-      ANYRAY_OBSERVABILITY_SECRET_KEY: ${ANYRAY_OBSERVABILITY_SECRET_KEY:?run ./setup.sh first}
+      # Basic auth (base64 of pk:sk) the nginx template injects for
+      # /admin/observability/*. Pre-encoded on the host by setup.sh: encoding it
+      # inside this Alpine/busybox proxy wrapped the base64 at column 76 and left
+      # a newline in the rendered Authorization header, so Langfuse rejected every
+      # observability read with 400 Bad Request (the attach smoke test never passed).
+      ANYRAY_OBS_BASIC_AUTH: ${ANYRAY_OBS_BASIC_AUTH:?run ./setup.sh first}
     volumes:
       # Mount the attach-mode nginx config over the baked default.
       - ./attach/nginx.conf:/etc/nginx/templates/default.conf.template:ro
-    command: >
-      sh -c "
-        export ANYRAY_OBS_BASIC_AUTH=$$(printf '%s:%s' \"$$ANYRAY_OBSERVABILITY_PUBLIC_KEY\" \"$$ANYRAY_OBSERVABILITY_SECRET_KEY\" | base64 | tr -d '\n')
-        exec /docker-entrypoint.sh nginx -g 'daemon off;'
-      "
 
   # model-seeder intentionally absent — no gateway spend store in attach mode.
 

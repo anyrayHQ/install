@@ -29,13 +29,25 @@ jobs:
           docker compose -f docker-compose.attach.yml ps
           docker compose -f docker-compose.attach.yml logs optimizer
           exit 1
-      - name: Wait for console (proxy + web)
+      - name: Wait for console + observability backend
         run: |
-          for _ in $(seq 1 30); do
-            if curl -fso /dev/null http://127.0.0.1:3000/anyray-login 2>/dev/null; then exit 0; fi
+          # /anyray-login is served by nginx directly, so it goes 200 well before
+          # the Langfuse `web` API backend (:3000) finishes its cold start. Waiting
+          # only on the login page lets the observability probe below race web and
+          # get a 502 (nginx "connection refused" to the upstream). Wait for the
+          # actual read path (nginx -> web /api/public/*) to return 200 instead.
+          ADMIN=$(grep '^ANYRAY_ADMIN_TOKEN=' .env | cut -d= -f2)
+          login=""; traces=""
+          for _ in $(seq 1 60); do
+            login=$(curl -so /dev/null -w '%{http_code}' http://127.0.0.1:3000/anyray-login 2>/dev/null || true)
+            traces=$(curl -so /dev/null -w '%{http_code}' "http://127.0.0.1:3000/admin/observability/traces?page=1" -H "Cookie: anyray_key=$ADMIN" 2>/dev/null || true)
+            if [ "$login" = "200" ] && [ "$traces" = "200" ]; then
+              echo "console + observability backend ready"
+              exit 0
+            fi
             sleep 5
           done
-          echo "console never became reachable"
+          echo "console/observability never became ready (login=$login traces=$traces)"
           docker compose -f docker-compose.attach.yml ps
           docker compose -f docker-compose.attach.yml logs proxy web
           exit 1

@@ -66,10 +66,13 @@ services:
       # On-top mode: seed the default routing config from an existing upstream
       # gateway so clients send no x-anyray-config header (./setup.sh --upstream).
       ANYRAY_UPSTREAM_URL: ${ANYRAY_UPSTREAM_URL:-}
-      # Anyray Cloud metering (opt-in; content-free rollups only). The vendor
-      # verify key and the control-plane host are PINNED in the gateway image,
-      # so there is no license key to configure here.
-      ANYRAY_METERING_ENABLED: ${ANYRAY_METERING_ENABLED:-}
+      # Anyray Portal metering (content-free rollups only) — ON by default; every
+      # deployment connects. setup.sh --connect writes the deployment token + salt
+      # to .env. The vendor verify key and the control-plane host are PINNED in the
+      # gateway image, so there is no license key to configure here. (Without a
+      # deployment token the gateway serves through the first-boot grace window,
+      # then blocks /v1 until a token is wired — run ./setup.sh --connect <adt_…>.)
+      ANYRAY_METERING_ENABLED: ${ANYRAY_METERING_ENABLED:-true}
       ANYRAY_CONTROL_PLANE_URL: ${ANYRAY_CONTROL_PLANE_URL:-}
       ANYRAY_DEPLOYMENT_TOKEN: ${ANYRAY_DEPLOYMENT_TOKEN:-}
       ANYRAY_PSEUDONYM_SALT: ${ANYRAY_PSEUDONYM_SALT:-}

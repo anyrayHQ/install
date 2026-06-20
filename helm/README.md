@@ -50,20 +50,23 @@ git pull
 helm upgrade anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 ```
 
-## Connect to Anyray Cloud (metering)
+## Connect to Anyray Portal (metering)
 
-To meter usage and receive a signed entitlement lease (so the deployment shows
-**Connected** in the portal), generate the manifests with `--connect`:
+Metering is **on by default** (`gateway.metering.enabled: true`) — every deployment
+connects to Anyray Portal for content-free usage rollups and a signed entitlement lease.
+Generate the manifests with `--connect` so the Secret carries a deployment token:
 
 ```bash
 ./setup.sh --k8s --connect adt_XXXX --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
 ```
 
 This folds `ANYRAY_DEPLOYMENT_TOKEN` and a locally-generated `ANYRAY_PSEUDONYM_SALT`
-into `anyray-secrets.yaml` and sets `gateway.metering.enabled: true` in `my-values.yaml`.
+into `anyray-secrets.yaml` and keeps `gateway.metering.enabled: true` in `my-values.yaml`.
 The chart then injects the metering env into the gateway (the token + salt are read from
 the Secret; the control-plane host and the vendor verify key stay pinned in the gateway
-image). Without `--connect` the install is fully standalone (`gateway.metering.enabled: false`).
+image). If you install with `enabled: true` but no deployment token in the Secret, the
+gateway serves through the first-boot grace window and then blocks `/v1` until a token is
+wired — so always generate the Secret with `--connect`.
 
 The pseudonym salt never leaves your cluster — it pseudonymizes employee identifiers
 before the content-free usage rollup is sent. Tune cadence with

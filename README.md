@@ -87,17 +87,9 @@ control plane — this is for **internal/dev gateway builds only**: it sets
 `ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1` and a stock image will still refuse to meter
 against a non-pinned host.
 
-### Standalone (no Anyray Cloud)
-
-    ./setup.sh
-    docker compose up -d
-
-Everything runs fully self-hosted with no outbound connection to Anyray Cloud;
-connect later by re-running `./setup.sh --connect adt_XXXX`.
-
 ## Remote Docker host (EC2 / GCP / any VM with SSH + Docker)
 
-    ./setup.sh --host <vm-ip-or-hostname> [--connect adt_XXXX]
+    ./setup.sh --host <vm-ip-or-hostname> --connect adt_XXXX
     DOCKER_HOST=ssh://user@<vm> docker compose up -d
 
 Open ports 3000 and 8787 to your org network only — never publicly.
@@ -138,10 +130,8 @@ Docker Compose (above) is the default. The repo also ships:
 dependencies):
 
     export ANYRAY_NAMESPACE="team-ai"          # optional; replace with your target namespace
-    ./setup.sh --k8s --host <hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
-    # emits anyray-secrets.yaml + my-values.yaml
-    # …or meter via Anyray Cloud (folds the token + salt into the Secret, sets gateway.metering.enabled):
     ./setup.sh --k8s --connect adt_XXXX --host <hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
+    # emits anyray-secrets.yaml + my-values.yaml (folds the token + salt into the Secret; metering on)
     kubectl apply -n "$ANYRAY_NAMESPACE" -f anyray-secrets.yaml
     helm install anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 

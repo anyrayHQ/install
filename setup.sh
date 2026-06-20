@@ -37,6 +37,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Every Anyray deployment connects to Anyray Portal for content-free usage metering
+# (a product invariant). Metering is ON by default, so an install with no deployment
+# token serves through the first-boot grace window and then blocks /v1 until a token
+# is wired. Warn loudly here rather than hard-fail — the gateway-less attach mode
+# (docker-compose.attach.yml) legitimately runs setup.sh without --connect.
+if [ -z "$CONNECT_TOKEN" ]; then
+  echo "⚠ No --connect token. Every Anyray deployment connects to Anyray Portal for" >&2
+  echo "  content-free usage metering (counts/aggregates only — never content), which" >&2
+  echo "  is ON by default. Without a deployment token the gateway serves through the" >&2
+  echo "  first-boot grace window, then blocks /v1. Get a token at https://app.anyray.ai" >&2
+  echo "  (Deployments → Connect a deployment) and re-run: ./setup.sh --connect <adt_…> …" >&2
+  echo "  (Ignore this only for gateway-less attach mode.)" >&2
+fi
+
 if [ "$K8S" -eq 1 ] && [ -n "$UPSTREAM_URL" ]; then
   echo "✗ --upstream supports the docker compose flow only (set upstream.url in my-values.yaml for Helm)" >&2
   exit 1

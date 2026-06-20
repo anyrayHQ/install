@@ -253,6 +253,15 @@ POSTGRES_PASSWORD=$(hex 16)
 CLICKHOUSE_PASSWORD=$(hex 16)
 REDIS_AUTH=$(hex 16)
 MINIO_ROOT_PASSWORD=$(hex 16)
+
+# Opt-in updater — one-click + auto-update from the console. DEFAULT OFF.
+# To enable: track the moving channel (ANYRAY_IMAGE_TAG=stable), uncomment the
+# token below (any random secret, e.g. openssl rand -hex 32), then start it with
+#   docker compose --profile updater up -d
+# Docs: docs.anyray.ai -> Configure -> Updates, and Security -> the Docker socket.
+# ANYRAY_UPDATER_TOKEN=
+# ANYRAY_UPDATER_PERIODIC_POLLS=false
+# ANYRAY_UPDATER_POLL_INTERVAL=86400
 EOF
     chmod 600 .env
 

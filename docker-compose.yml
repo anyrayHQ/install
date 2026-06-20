@@ -10,6 +10,11 @@ services:
   gateway:
     image: "${ANYRAY_GATEWAY_IMAGE:-ghcr.io/anyrayhq/gateway:${ANYRAY_IMAGE_TAG:-v1.10.8}}"
     restart: always
+    # Watched by the opt-in updater (the `updater` service below, --profile
+    # updater) — never the datastores or anything else on the host. No-op unless
+    # the updater profile is started.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     depends_on:
       - web
       - optimizer
@@ -87,6 +92,8 @@ services:
   optimizer:
     image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.8}}"
     restart: always
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       PORT: 8088
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
@@ -105,6 +112,18 @@ services:
   proxy:
     image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.8}}"
     restart: always
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    # The proxy image bakes nginx.conf, which carries the gated updater routes
+    # (/admin/update/run + /admin/update/config). These are substituted into it at
+    # start (envsubst): ANYRAY_UPDATER_TOKEN is injected as the Watchtower bearer
+    # server-side (never reaches the browser); ANYRAY_UPDATER_ENABLED is "true"
+    # only when a token is set, so the console knows whether to show the button.
+    environment:
+      ANYRAY_UPDATER_TOKEN: ${ANYRAY_UPDATER_TOKEN:-}
+      ANYRAY_UPDATER_ENABLED: ${ANYRAY_UPDATER_TOKEN:+true}
+      ANYRAY_UPDATER_PERIODIC_POLLS: ${ANYRAY_UPDATER_PERIODIC_POLLS:-false}
+      ANYRAY_UPDATER_POLL_INTERVAL: ${ANYRAY_UPDATER_POLL_INTERVAL:-86400}
     # gateway healthy first: nginx auth_request hits gateway:8787 on every
     # console load — starting earlier just serves 502s.
     depends_on:
@@ -283,6 +302,50 @@ services:
       PGTZ: UTC
     volumes:
       - anyray_postgres_data:/var/lib/postgresql/data
+
+  # ── Opt-in updater: one-click + auto-update for the Anyray images ──────────
+  # Default OFF — only starts with `docker compose --profile updater up -d`.
+  # Bundles Watchtower to pull newer images and recreate the Anyray app
+  # containers (gateway/optimizer/proxy), driven by the console's "Update now"
+  # button (Watchtower HTTP API) or, opt-in, a periodic poll.
+  #
+  # REQUIRES a MOVING image tag: set ANYRAY_IMAGE_TAG=stable in .env so there is
+  # a newer digest to roll forward to. A pinned :vX.Y.Z never moves — the button
+  # then finds nothing. Watchtower only touches containers labelled
+  # com.centurylinklabs.watchtower.enable=true (the three app services above).
+  #
+  # SECURITY: Watchtower never gets the raw Docker socket — it talks to the
+  # docker-socket-proxy below, which exposes only the minimal Docker API needed
+  # to pull + recreate containers. The HTTP API is in-network only (no published
+  # port) and the trigger is gated by the console admin key (the proxy injects
+  # ANYRAY_UPDATER_TOKEN). The socket is root-equivalent on the host — see
+  # docs.anyray.ai → Security → Auto-updates and the Docker socket.
+  docker-socket-proxy:
+    image: "${ANYRAY_DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy}"
+    profiles: ["updater"]
+    restart: always
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  updater:
+    image: "${ANYRAY_UPDATER_IMAGE:-containrrr/watchtower}"
+    profiles: ["updater"]
+    restart: always
+    depends_on:
+      - docker-socket-proxy
+    command: --label-enable --cleanup
+    environment:
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      WATCHTOWER_HTTP_API_UPDATE: "true"
+      WATCHTOWER_HTTP_API_TOKEN: ${ANYRAY_UPDATER_TOKEN:?set ANYRAY_UPDATER_TOKEN to enable the updater}
+      WATCHTOWER_HTTP_API_PERIODIC_POLLS: ${ANYRAY_UPDATER_PERIODIC_POLLS:-false}
+      WATCHTOWER_POLL_INTERVAL: ${ANYRAY_UPDATER_POLL_INTERVAL:-86400}
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
 
 volumes:
   anyray_gateway_data:

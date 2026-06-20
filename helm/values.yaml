@@ -110,12 +110,14 @@ gateway:
   rateLimitUnauthRpm: ""
   authFailLimit: ""
   maxBodyBytes: ""
-  # Anyray Cloud metering. `setup.sh --k8s --connect <token>` turns this on and folds
-  # ANYRAY_DEPLOYMENT_TOKEN + ANYRAY_PSEUDONYM_SALT into the Secret. The control-plane
-  # host and the vendor verify key are pinned in the gateway image, so they are NOT set
-  # here. Leave enabled: false for a standalone (unmetered) install.
+  # Anyray Portal metering. ON by default — every deployment connects for content-free
+  # usage metering. `setup.sh --k8s --connect <token>` folds ANYRAY_DEPLOYMENT_TOKEN +
+  # ANYRAY_PSEUDONYM_SALT into the Secret. The control-plane host and the vendor verify
+  # key are pinned in the gateway image, so they are NOT set here. (With enabled: true
+  # but no deployment token in the Secret, the gateway serves through the first-boot
+  # grace window, then blocks /v1 until a token is wired.)
   metering:
-    enabled: false
+    enabled: true
     intervalMs: "900000"
     graceMs: "86400000"
   # Extra env vars (provider-key fallbacks, rate limits, …)

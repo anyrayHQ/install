@@ -15,7 +15,7 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "model-seeder" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommon" . | nindent 6 }}
+      {{- include "anyray.podSpecCommon" (dict "component" "modelSeeder" "context" .) | nindent 6 }}
       restartPolicy: OnFailure
       containers:
         - name: model-seeder

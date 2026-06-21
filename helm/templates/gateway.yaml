@@ -22,7 +22,7 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "gateway" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommon" . | nindent 6 }}
+      {{- include "anyray.podSpecCommon" (dict "component" "gateway" "context" .) | nindent 6 }}
       containers:
         - name: gateway
           image: {{ include "anyray.image" (dict "component" "gateway" "context" .) }}

@@ -14,7 +14,7 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "proxy" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommon" . | nindent 6 }}
+      {{- include "anyray.podSpecCommon" (dict "component" "proxy" "context" .) | nindent 6 }}
       containers:
         - name: proxy
           image: {{ include "anyray.image" (dict "component" "proxy" "context" .) }}

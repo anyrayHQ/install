@@ -16,7 +16,7 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "redis" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommon" . | nindent 6 }}
+      {{- include "anyray.podSpecCommon" (dict "component" "redis" "context" .) | nindent 6 }}
       containers:
         - name: redis
           image: {{ include "anyray.image" (dict "component" "redis" "context" .) }}

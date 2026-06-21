@@ -14,7 +14,7 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "web" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommon" . | nindent 6 }}
+      {{- include "anyray.podSpecCommon" (dict "component" "web" "context" .) | nindent 6 }}
       containers:
         - name: web
           image: {{ include "anyray.image" (dict "component" "web" "context" .) }}

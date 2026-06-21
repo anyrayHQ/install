@@ -16,7 +16,7 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "clickhouse" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommonNoSecurity" . | nindent 6 }}
+      {{- include "anyray.podSpecCommonNoSecurity" (dict "component" "clickhouse" "context" .) | nindent 6 }}
       {{- with .Values.clickhouse.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}

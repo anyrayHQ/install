@@ -16,7 +16,7 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "postgres" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommon" . | nindent 6 }}
+      {{- include "anyray.podSpecCommon" (dict "component" "postgres" "context" .) | nindent 6 }}
       containers:
         - name: postgres
           image: {{ include "anyray.image" (dict "component" "postgres" "context" .) }}
@@ -34,6 +34,12 @@ spec:
               value: UTC
             - name: PGTZ
               value: UTC
+            # Initialize into a subdirectory of the mount, not its root. A
+            # directly mounted volume (e.g. an AWS EBS PVC, ext4) has a
+            # lost+found at its root, and initdb refuses any non-empty data
+            # directory. See helm/README.md → Troubleshooting.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           ports:
             - containerPort: 5432
           readinessProbe:

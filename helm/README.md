@@ -163,6 +163,25 @@ containerSecurityContext:
   allowPrivilegeEscalation: false
 ```
 
+`nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`, and
+`priorityClassName` can also be set **per component**, on any of the `gateway`,
+`optimizer`, `proxy`, `web`, `worker`, `postgres`, `clickhouse`, `minio`, or
+`redis` blocks. A component-level value replaces the global for that field (it does
+not merge); an unset component inherits the global. Use it to place a specific
+workload on its own node pool — for example, keep the heavy ClickHouse pod on a
+dedicated instance type while everything else stays on the default nodes:
+
+```yaml
+clickhouse:
+  nodeSelector:
+    node.kubernetes.io/instance-type: r6i.xlarge
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: data-plane
+      effect: NoSchedule
+```
+
 All component images can be redirected to an internal registry:
 
 ```yaml
@@ -281,3 +300,43 @@ kubectl delete pvc -l app.kubernetes.io/instance=anyray
 
 Add `--namespace "$ANYRAY_NAMESPACE"` to `helm uninstall` and `-n "$ANYRAY_NAMESPACE"`
 to `kubectl delete` commands when you installed into a specific namespace.
+
+## Troubleshooting
+
+### Postgres won't start — `initdb: directory "/var/lib/postgresql/data" exists but is not empty` / `lost+found`
+
+A volume mounted at the root of an `ext4` filesystem — which is what most cloud
+block stores provision, e.g. an **AWS EBS** PVC — always contains a `lost+found`
+directory, and Postgres's `initdb` refuses any non-empty data directory. The chart
+avoids this by initializing into a `pgdata` subdirectory of the mount
+(`PGDATA=/var/lib/postgresql/data/pgdata`). If you fork the Postgres template or
+mount your own volume, keep `PGDATA` (or a `subPath`) pointed at a subdirectory,
+never the mount root.
+
+### MinIO crashes on start — `mkdir: cannot create directory '/data/langfuse': Permission denied`
+
+The bundled MinIO image runs as a nonroot user (uid `65532`). A freshly provisioned
+PVC is root-owned, so without an `fsGroup` the nonroot process can't create its
+bucket directory. The chart sets `minio.podSecurityContext.fsGroup: 65532` so the
+kubelet chowns the volume on mount. If you override `minio.podSecurityContext`, keep
+an `fsGroup` that matches the image's run user, or the volume stays unwritable.
+
+### Mixed-architecture clusters (arm64 + amd64 nodes)
+
+Every image the chart ships is a **multi-arch manifest list** (`linux/amd64` +
+`linux/arm64`) — the five Anyray images plus Langfuse, Postgres, ClickHouse, Redis,
+and MinIO — so Kubernetes schedules each pod onto any node and pulls the matching
+architecture automatically. **No `nodeSelector` by architecture is required.**
+
+The one thing to watch: MinIO is pinned by digest (Chainguard's free tier only
+publishes `:latest`). That pin **must reference the multi-arch index digest**, not a
+single-platform child manifest — otherwise the MinIO pod fails to schedule on the
+"other" architecture's nodes. The default in `values.yaml` is an index digest;
+refresh it with `docker buildx imagetools inspect cgr.dev/chainguard/minio:latest`
+and confirm the result is an `image.index` (manifest list) before re-pinning.
+
+To deliberately pin workloads to a node pool (e.g. keep ClickHouse on a specific
+instance type), set `nodeSelector` / `affinity` / `tolerations` /
+`topologySpreadConstraints` — either globally (every pod) or **per component** on
+the individual `gateway` / `clickhouse` / `minio` / … blocks. See
+[Cluster policy knobs](#cluster-policy-knobs).

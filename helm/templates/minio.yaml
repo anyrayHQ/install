@@ -16,7 +16,11 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "minio" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommon" . | nindent 6 }}
+      {{- include "anyray.podSpecCommonNoSecurity" . | nindent 6 }}
+      {{- with .Values.minio.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: minio
           image: {{ include "anyray.image" (dict "component" "minio" "context" .) }}

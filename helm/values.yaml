@@ -43,8 +43,12 @@ images:
     tag: "26.3"
   minio:
     repository: cgr.dev/chainguard/minio
-    # Chainguard's free tier publishes only :latest, so keep the digest pin.
-    tag: "latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07"
+    # Chainguard's free tier publishes only :latest, so keep the digest pin — but
+    # pin the multi-arch INDEX digest (a manifest list spanning amd64 + arm64),
+    # NOT a single-platform child manifest, or the pod won't schedule on arm64
+    # nodes (mixed-arch clusters). Refresh the index digest from:
+    #   docker buildx imagetools inspect cgr.dev/chainguard/minio:latest
+    tag: "latest@sha256:1fa1317f8a14251743c131d556aadb17efb85e82bcd95b6564044935c8301ae7"
   redis:
     repository: docker.io/redis
     tag: "7"
@@ -245,6 +249,14 @@ minio:
   enabled: true
   storage: 10Gi
   storageClass: ""
+  # Chainguard's MinIO runs as nonroot (uid 65532). fsGroup makes the kubelet
+  # chown the mounted volume to that group so MinIO can create the bucket dir —
+  # without it, a freshly provisioned EBS PVC stays root-owned and the startup
+  # `mkdir /data/langfuse` fails with "permission denied".
+  podSecurityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
   resources:
     requests:
       cpu: "50m"

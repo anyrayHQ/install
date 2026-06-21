@@ -361,7 +361,7 @@ services:
 
   updater:
     logging: *default-logging
-    image: "${ANYRAY_UPDATER_IMAGE:-containrrr/watchtower}"
+    image: "${ANYRAY_UPDATER_IMAGE:-ghcr.io/nicholas-fedor/watchtower:1.18.1}"
     profiles: ["updater"]
     restart: always
     depends_on:

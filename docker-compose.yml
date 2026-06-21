@@ -8,7 +8,7 @@ name: anyray
 
 services:
   gateway:
-    image: "${ANYRAY_GATEWAY_IMAGE:-ghcr.io/anyrayhq/gateway:${ANYRAY_IMAGE_TAG:-v1.10.10}}"
+    image: "${ANYRAY_GATEWAY_IMAGE:-ghcr.io/anyrayhq/gateway:${ANYRAY_IMAGE_TAG:-v1.10.11}}"
     restart: always
     # Watched by the opt-in updater (the `updater` service below, --profile
     # updater) — never the datastores or anything else on the host. No-op unless
@@ -93,7 +93,7 @@ services:
       start_period: 5s
 
   optimizer:
-    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.10}}"
+    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.11}}"
     restart: always
     labels:
       com.centurylinklabs.watchtower.enable: "true"
@@ -113,7 +113,7 @@ services:
       start_period: 5s
 
   proxy:
-    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.10}}"
+    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.11}}"
     restart: always
     labels:
       com.centurylinklabs.watchtower.enable: "true"

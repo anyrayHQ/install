@@ -6,8 +6,17 @@ name: anyray
 #
 # Only ports 3000 and 8787 are exposed. Open them to your org network only.
 
+# Bound every container's JSON log (a chatty service like ClickHouse filled the disk otherwise).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+    compress: "true"
+
 services:
   gateway:
+    logging: *default-logging
     image: "${ANYRAY_GATEWAY_IMAGE:-ghcr.io/anyrayhq/gateway:${ANYRAY_IMAGE_TAG:-v1.10.11}}"
     restart: always
     # Watched by the opt-in updater (the `updater` service below, --profile
@@ -93,6 +102,7 @@ services:
       start_period: 5s
 
   optimizer:
+    logging: *default-logging
     image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.11}}"
     restart: always
     labels:
@@ -113,6 +123,7 @@ services:
       start_period: 5s
 
   proxy:
+    logging: *default-logging
     image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.11}}"
     restart: always
     labels:
@@ -141,6 +152,7 @@ services:
   # Set ANYRAY_PUBLIC_DOMAIN in .env and ANYRAY_GATEWAY_BIND=127.0.0.1 so the
   # only public entry is Caddy on 443; the Caddyfile 403s the admin surface.
   caddy:
+    logging: *default-logging
     image: "${ANYRAY_CADDY_IMAGE:-caddy:2-alpine}"
     profiles: ["public"]
     restart: always
@@ -160,6 +172,7 @@ services:
   # (&anyray-depends-on, &anyray-backend-env) that web aliases — YAML requires
   # an anchor to appear before its alias in document order.
   worker:
+    logging: *default-logging
     image: "${ANYRAY_WORKER_IMAGE:-docker.io/langfuse/langfuse-worker:3}"
     restart: always
     depends_on: &anyray-depends-on
@@ -201,6 +214,7 @@ services:
       REDIS_AUTH: ${REDIS_AUTH:?run ./setup.sh first}
 
   web:
+    logging: *default-logging
     image: "${ANYRAY_WEB_IMAGE:-docker.io/langfuse/langfuse:3}"
     restart: always
     depends_on: *anyray-depends-on
@@ -222,6 +236,7 @@ services:
   # One-shot: registers model prices in the observability backend so cost
   # tiles aren't $0. Idempotent; exits when done.
   model-seeder:
+    logging: *default-logging
     image: "${ANYRAY_MODEL_SEEDER_IMAGE:-docker.io/library/node:20-alpine}"
     restart: "no"
     depends_on:
@@ -235,6 +250,7 @@ services:
     command: node /seed/seedModelPrices.mjs
 
   clickhouse:
+    logging: *default-logging
     image: "${ANYRAY_CLICKHOUSE_IMAGE:-docker.io/clickhouse/clickhouse-server:26.3}"
     restart: always
     user: "101:101"
@@ -253,6 +269,7 @@ services:
       start_period: 1s
 
   minio:
+    logging: *default-logging
     # Chainguard's free tier only publishes :latest — the digest is the pin.
     image: "${ANYRAY_MINIO_IMAGE:-cgr.dev/chainguard/minio:latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07}"
     restart: always
@@ -271,6 +288,7 @@ services:
       start_period: 1s
 
   redis:
+    logging: *default-logging
     image: "${ANYRAY_REDIS_IMAGE:-docker.io/redis:7}"
     restart: always
     command: >
@@ -290,6 +308,7 @@ services:
       retries: 10
 
   postgres:
+    logging: *default-logging
     image: "${ANYRAY_POSTGRES_IMAGE:-docker.io/postgres:17}"
     restart: always
     healthcheck:
@@ -324,6 +343,7 @@ services:
   # ANYRAY_UPDATER_TOKEN). The socket is root-equivalent on the host — see
   # docs.anyray.ai → Security → Auto-updates and the Docker socket.
   docker-socket-proxy:
+    logging: *default-logging
     image: "${ANYRAY_DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy}"
     profiles: ["updater"]
     restart: always
@@ -336,6 +356,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
   updater:
+    logging: *default-logging
     image: "${ANYRAY_UPDATER_IMAGE:-containrrr/watchtower}"
     profiles: ["updater"]
     restart: always

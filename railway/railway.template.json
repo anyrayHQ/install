@@ -234,7 +234,8 @@
       "volumes": [{ "mountPath": "/data" }],
       "variables": {
         "MINIO_ROOT_USER": "minio",
-        "MINIO_ROOT_PASSWORD": "${{secret()}}"
+        "MINIO_ROOT_PASSWORD": "${{secret()}}",
+        "RAILWAY_RUN_UID": "0"
       }
     }
   ]

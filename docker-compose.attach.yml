@@ -162,7 +162,11 @@ services:
   minio:
     logging: *default-logging
     # Chainguard's free tier only publishes :latest — the digest is the pin.
-    image: "${ANYRAY_MINIO_IMAGE:-cgr.dev/chainguard/minio:latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07}"
+    # MUST be the multi-arch INDEX digest (manifest list spanning amd64 + arm64),
+    # not a single-platform child manifest, or MinIO fails to start on arm64 hosts
+    # (Graviton, Apple Silicon). Refresh:
+    #   docker buildx imagetools inspect cgr.dev/chainguard/minio:latest
+    image: "${ANYRAY_MINIO_IMAGE:-cgr.dev/chainguard/minio:latest@sha256:1fa1317f8a14251743c131d556aadb17efb85e82bcd95b6564044935c8301ae7}"
     restart: always
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'

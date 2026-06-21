@@ -108,40 +108,62 @@ annotations:
 {{/*
 Common pod spec fields. Excludes podSecurityContext for components that need a
 component-specific security context.
+
+Scheduling fields (nodeSelector / affinity / tolerations /
+topologySpreadConstraints / priorityClassName) are per-component overridable:
+pass (dict "component" <name> "context" .) and a non-empty .Values.<name>.<field>
+wins over the global .Values.<field>; unset falls back to the global. Called with
+the bare root context (.) it emits the global values only.
 */}}
 {{- define "anyray.podSpecCommonNoSecurity" -}}
-serviceAccountName: {{ include "anyray.serviceAccountName" . }}
-{{- with .Values.image.pullSecrets }}
+{{- $context := . -}}
+{{- $overrides := dict -}}
+{{- if hasKey . "context" -}}
+{{- $context = .context -}}
+{{- $overrides = (index $context.Values .component | default dict) -}}
+{{- end -}}
+{{- $nodeSelector := $overrides.nodeSelector | default $context.Values.nodeSelector -}}
+{{- $affinity := $overrides.affinity | default $context.Values.affinity -}}
+{{- $tolerations := $overrides.tolerations | default $context.Values.tolerations -}}
+{{- $topologySpreadConstraints := $overrides.topologySpreadConstraints | default $context.Values.topologySpreadConstraints -}}
+{{- $priorityClassName := $overrides.priorityClassName | default $context.Values.priorityClassName -}}
+serviceAccountName: {{ include "anyray.serviceAccountName" $context }}
+{{- with $context.Values.image.pullSecrets }}
 imagePullSecrets:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.nodeSelector }}
+{{- with $nodeSelector }}
 nodeSelector:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.affinity }}
+{{- with $affinity }}
 affinity:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.tolerations }}
+{{- with $tolerations }}
 tolerations:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.topologySpreadConstraints }}
+{{- with $topologySpreadConstraints }}
 topologySpreadConstraints:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with .Values.priorityClassName }}
+{{- with $priorityClassName }}
 priorityClassName: {{ . | quote }}
 {{- end }}
 {{- end }}
 
 {{/*
-Common pod spec fields including the global podSecurityContext.
+Common pod spec fields including the global podSecurityContext. Accepts the bare
+root context or (dict "component" <name> "context" .) — see podSpecCommonNoSecurity.
 */}}
 {{- define "anyray.podSpecCommon" -}}
+{{- $context := . -}}
+{{- if hasKey . "context" -}}
+{{- $context = .context -}}
+{{- end -}}
 {{- include "anyray.podSpecCommonNoSecurity" . }}
-{{- with .Values.podSecurityContext }}
+{{- with $context.Values.podSecurityContext }}
 securityContext:
   {{- toYaml . | nindent 2 }}
 {{- end }}

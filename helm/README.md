@@ -163,6 +163,25 @@ containerSecurityContext:
   allowPrivilegeEscalation: false
 ```
 
+`nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`, and
+`priorityClassName` can also be set **per component**, on any of the `gateway`,
+`optimizer`, `proxy`, `web`, `worker`, `postgres`, `clickhouse`, `minio`, or
+`redis` blocks. A component-level value replaces the global for that field (it does
+not merge); an unset component inherits the global. Use it to place a specific
+workload on its own node pool — for example, keep the heavy ClickHouse pod on a
+dedicated instance type while everything else stays on the default nodes:
+
+```yaml
+clickhouse:
+  nodeSelector:
+    node.kubernetes.io/instance-type: r6i.xlarge
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: data-plane
+      effect: NoSchedule
+```
+
 All component images can be redirected to an internal registry:
 
 ```yaml
@@ -317,5 +336,7 @@ refresh it with `docker buildx imagetools inspect cgr.dev/chainguard/minio:lates
 and confirm the result is an `image.index` (manifest list) before re-pinning.
 
 To deliberately pin workloads to a node pool (e.g. keep ClickHouse on a specific
-instance type), set the global `nodeSelector` / `affinity` / `tolerations` /
-`topologySpreadConstraints` values — these apply to every pod in the chart.
+instance type), set `nodeSelector` / `affinity` / `tolerations` /
+`topologySpreadConstraints` — either globally (every pod) or **per component** on
+the individual `gateway` / `clickhouse` / `minio` / … blocks. See
+[Cluster policy knobs](#cluster-policy-knobs).

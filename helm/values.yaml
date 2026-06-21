@@ -67,6 +67,23 @@ podAnnotations: {}
 podLabels: {}
 podSecurityContext: {}
 containerSecurityContext: {}
+
+# Global scheduling defaults applied to every pod. Each component block below
+# (gateway, optimizer, proxy, web, worker, postgres, clickhouse, minio, redis)
+# can override any of these per workload by setting the same key — e.g. pin the
+# heavy ClickHouse pod to a specific node pool while everything else stays on the
+# default. A component-level value REPLACES the global for that field (it does not
+# merge), and an unset component value inherits the global. All images are
+# multi-arch, so an architecture nodeSelector is only needed for deliberate
+# placement, not for the stack to run on mixed arm64/amd64 nodes. Example:
+#   clickhouse:
+#     nodeSelector:
+#       kubernetes.io/arch: amd64
+#     tolerations:
+#       - key: dedicated
+#         operator: Equal
+#         value: data-plane
+#         effect: NoSchedule
 nodeSelector: {}
 affinity: {}
 tolerations: []

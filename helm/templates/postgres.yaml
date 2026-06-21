@@ -16,7 +16,7 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "postgres" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommon" . | nindent 6 }}
+      {{- include "anyray.podSpecCommon" (dict "component" "postgres" "context" .) | nindent 6 }}
       containers:
         - name: postgres
           image: {{ include "anyray.image" (dict "component" "postgres" "context" .) }}

@@ -234,7 +234,7 @@ ANYRAY_INIT_PROJECT_PUBLIC_KEY=${LF_PUBLIC_KEY}
 ANYRAY_INIT_PROJECT_SECRET_KEY=${LF_SECRET_KEY}
 # Pre-encoded Basic auth the attach proxy injects for /admin/observability/*.
 # Encoded here on the host: busybox base64 inside the proxy wrapped it at column
-# 76 and broke the Authorization header (Langfuse 400). b64enc strips newlines.
+# 76 and broke the Authorization header (observability backend 400). b64enc strips newlines.
 ANYRAY_OBS_BASIC_AUTH=$(b64enc "${LF_PUBLIC_KEY}:${LF_SECRET_KEY}")
 
 # Gateway ↔ optimizer shared secret

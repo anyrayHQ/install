@@ -9,8 +9,17 @@ name: anyray-attach
 # Optimizer hook → http://<host>:8088  (in-network only)
 # Docs → https://docs.anyray.ai/attach
 
+# Bound every container's JSON log (a chatty service like ClickHouse filled the disk otherwise).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+    compress: "true"
+
 services:
   optimizer:
+    logging: *default-logging
     image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.11}}"
     restart: always
     ports:
@@ -43,6 +52,7 @@ services:
       start_period: 5s
 
   proxy:
+    logging: *default-logging
     image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.11}}"
     restart: always
     depends_on:
@@ -69,6 +79,7 @@ services:
   # (&anyray-attach-depends-on, &anyray-attach-backend-env) that web aliases — YAML requires
   # an anchor to appear before its alias in document order.
   worker:
+    logging: *default-logging
     image: "${ANYRAY_WORKER_IMAGE:-docker.io/langfuse/langfuse-worker:3}"
     restart: always
     depends_on: &anyray-attach-depends-on
@@ -110,6 +121,7 @@ services:
       REDIS_AUTH: ${REDIS_AUTH:?run ./setup.sh first}
 
   web:
+    logging: *default-logging
     image: "${ANYRAY_WEB_IMAGE:-docker.io/langfuse/langfuse:3}"
     restart: always
     depends_on: *anyray-attach-depends-on
@@ -129,6 +141,7 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: ${ANYRAY_INIT_USER_PASSWORD:?run ./setup.sh first}
 
   clickhouse:
+    logging: *default-logging
     image: "${ANYRAY_CLICKHOUSE_IMAGE:-docker.io/clickhouse/clickhouse-server:26.3}"
     restart: always
     user: "101:101"
@@ -147,6 +160,7 @@ services:
       start_period: 1s
 
   minio:
+    logging: *default-logging
     # Chainguard's free tier only publishes :latest — the digest is the pin.
     image: "${ANYRAY_MINIO_IMAGE:-cgr.dev/chainguard/minio:latest@sha256:598136b7ee3ee523d820f341ba04021e22c12c32971d9223a6d8d14134807f07}"
     restart: always
@@ -165,6 +179,7 @@ services:
       start_period: 1s
 
   redis:
+    logging: *default-logging
     image: "${ANYRAY_REDIS_IMAGE:-docker.io/redis:7}"
     restart: always
     command: >
@@ -184,6 +199,7 @@ services:
       retries: 10
 
   postgres:
+    logging: *default-logging
     image: "${ANYRAY_POSTGRES_IMAGE:-docker.io/postgres:17}"
     restart: always
     healthcheck:

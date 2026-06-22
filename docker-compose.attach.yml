@@ -1,15 +1,16 @@
 name: anyray-attach
 
-# Anyray attach mode: optimizer + observability only.
+# Anyray attach mode: optimizer + console only (Postgres-only trace store).
 # For orgs with an existing AI gateway (LiteLLM, Kong, Envoy, …).
-# The gateway plugin/callback calls the optimizer and emits traces here.
+# The gateway plugin/callback calls the optimizer, which records content-free
+# traces straight into Postgres via /v1/record (no Anyray gateway in the path).
 #
 # Generate secrets: ./setup.sh
 # Console → http://<host>:3000
 # Optimizer hook → http://<host>:8088  (in-network only)
 # Docs → https://docs.anyray.ai/attach
 
-# Bound every container's JSON log (a chatty service like ClickHouse filled the disk otherwise).
+# Bound every container's JSON log so a chatty service can't fill the disk.
 x-logging: &default-logging
   driver: json-file
   options:
@@ -22,6 +23,9 @@ services:
     logging: *default-logging
     image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.16}}"
     restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       # Exposed so the org's gateway plugin can reach it from outside Docker.
       - "${ANYRAY_OPTIMIZER_BIND:-127.0.0.1}:8088:8088"
@@ -32,13 +36,13 @@ services:
       ANYRAY_OPTIMIZER_CONFIG: /data/optimizer.config.json
       ANYRAY_OPTIMIZER_AUDIT_FILE: /data/optimizer-settings-audit.log
       # BYO trace persistence (opt-in): the optimizer's /v1/record writes the same
-      # traces the Anyray gateway writes in-process. Set ONLY in attach/BYO
-      # mode (no Anyray gateway in the path) — never on the optimizer in an
-      # Anyray-gateway deployment, or every call would be recorded twice. Unset keys
-      # leave the endpoint disabled (404); a missing content key degrades to 'off'.
-      ANYRAY_OBSERVABILITY_BASEURL: ${ANYRAY_OBSERVABILITY_BASEURL:-http://web:3000}
-      ANYRAY_OBSERVABILITY_PUBLIC_KEY: ${ANYRAY_OBSERVABILITY_PUBLIC_KEY:-}
-      ANYRAY_OBSERVABILITY_SECRET_KEY: ${ANYRAY_OBSERVABILITY_SECRET_KEY:-}
+      # content-free traces the Anyray gateway writes in-process, straight to the
+      # Anyray trace store in Postgres (anyray_traces / anyray_observations,
+      # auto-created; content AES-256-GCM encrypted at rest). Set ONLY in
+      # attach/BYO mode (no Anyray gateway in the path) — never on the optimizer in
+      # an Anyray-gateway deployment, or every call would be recorded twice. A
+      # missing content key degrades persistence to 'off'.
+      ANYRAY_OBSERVABILITY_DB_URL: ${ANYRAY_OBSERVABILITY_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:-}
       ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
@@ -55,153 +59,23 @@ services:
     logging: *default-logging
     image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.16}}"
     restart: always
+    # optimizer healthy first: nginx auth_request hits optimizer:8088/admin/auth
+    # on every console load (attach mode has no gateway) — starting earlier just
+    # serves 502s.
     depends_on:
-      web:
-        condition: service_started
       optimizer:
         condition: service_healthy
     ports:
       - "${ANYRAY_CONSOLE_BIND:-0.0.0.0}:3000:80"
-    environment:
-      # Basic auth (base64 of pk:sk) the nginx template injects for
-      # /admin/observability/*. Pre-encoded on the host by setup.sh: encoding it
-      # inside this Alpine/busybox proxy wrapped the base64 at column 76 and left
-      # a newline in the rendered Authorization header, so the trace backend rejected every
-      # observability read with 400 Bad Request (the attach smoke test never passed).
-      ANYRAY_OBS_BASIC_AUTH: ${ANYRAY_OBS_BASIC_AUTH:?run ./setup.sh first}
     volumes:
       # Mount the attach-mode nginx config over the baked default.
       - ./attach/nginx.conf:/etc/nginx/templates/default.conf.template:ro
 
   # model-seeder intentionally absent — no gateway spend store in attach mode.
 
-  # worker is declared before web on purpose: it defines the two YAML anchors
-  # (&anyray-attach-depends-on, &anyray-attach-backend-env) that web aliases — YAML requires
-  # an anchor to appear before its alias in document order.
-  worker:
-    logging: *default-logging
-    image: "${ANYRAY_WORKER_IMAGE:-docker.io/langfuse/langfuse-worker:3}"
-    restart: always
-    depends_on: &anyray-attach-depends-on
-      postgres:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
-    environment: &anyray-attach-backend-env
-      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
-      SALT: ${SALT:?run ./setup.sh first}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?run ./setup.sh first}
-      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-false}
-      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL:-clickhouse://clickhouse:9000}
-      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
-      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-${CLICKHOUSE_PASSWORD:-}}
-      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED:-false}
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
-      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-auto}
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:-minio}
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-}}
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT:-http://minio:9000}
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE:-true}
-      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_UPLOAD_PREFIX:-events/}
-      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:-langfuse}
-      LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_MEDIA_UPLOAD_REGION:-auto}
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID:-minio}
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY:-${MINIO_ROOT_PASSWORD:-}}
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://minio:9000}
-      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE:-true}
-      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:-media/}
-      REDIS_HOST: ${REDIS_HOST:-redis}
-      REDIS_PORT: ${REDIS_PORT:-6379}
-      REDIS_AUTH: ${REDIS_AUTH:?run ./setup.sh first}
-
-  web:
-    logging: *default-logging
-    image: "${ANYRAY_WEB_IMAGE:-docker.io/langfuse/langfuse:3}"
-    restart: always
-    depends_on: *anyray-attach-depends-on
-    expose:
-      - 3000
-    environment:
-      <<: *anyray-attach-backend-env
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?run ./setup.sh first}
-      LANGFUSE_INIT_ORG_ID: ${ANYRAY_INIT_ORG_ID:-anyray}
-      LANGFUSE_INIT_ORG_NAME: ${ANYRAY_INIT_ORG_NAME:-Anyray}
-      LANGFUSE_INIT_PROJECT_ID: ${ANYRAY_INIT_PROJECT_ID:-anyray-gateway}
-      LANGFUSE_INIT_PROJECT_NAME: ${ANYRAY_INIT_PROJECT_NAME:-Anyray Gateway}
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${ANYRAY_INIT_PROJECT_PUBLIC_KEY:?run ./setup.sh first}
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${ANYRAY_INIT_PROJECT_SECRET_KEY:?run ./setup.sh first}
-      LANGFUSE_INIT_USER_EMAIL: ${ANYRAY_INIT_USER_EMAIL:-admin@anyray.local}
-      LANGFUSE_INIT_USER_NAME: ${ANYRAY_INIT_USER_NAME:-Admin}
-      LANGFUSE_INIT_USER_PASSWORD: ${ANYRAY_INIT_USER_PASSWORD:?run ./setup.sh first}
-
-  clickhouse:
-    logging: *default-logging
-    image: "${ANYRAY_CLICKHOUSE_IMAGE:-docker.io/clickhouse/clickhouse-server:26.3}"
-    restart: always
-    user: "101:101"
-    environment:
-      CLICKHOUSE_DB: default
-      CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?run ./setup.sh first}
-    volumes:
-      - anyray_attach_clickhouse_data:/var/lib/clickhouse
-      - anyray_attach_clickhouse_logs:/var/log/clickhouse-server
-    healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 1s
-
-  minio:
-    logging: *default-logging
-    # Chainguard's free tier only publishes :latest — the digest is the pin.
-    # MUST be the multi-arch INDEX digest (manifest list spanning amd64 + arm64),
-    # not a single-platform child manifest, or MinIO fails to start on arm64 hosts
-    # (Graviton, Apple Silicon). Refresh:
-    #   docker buildx imagetools inspect cgr.dev/chainguard/minio:latest
-    image: "${ANYRAY_MINIO_IMAGE:-cgr.dev/chainguard/minio:latest@sha256:1fa1317f8a14251743c131d556aadb17efb85e82bcd95b6564044935c8301ae7}"
-    restart: always
-    entrypoint: sh
-    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" /data'
-    environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?run ./setup.sh first}
-    volumes:
-      - anyray_attach_minio_data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 1s
-      timeout: 5s
-      retries: 5
-      start_period: 1s
-
-  redis:
-    logging: *default-logging
-    image: "${ANYRAY_REDIS_IMAGE:-docker.io/redis:7}"
-    restart: always
-    command: >
-      --requirepass ${REDIS_AUTH:?run ./setup.sh first}
-      --maxmemory-policy noeviction
-    volumes:
-      - anyray_attach_redis_data:/data
-    healthcheck:
-      # Authenticated ping — a plain `redis-cli ping` exits 0 even on NOAUTH.
-      test:
-        [
-          "CMD-SHELL",
-          'REDISCLI_AUTH="${REDIS_AUTH:?run ./setup.sh first}" redis-cli ping | grep -q PONG',
-        ]
-      interval: 3s
-      timeout: 10s
-      retries: 10
-
+  # Postgres — the Anyray trace store the optimizer's /v1/record writes to
+  # (content-free; any stored content is AES-256-GCM encrypted at rest). The
+  # anyray_traces / anyray_observations tables are auto-created on first use.
   postgres:
     logging: *default-logging
     image: "${ANYRAY_POSTGRES_IMAGE:-docker.io/postgres:17}"
@@ -223,7 +97,3 @@ services:
 volumes:
   anyray_attach_optimizer_data:
   anyray_attach_postgres_data:
-  anyray_attach_clickhouse_data:
-  anyray_attach_clickhouse_logs:
-  anyray_attach_minio_data:
-  anyray_attach_redis_data:

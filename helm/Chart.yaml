@@ -2,8 +2,8 @@ apiVersion: v2
 name: anyray
 description: Self-hosted AI-spend optimizer — gateway, optimizer, and observability stack.
 type: application
-version: 0.4.12
-appVersion: "v1.10.13"
+version: 0.4.13
+appVersion: "v1.10.15"
 keywords:
   - anyray
   - ai-gateway

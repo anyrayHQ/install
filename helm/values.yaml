@@ -11,7 +11,7 @@
 host: ""
 
 image:
-  tag: "v1.10.13"
+  tag: "v1.10.15"
   pullPolicy: IfNotPresent
   pullSecrets: []
 

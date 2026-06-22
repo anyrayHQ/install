@@ -20,7 +20,7 @@ x-logging: &default-logging
 services:
   optimizer:
     logging: *default-logging
-    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.15}}"
+    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.16}}"
     restart: always
     ports:
       # Exposed so the org's gateway plugin can reach it from outside Docker.
@@ -53,7 +53,7 @@ services:
 
   proxy:
     logging: *default-logging
-    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.15}}"
+    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.16}}"
     restart: always
     depends_on:
       web:

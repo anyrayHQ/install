@@ -1,7 +1,11 @@
 # Anyray Helm Chart
 
-Deploys the full Anyray stack to any Kubernetes cluster. No external chart
-dependencies — all services are self-contained in this chart.
+Deploys the full Anyray stack — gateway, optimizer, proxy (console), and Postgres
+— to any Kubernetes cluster. No external chart dependencies; all services are
+self-contained in this chart. The gateway persists content-free traces, spend,
+and observations to Postgres (`anyray_traces` / `anyray_observations`,
+auto-created; any stored content is AES-256-GCM encrypted at rest) and reads them
+in-process — there is no separate observability backend to run.
 
 ## Prerequisites
 
@@ -29,7 +33,7 @@ helm install anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 
 # 5. Wait for pods
 kubectl rollout status -n "$ANYRAY_NAMESPACE" deployment/anyray-gateway
-kubectl rollout status -n "$ANYRAY_NAMESPACE" deployment/anyray-web
+kubectl rollout status -n "$ANYRAY_NAMESPACE" deployment/anyray-proxy
 
 # 6. Access
 #   Console: http://<host>:3000  (via NodePort or Ingress — see values.yaml)
@@ -88,9 +92,9 @@ gateway:
     nodePort: 30787
 ```
 
-Note: the `gateway`, `web`, and `optimizer` Services use bare (unprefixed) names
-because nginx inside the proxy image hardcodes those upstream hostnames. Install
-the chart in its own namespace to avoid name collisions.
+Note: the `gateway` and `optimizer` Services use bare (unprefixed) names because
+nginx inside the proxy image hardcodes those upstream hostnames. Install the chart
+in its own namespace to avoid name collisions.
 
 **LoadBalancer (cloud providers):**
 Set the proxy and gateway service type in `my-values.yaml`, and scope traffic to your org/VPN:
@@ -110,12 +114,10 @@ gateway:
 **Ingress:** Set `ingress.enabled: true` in your values file and fill in `ingress.className`
 and any cert-manager annotations. See the commented example in `values.yaml`.
 
-For TLS / Ingress installs, set the console's public URL explicitly so auth
-callbacks use the externally reachable scheme and host:
+For TLS / Ingress installs, set the gateway and console public URLs explicitly so
+links and auth callbacks use the externally reachable scheme and host:
 
 ```yaml
-web:
-  nextauthUrl: https://anyray.example.com
 gateway:
   publicUrl: https://anyray.example.com
   consolePublicUrl: https://anyray.example.com
@@ -165,14 +167,14 @@ containerSecurityContext:
 
 `nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`, and
 `priorityClassName` can also be set **per component**, on any of the `gateway`,
-`optimizer`, `proxy`, `web`, `worker`, `postgres`, `clickhouse`, `minio`, or
-`redis` blocks. A component-level value replaces the global for that field (it does
-not merge); an unset component inherits the global. Use it to place a specific
-workload on its own node pool — for example, keep the heavy ClickHouse pod on a
-dedicated instance type while everything else stays on the default nodes:
+`optimizer`, `proxy`, or `postgres` blocks. A component-level value replaces the
+global for that field (it does not merge); an unset component inherits the global.
+Use it to place a specific workload on its own node pool — for example, keep the
+Postgres pod on a dedicated instance type while everything else stays on the
+default nodes:
 
 ```yaml
-clickhouse:
+postgres:
   nodeSelector:
     node.kubernetes.io/instance-type: r6i.xlarge
   tolerations:
@@ -192,9 +194,9 @@ images:
   optimizer:
     repository: registry.example.com/anyray/optimizer
     tag: v1.10.3
-  web:
-    repository: registry.example.com/langfuse/langfuse
-    tag: "3"
+  postgres:
+    repository: registry.example.com/postgres
+    tag: "17"
 ```
 
 ## Gateway runtime knobs
@@ -212,14 +214,15 @@ gateway:
   maxBodyBytes: "10485760"
 ```
 
-Use `gateway.extraEnv`, `optimizer.extraEnv`, `web.extraEnv`, `worker.extraEnv`,
-or `proxy.extraEnv` for advanced environment variables not modeled directly.
+Use `gateway.extraEnv`, `optimizer.extraEnv`, or `proxy.extraEnv` for advanced
+environment variables not modeled directly.
 
-## External backing services
+## External Postgres
 
-The chart is self-contained by default. To use managed services, disable the
-bundled StatefulSet and point the web/worker pods at your external endpoint.
-Prefer Secret references for credentials:
+The chart bundles a single-replica Postgres StatefulSet for the gateway's trace +
+spend store. To use a managed database instead, disable the bundled StatefulSet
+and point the gateway at your external endpoint (the gateway reads it as
+`ANYRAY_OBSERVABILITY_DB_URL`). Prefer a Secret reference for the credential:
 
 ```yaml
 postgres:
@@ -228,45 +231,6 @@ postgres:
     databaseUrlSecretKeyRef:
       name: anyray-external-postgres
       key: DATABASE_URL
-
-clickhouse:
-  enabled: false
-  external:
-    migrationUrl: clickhouse://clickhouse.example.com:9000
-    url: https://clickhouse.example.com:8123
-    user: clickhouse
-    passwordSecretKeyRef:
-      name: anyray-external-clickhouse
-      key: CLICKHOUSE_PASSWORD
-
-minio:
-  enabled: false
-objectStorage:
-  accessKeyIdSecretKeyRef:
-    name: anyray-external-s3
-    key: AWS_ACCESS_KEY_ID
-  secretAccessKeySecretKeyRef:
-    name: anyray-external-s3
-    key: AWS_SECRET_ACCESS_KEY
-  eventUpload:
-    bucket: anyray-langfuse
-    region: us-east-1
-    endpoint: https://s3.amazonaws.com
-    forcePathStyle: "false"
-  mediaUpload:
-    bucket: anyray-langfuse
-    region: us-east-1
-    endpoint: https://s3.amazonaws.com
-    forcePathStyle: "false"
-
-redis:
-  enabled: false
-  external:
-    host: redis.example.com
-    port: "6379"
-    authSecretKeyRef:
-      name: anyray-external-redis
-      key: REDIS_AUTH
 ```
 
 ## v1 limitations to be aware of
@@ -279,9 +243,9 @@ redis:
   the chart fails fast if you raise replicas with persistence enabled. Scaling
   beyond one replica requires moving gateway state out of files (planned follow-up).
   Set `gateway.persistence.enabled: false` to fall back to ephemeral `emptyDir`.
-- **Single-replica bundled datastores.** Postgres, ClickHouse, MinIO, Redis are
-  all `replicas: 1` StatefulSets when enabled — adequate for most orgs, but not
-  HA. Use the external-service values above for managed cloud equivalents.
+- **Single-replica bundled Postgres.** The bundled Postgres is a `replicas: 1`
+  StatefulSet — adequate for most orgs, but not HA. Use the external-Postgres
+  values above for a managed cloud equivalent.
 
 ## Secrets
 
@@ -313,30 +277,15 @@ avoids this by initializing into a `pgdata` subdirectory of the mount
 mount your own volume, keep `PGDATA` (or a `subPath`) pointed at a subdirectory,
 never the mount root.
 
-### MinIO crashes on start — `mkdir: cannot create directory '/data/langfuse': Permission denied`
-
-The bundled MinIO image runs as a nonroot user (uid `65532`). A freshly provisioned
-PVC is root-owned, so without an `fsGroup` the nonroot process can't create its
-bucket directory. The chart sets `minio.podSecurityContext.fsGroup: 65532` so the
-kubelet chowns the volume on mount. If you override `minio.podSecurityContext`, keep
-an `fsGroup` that matches the image's run user, or the volume stays unwritable.
-
 ### Mixed-architecture clusters (arm64 + amd64 nodes)
 
 Every image the chart ships is a **multi-arch manifest list** (`linux/amd64` +
-`linux/arm64`) — the five Anyray images plus the observability backend, Postgres, ClickHouse, Redis,
-and MinIO — so Kubernetes schedules each pod onto any node and pulls the matching
-architecture automatically. **No `nodeSelector` by architecture is required.**
+`linux/arm64`) — the gateway, optimizer, and proxy images plus Postgres — so
+Kubernetes schedules each pod onto any node and pulls the matching architecture
+automatically. **No `nodeSelector` by architecture is required.**
 
-The one thing to watch: MinIO is pinned by digest (Chainguard's free tier only
-publishes `:latest`). That pin **must reference the multi-arch index digest**, not a
-single-platform child manifest — otherwise the MinIO pod fails to schedule on the
-"other" architecture's nodes. The default in `values.yaml` is an index digest;
-refresh it with `docker buildx imagetools inspect cgr.dev/chainguard/minio:latest`
-and confirm the result is an `image.index` (manifest list) before re-pinning.
-
-To deliberately pin workloads to a node pool (e.g. keep ClickHouse on a specific
+To deliberately pin a workload to a node pool (e.g. keep Postgres on a specific
 instance type), set `nodeSelector` / `affinity` / `tolerations` /
 `topologySpreadConstraints` — either globally (every pod) or **per component** on
-the individual `gateway` / `clickhouse` / `minio` / … blocks. See
+the individual `gateway` / `optimizer` / `proxy` / `postgres` blocks. See
 [Cluster policy knobs](#cluster-policy-knobs).

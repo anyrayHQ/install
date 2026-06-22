@@ -21,27 +21,18 @@ cross-service references), start commands, and volume mount paths.
 6. Open the `gateway` service → "Settings" → "Public Networking" → Generate domain.
    This is your gateway API URL (use this in the developer connect one-liner (see the main README)).
 
-## Seeding model prices (one-time, after first deploy)
-
-Railway has no native one-shot Job. Run the seeder from the Railway CLI:
-
-```bash
-# Install Railway CLI if needed: npm install -g @railway/cli
-railway login
-railway run --service web \
-  node -e "$(curl -fsSL https://raw.githubusercontent.com/anyrayHQ/install/main/scripts/seedModelPrices.mjs)"
-```
-
-Or open the `web` service shell in the Railway UI and run the seeder inline.
+The gateway persists content-free traces to Postgres (`anyray_traces` /
+`anyray_observations`, auto-created) and reads them back in-process for the
+console — no separate observability datastores are needed.
 
 ## Variables reference
 
-| Variable                           | Source                          | Notes                                                     |
-|------------------------------------|---------------------------------|-----------------------------------------------------------|
-| `ANYRAY_ADMIN_TOKEN`               | `${{secret()}}` on gateway      | Printed in Railway after deploy. Gates console.           |
-| `ANYRAY_CONTENT_KEY`               | `${{secret()}}` on gateway      | AES-256-GCM at-rest encryption key.                       |
-| `LANGFUSE_INIT_PROJECT_PUBLIC_KEY` | `${{secret()}}` on web          | Shared with gateway as `ANYRAY_OBSERVABILITY_PUBLIC_KEY`. |
-| All datastore passwords            | `${{secret()}}` on each service | Never leave Railway's environment.                        |
+| Variable                       | Source                          | Notes                                                                       |
+|--------------------------------|---------------------------------|-----------------------------------------------------------------------------|
+| `ANYRAY_ADMIN_TOKEN`           | `${{secret()}}` on gateway      | Printed in Railway after deploy. Gates console.                             |
+| `ANYRAY_CONTENT_KEY`           | `${{secret()}}` on gateway      | AES-256-GCM at-rest encryption key.                                         |
+| `ANYRAY_OBSERVABILITY_DB_URL`  | `${{Postgres.*}}` refs          | Postgres URL for the content-free trace store (falls back to spend DB URL). |
+| `POSTGRES_PASSWORD`            | `${{secret()}}` on Postgres     | Never leaves Railway's environment.                                         |
 
 After generating public domains, set or confirm these gateway variables:
 
@@ -72,11 +63,12 @@ dashboard from `railway/railway.template.json`:
 1. Log in to Railway: <https://railway.com>
 2. "New Project" → "Deploy a template" → search "Anyray" (or use the direct
    template URL from the Railway dashboard after submission).
-3. Verify all 9 services start without errors.
+3. Verify all 4 services (`gateway`, `optimizer`, `proxy`, `Postgres`) start
+   without errors.
 4. Probe: `curl https://<gateway-domain>/` → expect `AI Gateway` response.
 5. Probe: `curl -fso /dev/null -w "%{http_code}" https://<proxy-domain>/anyray-login`
    → expect `200`.
-6. If any variable reference fails (e.g. `${{web.LANGFUSE_INIT_PROJECT_PUBLIC_KEY}}`
+6. If any variable reference fails (e.g. `${{Postgres.POSTGRES_PASSWORD}}`
    not resolving), adjust the reference and redeploy. Railway's cross-service
    variable references are verified only during live deploy.
 7. Railway's private network is IPv6-only. The `proxy` start command rewrites

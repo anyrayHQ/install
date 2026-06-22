@@ -17,9 +17,7 @@
       "volumes": [{ "mountPath": "/data" }],
       "variables": {
         "PORT": "8787",
-        "ANYRAY_OBSERVABILITY_BASEURL": "http://${{web.RAILWAY_PRIVATE_DOMAIN}}:3000",
-        "ANYRAY_OBSERVABILITY_PUBLIC_KEY": "${{web.LANGFUSE_INIT_PROJECT_PUBLIC_KEY}}",
-        "ANYRAY_OBSERVABILITY_SECRET_KEY": "${{web.LANGFUSE_INIT_PROJECT_SECRET_KEY}}",
+        "ANYRAY_OBSERVABILITY_DB_URL": "postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.POSTGRES_DB}}",
         "ANYRAY_OPTIMIZER_URL": "http://${{optimizer.RAILWAY_PRIVATE_DOMAIN}}:8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{optimizer.ANYRAY_OPTIMIZER_TOKEN}}",
         "ANYRAY_OPTIMIZER_TIMEOUT_MS": "800",
@@ -83,98 +81,11 @@
         "image": "ghcr.io/anyrayhq/proxy:stable"
       },
       "deploy": {
-        "startCommand": "sh -c \"sed -e 's/gateway:8787/gateway.railway.internal:8787/g' -e 's/web:3000/web.railway.internal:3000/g' -e 's/optimizer:8088/optimizer.railway.internal:8088/g' -e 's/${ANYRAY_UPDATER_ENABLED}/false/g' -e 's/${ANYRAY_UPDATER_PERIODIC_POLLS}/false/g' -e 's/${ANYRAY_UPDATER_POLL_INTERVAL}/86400/g' -e 's/${ANYRAY_UPDATER_TOKEN}//g' /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'\"",
+        "startCommand": "sh -c \"sed -e 's/gateway:8787/gateway.railway.internal:8787/g' -e 's/optimizer:8088/optimizer.railway.internal:8088/g' -e 's/${ANYRAY_UPDATER_ENABLED}/false/g' -e 's/${ANYRAY_UPDATER_PERIODIC_POLLS}/false/g' -e 's/${ANYRAY_UPDATER_POLL_INTERVAL}/86400/g' -e 's/${ANYRAY_UPDATER_TOKEN}//g' /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'\"",
         "healthcheckPath": "/anyray-login",
         "restartPolicyType": "ON_FAILURE"
       },
       "variables": {}
-    },
-    {
-      "name": "web",
-      "source": {
-        "image": "docker.io/langfuse/langfuse:3"
-      },
-      "deploy": {
-        "healthcheckPath": "/api/public/health",
-        "restartPolicyType": "ON_FAILURE"
-      },
-      "variables": {
-        "DATABASE_URL": "${{Postgres.DATABASE_URL}}",
-        "NEXTAUTH_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
-        "NEXTAUTH_SECRET": "${{secret()}}",
-        "SALT": "${{secret()}}",
-        "ENCRYPTION_KEY": "${{secret()}}",
-        "TELEMETRY_ENABLED": "false",
-        "CLICKHOUSE_MIGRATION_URL": "clickhouse://${{clickhouse.RAILWAY_PRIVATE_DOMAIN}}:9000",
-        "CLICKHOUSE_URL": "http://${{clickhouse.RAILWAY_PRIVATE_DOMAIN}}:8123",
-        "CLICKHOUSE_USER": "clickhouse",
-        "CLICKHOUSE_PASSWORD": "${{clickhouse.CLICKHOUSE_PASSWORD}}",
-        "CLICKHOUSE_CLUSTER_ENABLED": "false",
-        "LANGFUSE_S3_EVENT_UPLOAD_BUCKET": "langfuse",
-        "LANGFUSE_S3_EVENT_UPLOAD_REGION": "auto",
-        "LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID": "minio",
-        "LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY": "${{minio.MINIO_ROOT_PASSWORD}}",
-        "LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT": "http://${{minio.RAILWAY_PRIVATE_DOMAIN}}:9000",
-        "LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE": "true",
-        "LANGFUSE_S3_EVENT_UPLOAD_PREFIX": "events/",
-        "LANGFUSE_S3_MEDIA_UPLOAD_BUCKET": "langfuse",
-        "LANGFUSE_S3_MEDIA_UPLOAD_REGION": "auto",
-        "LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID": "minio",
-        "LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY": "${{minio.MINIO_ROOT_PASSWORD}}",
-        "LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT": "http://${{minio.RAILWAY_PRIVATE_DOMAIN}}:9000",
-        "LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE": "true",
-        "LANGFUSE_S3_MEDIA_UPLOAD_PREFIX": "media/",
-        "REDIS_HOST": "${{Redis.RAILWAY_PRIVATE_DOMAIN}}",
-        "REDIS_PORT": "6379",
-        "REDIS_AUTH": "${{Redis.REDIS_PASSWORD}}",
-        "LANGFUSE_INIT_ORG_ID": "anyray",
-        "LANGFUSE_INIT_ORG_NAME": "Anyray",
-        "LANGFUSE_INIT_PROJECT_ID": "anyray-gateway",
-        "LANGFUSE_INIT_PROJECT_NAME": "Anyray Gateway",
-        "LANGFUSE_INIT_PROJECT_PUBLIC_KEY": "${{secret()}}",
-        "LANGFUSE_INIT_PROJECT_SECRET_KEY": "${{secret()}}",
-        "LANGFUSE_INIT_USER_EMAIL": "admin@anyray.local",
-        "LANGFUSE_INIT_USER_NAME": "Admin",
-        "LANGFUSE_INIT_USER_PASSWORD": "${{secret()}}"
-      }
-    },
-    {
-      "name": "worker",
-      "source": {
-        "image": "docker.io/langfuse/langfuse-worker:3"
-      },
-      "deploy": {
-        "restartPolicyType": "ON_FAILURE"
-      },
-      "variables": {
-        "DATABASE_URL": "${{Postgres.DATABASE_URL}}",
-        "NEXTAUTH_URL": "https://${{web.RAILWAY_PUBLIC_DOMAIN}}",
-        "SALT": "${{web.SALT}}",
-        "ENCRYPTION_KEY": "${{web.ENCRYPTION_KEY}}",
-        "TELEMETRY_ENABLED": "false",
-        "CLICKHOUSE_MIGRATION_URL": "clickhouse://${{clickhouse.RAILWAY_PRIVATE_DOMAIN}}:9000",
-        "CLICKHOUSE_URL": "http://${{clickhouse.RAILWAY_PRIVATE_DOMAIN}}:8123",
-        "CLICKHOUSE_USER": "clickhouse",
-        "CLICKHOUSE_PASSWORD": "${{clickhouse.CLICKHOUSE_PASSWORD}}",
-        "CLICKHOUSE_CLUSTER_ENABLED": "false",
-        "LANGFUSE_S3_EVENT_UPLOAD_BUCKET": "langfuse",
-        "LANGFUSE_S3_EVENT_UPLOAD_REGION": "auto",
-        "LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID": "minio",
-        "LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY": "${{minio.MINIO_ROOT_PASSWORD}}",
-        "LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT": "http://${{minio.RAILWAY_PRIVATE_DOMAIN}}:9000",
-        "LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE": "true",
-        "LANGFUSE_S3_EVENT_UPLOAD_PREFIX": "events/",
-        "LANGFUSE_S3_MEDIA_UPLOAD_BUCKET": "langfuse",
-        "LANGFUSE_S3_MEDIA_UPLOAD_REGION": "auto",
-        "LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID": "minio",
-        "LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY": "${{minio.MINIO_ROOT_PASSWORD}}",
-        "LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT": "http://${{minio.RAILWAY_PRIVATE_DOMAIN}}:9000",
-        "LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE": "true",
-        "LANGFUSE_S3_MEDIA_UPLOAD_PREFIX": "media/",
-        "REDIS_HOST": "${{Redis.RAILWAY_PRIVATE_DOMAIN}}",
-        "REDIS_PORT": "6379",
-        "REDIS_AUTH": "${{Redis.REDIS_PASSWORD}}"
-      }
     },
     {
       "name": "Postgres",
@@ -191,53 +102,6 @@
         "POSTGRES_DB": "postgres",
         "PGDATA": "/var/lib/postgresql/data/pgdata",
         "DATABASE_URL": "postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.POSTGRES_DB}}"
-      }
-    },
-    {
-      "name": "Redis",
-      "source": {
-        "image": "docker.io/redis:7"
-      },
-      "deploy": {
-        "startCommand": "sh -c 'exec redis-server --requirepass \"$REDIS_PASSWORD\" --maxmemory-policy noeviction --appendonly yes --dir /data'",
-        "restartPolicyType": "ON_FAILURE"
-      },
-      "volumes": [{ "mountPath": "/data" }],
-      "variables": {
-        "REDIS_PASSWORD": "${{secret()}}"
-      }
-    },
-    {
-      "name": "clickhouse",
-      "source": {
-        "image": "docker.io/clickhouse/clickhouse-server:26.3"
-      },
-      "deploy": {
-        "startCommand": "sh -c 'mkdir -p /etc/clickhouse-server/config.d && echo \"$CLICKHOUSE_LOG_RETENTION_XML_B64\" | base64 -d > /etc/clickhouse-server/config.d/log-retention.xml && exec /entrypoint.sh'",
-        "restartPolicyType": "ON_FAILURE"
-      },
-      "volumes": [{ "mountPath": "/var/lib/clickhouse" }],
-      "variables": {
-        "CLICKHOUSE_DB": "default",
-        "CLICKHOUSE_USER": "clickhouse",
-        "CLICKHOUSE_PASSWORD": "${{secret()}}",
-        "CLICKHOUSE_LOG_RETENTION_XML_B64": "PD94bWwgdmVyc2lvbj0iMS4wIj8+CjwhLS0gVmVuZG9yZWQgZnJvbSBtb25vcmVwbyBvYnNlcnZhYmlsaXR5L2NsaWNraG91c2UvY29uZmlnLmQvbG9nLXJldGVudGlvbi54bWwg4oCUIGVkaXQgdXBzdHJlYW0sIHJlLWNvcHkgdmVyYmF0aW0uIC0tPgo8IS0tIFR3byBERVJJVkVEIGNvcGllcyBpbiB0aGlzIHJlcG8gbXVzdCBiZSByZS1zeW5jZWQgd2hlbiB0aGlzIGNoYW5nZXM6CiAgICAgaGVsbS90ZW1wbGF0ZXMvY2xpY2tob3VzZS55YW1sIChpbmxpbmUgQ29uZmlnTWFwKSBhbmQgcmFpbHdheS9yYWlsd2F5LnRlbXBsYXRlLmpzb24KICAgICAoQ0xJQ0tIT1VTRV9MT0dfUkVURU5USU9OX1hNTF9CNjQgPSBgYmFzZTY0IDwgY2xpY2tob3VzZS9jb25maWcuZC9sb2ctcmV0ZW50aW9uLnhtbCB8IHRyIC1kICdcbidgKS4gLS0+CjwhLS0gQm91bmQgQ2xpY2tIb3VzZSdzIG93biBkaWFnbm9zdGljcyBzbyB0aGV5IGNhbid0IGZpbGwgdGhlIGhvc3QgZGlzay4KICAgICBDbGlja0hvdXNlIGlzIG9ubHkgdGhlIExhbmdmdXNlIHN0b3JlIGhlcmU7IGl0cyBzeXN0ZW0uKl9sb2cgdGFibGVzIHNoaXAgd2l0aAogICAgIE5PIFRUTCBhbmQgZ3JldyB1bmJvdW5kZWQgdG8gfjVHQiwgT09NJ2luZyB0aGUgYm94LgogICAgIE5COiA8dHRsPiBpcyB2YWxpZCBvbmx5IG9uIGxvZ3Mgd2hvc2UgZGVmYXVsdCBjb25maWcgdXNlcyA8cGFydGl0aW9uX2J5PgogICAgIChub3QgPGVuZ2luZT4pOyBhZGRpbmcgaXQgdG8gYW4gPGVuZ2luZT4tYmFzZWQgbG9nIChvcGVudGVsZW1ldHJ5X3NwYW5fbG9nKQogICAgIG1ha2VzIENIIHJlZnVzZSB0byBzdGFydCAoQ29kZSAzNikuIFByb2ZpbGVyIHN0YXlzIGRlZmF1bHQg4oCUIGl0cyB0cmFjZV9sb2cgaXMKICAgICBib3VuZGVkIGJ5IHRoZSBUVEwgYmVsb3c7IGRpc2FibGluZyBpdCBvdXRyaWdodCB3b3VsZCBuZWVkIGEgdXNlcnMuZCBwcm9maWxlLiAtLT4KPGNsaWNraG91c2U+CiAgICA8IS0tIFF1aWV0ZW4gKyBjYXAgb24tZGlzayBzZXJ2ZXIgbG9ncyAoZGVmYXVsdDogdHJhY2UgbGV2ZWwsIDEwMDBNIHggMTAgPSB1cCB0byAxMEdCKS4gLS0+CiAgICA8bG9nZ2VyPgogICAgICAgIDxsZXZlbD53YXJuaW5nPC9sZXZlbD4KICAgICAgICA8c2l6ZT41ME08L3NpemU+CiAgICAgICAgPGNvdW50PjM8L2NvdW50PgogICAgPC9sb2dnZXI+CgogICAgPCEtLSBFeHBpcmUgdGhlIGdyb3dpbmcgc3lzdGVtLipfbG9nIHRhYmxlcyBhZnRlciAzIGRheXMuIC0tPgogICAgPHRyYWNlX2xvZz48dHRsPmV2ZW50X2RhdGUgKyBJTlRFUlZBTCAzIERBWSBERUxFVEU8L3R0bD48L3RyYWNlX2xvZz4KICAgIDx0ZXh0X2xvZz48dHRsPmV2ZW50X2RhdGUgKyBJTlRFUlZBTCAzIERBWSBERUxFVEU8L3R0bD48L3RleHRfbG9nPgogICAgPG1ldHJpY19sb2c+PHR0bD5ldmVudF9kYXRlICsgSU5URVJWQUwgMyBEQVkgREVMRVRFPC90dGw+PC9tZXRyaWNfbG9nPgogICAgPGFzeW5jaHJvbm91c19tZXRyaWNfbG9nPjx0dGw+ZXZlbnRfZGF0ZSArIElOVEVSVkFMIDMgREFZIERFTEVURTwvdHRsPjwvYXN5bmNocm9ub3VzX21ldHJpY19sb2c+CiAgICA8cGFydF9sb2c+PHR0bD5ldmVudF9kYXRlICsgSU5URVJWQUwgMyBEQVkgREVMRVRFPC90dGw+PC9wYXJ0X2xvZz4KICAgIDxxdWVyeV9sb2c+PHR0bD5ldmVudF9kYXRlICsgSU5URVJWQUwgMyBEQVkgREVMRVRFPC90dGw+PC9xdWVyeV9sb2c+CiAgICA8cXVlcnlfbWV0cmljX2xvZz48dHRsPmV2ZW50X2RhdGUgKyBJTlRFUlZBTCAzIERBWSBERUxFVEU8L3R0bD48L3F1ZXJ5X21ldHJpY19sb2c+CiAgICA8YmFja2dyb3VuZF9zY2hlZHVsZV9wb29sX2xvZz48dHRsPmV2ZW50X2RhdGUgKyBJTlRFUlZBTCAzIERBWSBERUxFVEU8L3R0bD48L2JhY2tncm91bmRfc2NoZWR1bGVfcG9vbF9sb2c+CjwvY2xpY2tob3VzZT4K"
-      }
-    },
-    {
-      "name": "minio",
-      "source": {
-        "image": "cgr.dev/chainguard/minio:latest@sha256:1fa1317f8a14251743c131d556aadb17efb85e82bcd95b6564044935c8301ae7"
-      },
-      "deploy": {
-        "startCommand": "sh -c 'mkdir -p /data/langfuse && exec minio server --address \":9000\" /data'",
-        "restartPolicyType": "ON_FAILURE"
-      },
-      "volumes": [{ "mountPath": "/data" }],
-      "variables": {
-        "MINIO_ROOT_USER": "minio",
-        "MINIO_ROOT_PASSWORD": "${{secret()}}",
-        "RAILWAY_RUN_UID": "0"
       }
     }
   ]

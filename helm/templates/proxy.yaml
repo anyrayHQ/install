@@ -20,10 +20,25 @@ spec:
           image: {{ include "anyray.image" (dict "component" "proxy" "context" .) }}
           imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "proxy" "context" .) }}
           {{- include "anyray.containerSecurityContext" . | nindent 10 }}
-          {{- with .Values.proxy.extraEnv }}
+          # The proxy image bakes an nginx template whose ANYRAY_UPDATER_*
+          # placeholders are envsubst-substituted at start; if they are unset
+          # nginx keeps the literal "$..." and aborts with `unknown variable`.
+          # The one-click self-updater is Docker/Watchtower-only (it drives the
+          # host docker socket), so it is hard-disabled here — Kubernetes
+          # upgrades go through `helm upgrade` — but the vars must still be
+          # present so the baked template renders and nginx can start.
           env:
+            - name: ANYRAY_UPDATER_ENABLED
+              value: "false"
+            - name: ANYRAY_UPDATER_TOKEN
+              value: ""
+            - name: ANYRAY_UPDATER_PERIODIC_POLLS
+              value: "false"
+            - name: ANYRAY_UPDATER_POLL_INTERVAL
+              value: "86400"
+            {{- with .Values.proxy.extraEnv }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- end }}
           ports:
             - containerPort: 80
           readinessProbe:

@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- Vendored from monorepo observability/clickhouse/config.d/log-retention.xml — edit upstream, re-copy verbatim. -->
+<!-- Two DERIVED copies in this repo must be re-synced when this changes:
+     helm/templates/clickhouse.yaml (inline ConfigMap) and railway/railway.template.json
+     (CLICKHOUSE_LOG_RETENTION_XML_B64 = `base64 < clickhouse/config.d/log-retention.xml | tr -d '\n'`). -->
+<!-- Bound ClickHouse's own diagnostics so they can't fill the host disk.
+     ClickHouse is only the Langfuse store here; its system.*_log tables ship with
+     NO TTL and grew unbounded to ~5GB, OOM'ing the box.
+     NB: <ttl> is valid only on logs whose default config uses <partition_by>
+     (not <engine>); adding it to an <engine>-based log (opentelemetry_span_log)
+     makes CH refuse to start (Code 36). Profiler stays default — its trace_log is
+     bounded by the TTL below; disabling it outright would need a users.d profile. -->
+<clickhouse>
+    <!-- Quieten + cap on-disk server logs (default: trace level, 1000M x 10 = up to 10GB). -->
+    <logger>
+        <level>warning</level>
+        <size>50M</size>
+        <count>3</count>
+    </logger>
+
+    <!-- Expire the growing system.*_log tables after 3 days. -->
+    <trace_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></trace_log>
+    <text_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></text_log>
+    <metric_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></metric_log>
+    <asynchronous_metric_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></asynchronous_metric_log>
+    <part_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></part_log>
+    <query_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_log>
+    <query_metric_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_metric_log>
+    <background_schedule_pool_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></background_schedule_pool_log>
+</clickhouse>

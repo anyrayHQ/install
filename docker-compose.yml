@@ -261,6 +261,7 @@ services:
     volumes:
       - anyray_clickhouse_data:/var/lib/clickhouse
       - anyray_clickhouse_logs:/var/log/clickhouse-server
+      - ./clickhouse/config.d/log-retention.xml:/etc/clickhouse-server/config.d/log-retention.xml:ro
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s

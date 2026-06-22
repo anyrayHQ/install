@@ -1,4 +1,33 @@
 {{- if .Values.clickhouse.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "anyray.fullname" . }}-clickhouse-config
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+data:
+  # Mirror of docker-compose clickhouse/config.d/log-retention.xml (vendored from
+  # monorepo). Bounds ClickHouse's own diagnostics so they can't fill the PVC:
+  # its profiler + verbose logs ship with no TTL and grew unbounded to ~5GB.
+  log-retention.xml: |
+    <?xml version="1.0"?>
+    <clickhouse>
+        <logger>
+            <level>warning</level>
+            <size>50M</size>
+            <count>3</count>
+        </logger>
+        <trace_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></trace_log>
+        <text_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></text_log>
+        <metric_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></metric_log>
+        <asynchronous_metric_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></asynchronous_metric_log>
+        <part_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></part_log>
+        <query_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_log>
+        <query_metric_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></query_metric_log>
+        <background_schedule_pool_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></background_schedule_pool_log>
+    </clickhouse>
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -53,6 +82,13 @@ spec:
               mountPath: /var/lib/clickhouse
             - name: logs
               mountPath: /var/log/clickhouse-server
+            - name: config
+              mountPath: /etc/clickhouse-server/config.d/log-retention.xml
+              subPath: log-retention.xml
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "anyray.fullname" . }}-clickhouse-config
   volumeClaimTemplates:
     - metadata:
         name: data

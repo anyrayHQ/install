@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 
 Description: >-
   Anyray one-click deploy. Brings up the full self-hosted stack
-  (gateway + console + optimizer + Langfuse trace backend + datastores) on a
+  (gateway + console + optimizer + trace backend + datastores) on a
   single EC2 host with Docker Compose, using the published images and setup.sh
   from github.com/anyrayHQ/install. Console on :3000, gateway API on :8787 —
   both scoped to the CIDR you provide (never 0.0.0.0/0). Content stays encrypted

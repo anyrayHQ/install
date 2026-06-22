@@ -28,6 +28,15 @@ spec:
           # upgrades go through `helm upgrade` — but the vars must still be
           # present so the baked template renders and nginx can start.
           env:
+            # Upstream hosts for the baked nginx template. The proxy re-resolves
+            # these at request time (variable proxy_pass + a resolver derived
+            # from /etc/resolv.conf), so a rolled gateway/optimizer pod with a
+            # new IP is picked up without restarting the proxy. Point them at the
+            # in-cluster Service DNS names rather than the image's compose default.
+            - name: ANYRAY_GATEWAY_HOST
+              value: {{ include "anyray.fullname" . }}-gateway
+            - name: ANYRAY_OPTIMIZER_HOST
+              value: {{ include "anyray.fullname" . }}-optimizer
             - name: ANYRAY_UPDATER_ENABLED
               value: "false"
             - name: ANYRAY_UPDATER_TOKEN

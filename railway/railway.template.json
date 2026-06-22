@@ -1,7 +1,12 @@
 {
   "displayName": "Anyray",
-  "description": "Self-hosted AI-spend optimizer — gateway, optimizer, and observability console.",
-  "tags": ["ai", "gateway", "llm", "observability"],
+  "description": "Self-hosted AI-spend optimizer \u2014 gateway, optimizer, and observability console.",
+  "tags": [
+    "ai",
+    "gateway",
+    "llm",
+    "observability"
+  ],
   "icon": "https://docs.anyray.ai/img/favicon.svg",
   "readme": "https://raw.githubusercontent.com/anyrayHQ/install/main/railway/README.md",
   "services": [
@@ -14,7 +19,11 @@
         "healthcheckPath": "/",
         "restartPolicyType": "ON_FAILURE"
       },
-      "volumes": [{ "mountPath": "/data" }],
+      "volumes": [
+        {
+          "mountPath": "/data"
+        }
+      ],
       "variables": {
         "PORT": "8787",
         "ANYRAY_OBSERVABILITY_DB_URL": "postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.POSTGRES_DB}}",
@@ -66,7 +75,11 @@
         "healthcheckPath": "/health",
         "restartPolicyType": "ON_FAILURE"
       },
-      "volumes": [{ "mountPath": "/data" }],
+      "volumes": [
+        {
+          "mountPath": "/data"
+        }
+      ],
       "variables": {
         "PORT": "8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{secret()}}",
@@ -81,11 +94,17 @@
         "image": "ghcr.io/anyrayhq/proxy:stable"
       },
       "deploy": {
-        "startCommand": "sh -c \"sed -e 's/gateway:8787/gateway.railway.internal:8787/g' -e 's/optimizer:8088/optimizer.railway.internal:8088/g' -e 's/${ANYRAY_UPDATER_ENABLED}/false/g' -e 's/${ANYRAY_UPDATER_PERIODIC_POLLS}/false/g' -e 's/${ANYRAY_UPDATER_POLL_INTERVAL}/86400/g' -e 's/${ANYRAY_UPDATER_TOKEN}//g' /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'\"",
         "healthcheckPath": "/anyray-login",
         "restartPolicyType": "ON_FAILURE"
       },
-      "variables": {}
+      "variables": {
+        "ANYRAY_GATEWAY_HOST": "gateway.railway.internal",
+        "ANYRAY_OPTIMIZER_HOST": "optimizer.railway.internal",
+        "ANYRAY_UPDATER_ENABLED": "false",
+        "ANYRAY_UPDATER_PERIODIC_POLLS": "false",
+        "ANYRAY_UPDATER_POLL_INTERVAL": "86400",
+        "ANYRAY_UPDATER_TOKEN": ""
+      }
     },
     {
       "name": "Postgres",
@@ -95,7 +114,11 @@
       "deploy": {
         "restartPolicyType": "ON_FAILURE"
       },
-      "volumes": [{ "mountPath": "/var/lib/postgresql/data" }],
+      "volumes": [
+        {
+          "mountPath": "/var/lib/postgresql/data"
+        }
+      ],
       "variables": {
         "POSTGRES_USER": "postgres",
         "POSTGRES_PASSWORD": "${{secret()}}",

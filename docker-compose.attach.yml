@@ -32,7 +32,7 @@ services:
       ANYRAY_OPTIMIZER_CONFIG: /data/optimizer.config.json
       ANYRAY_OPTIMIZER_AUDIT_FILE: /data/optimizer-settings-audit.log
       # BYO trace persistence (opt-in): the optimizer's /v1/record writes the same
-      # Langfuse traces the Anyray gateway writes in-process. Set ONLY in attach/BYO
+      # traces the Anyray gateway writes in-process. Set ONLY in attach/BYO
       # mode (no Anyray gateway in the path) — never on the optimizer in an
       # Anyray-gateway deployment, or every call would be recorded twice. Unset keys
       # leave the endpoint disabled (404); a missing content key degrades to 'off'.
@@ -66,7 +66,7 @@ services:
       # Basic auth (base64 of pk:sk) the nginx template injects for
       # /admin/observability/*. Pre-encoded on the host by setup.sh: encoding it
       # inside this Alpine/busybox proxy wrapped the base64 at column 76 and left
-      # a newline in the rendered Authorization header, so Langfuse rejected every
+      # a newline in the rendered Authorization header, so the trace backend rejected every
       # observability read with 400 Bad Request (the attach smoke test never passed).
       ANYRAY_OBS_BASIC_AUTH: ${ANYRAY_OBS_BASIC_AUTH:?run ./setup.sh first}
     volumes:

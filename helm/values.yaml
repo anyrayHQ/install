@@ -190,7 +190,7 @@ proxy:
 web:
   replicas: 1
   nextauthUrl: ""
-  # The Langfuse console (Next.js) sizes its V8 heap from the container memory
+  # The console (Next.js) sizes its V8 heap from the container memory
   # limit; at the previous 1Gi it capped old-space near ~512MB and OOM'd during
   # init, crashlooping and timing out the post-install model-seeder hook. Pin the
   # heap explicitly (deterministic regardless of cgroup detection) and give the

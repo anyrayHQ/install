@@ -22,8 +22,8 @@ spec:
           {{- include "anyray.containerSecurityContext" . | nindent 10 }}
           env:
             {{- if .Values.web.nodeOptions }}
-            # Pin the V8 heap so the console doesn't OOM during init. Langfuse
-            # (Next.js) otherwise sizes old-space from the cgroup limit and capped
+            # Pin the V8 heap so the console doesn't OOM during init. The
+            # console (Next.js) otherwise sizes old-space from the cgroup limit and capped
             # near ~512MB at the old 1Gi limit, crashlooping init and timing out
             # the post-install model-seeder hook.
             - name: NODE_OPTIONS

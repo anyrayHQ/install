@@ -324,7 +324,7 @@ an `fsGroup` that matches the image's run user, or the volume stays unwritable.
 ### Mixed-architecture clusters (arm64 + amd64 nodes)
 
 Every image the chart ships is a **multi-arch manifest list** (`linux/amd64` +
-`linux/arm64`) — the five Anyray images plus Langfuse, Postgres, ClickHouse, Redis,
+`linux/arm64`) — the five Anyray images plus the observability backend, Postgres, ClickHouse, Redis,
 and MinIO — so Kubernetes schedules each pod onto any node and pulls the matching
 architecture automatically. **No `nodeSelector` by architecture is required.**
 

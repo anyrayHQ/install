@@ -43,7 +43,7 @@ secretKeyRef:
 
 {{/*
 External Secret key reference helper.
-Usage: include "anyray.externalSecretRef" .Values.redis.external.authSecretKeyRef
+Usage: include "anyray.externalSecretRef" .Values.postgres.external.databaseUrlSecretKeyRef
 */}}
 {{- define "anyray.externalSecretRef" -}}
 secretKeyRef:
@@ -113,7 +113,8 @@ Scheduling fields (nodeSelector / affinity / tolerations /
 topologySpreadConstraints / priorityClassName) are per-component overridable:
 pass (dict "component" <name> "context" .) and a non-empty .Values.<name>.<field>
 wins over the global .Values.<field>; unset falls back to the global. Called with
-the bare root context (.) it emits the global values only.
+the bare root context (.) it emits the global values only. The component blocks
+that carry overrides are gateway / optimizer / proxy / postgres.
 */}}
 {{- define "anyray.podSpecCommonNoSecurity" -}}
 {{- $context := . -}}
@@ -188,160 +189,29 @@ External dependency guardrails.
 {{- end -}}
 {{- end }}
 
-{{- define "anyray.requireClickHouse" -}}
-{{- if and (not .Values.clickhouse.enabled) (or (not .Values.clickhouse.external.url) (not .Values.clickhouse.external.migrationUrl)) -}}
-{{- fail "clickhouse.enabled=false requires clickhouse.external.url and clickhouse.external.migrationUrl" -}}
-{{- end -}}
-{{- end }}
-
-{{- define "anyray.requireRedis" -}}
-{{- if and (not .Values.redis.enabled) (not .Values.redis.external.host) -}}
-{{- fail "redis.enabled=false requires redis.external.host" -}}
-{{- end -}}
-{{- end }}
-
 {{/*
-Postgres env for the observability web/worker.
+Gateway trace + spend store env. The gateway persists content-free traces +
+observations to Postgres (anyray_traces / anyray_observations, auto-created;
+content AES-256-GCM encrypted at rest) and reads them in-process. Defaults to the
+in-chart Postgres; honors postgres.external for a managed database.
+
+POSTGRES_PASSWORD must precede ANYRAY_OBSERVABILITY_DB_URL when it is interpolated:
+k8s only resolves $(VAR) against vars declared earlier in the env list.
 */}}
-{{- define "anyray.postgresEnv" -}}
+{{- define "anyray.observabilityDbEnv" -}}
 {{- include "anyray.requirePostgres" . }}
 {{- if .Values.postgres.external.databaseUrlSecretKeyRef.name }}
-- name: DATABASE_URL
+- name: ANYRAY_OBSERVABILITY_DB_URL
   valueFrom:
     {{- include "anyray.externalSecretRef" .Values.postgres.external.databaseUrlSecretKeyRef | nindent 4 }}
 {{- else if .Values.postgres.external.databaseUrl }}
-- name: DATABASE_URL
+- name: ANYRAY_OBSERVABILITY_DB_URL
   value: {{ .Values.postgres.external.databaseUrl | quote }}
 {{- else }}
-# POSTGRES_PASSWORD must precede DATABASE_URL: k8s only resolves
-# $(VAR) against vars declared earlier in the env list.
 - name: POSTGRES_PASSWORD
   valueFrom:
     {{- include "anyray.secretRef" (dict "key" "POSTGRES_PASSWORD" "context" .) | nindent 4 }}
-- name: DATABASE_URL
+- name: ANYRAY_OBSERVABILITY_DB_URL
   value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
-{{- end }}
-{{- end }}
-
-{{/*
-ClickHouse env for the observability web/worker.
-*/}}
-{{- define "anyray.clickhouseEnv" -}}
-{{- include "anyray.requireClickHouse" . }}
-{{- $migrationUrl := default (printf "clickhouse://%s-clickhouse:9000" (include "anyray.fullname" .)) .Values.clickhouse.external.migrationUrl -}}
-{{- $url := default (printf "http://%s-clickhouse:8123" (include "anyray.fullname" .)) .Values.clickhouse.external.url -}}
-- name: CLICKHOUSE_MIGRATION_URL
-  value: {{ $migrationUrl | quote }}
-- name: CLICKHOUSE_URL
-  value: {{ $url | quote }}
-- name: CLICKHOUSE_USER
-  value: {{ .Values.clickhouse.external.user | quote }}
-- name: CLICKHOUSE_PASSWORD
-{{- if .Values.clickhouse.external.passwordSecretKeyRef.name }}
-  valueFrom:
-    {{- include "anyray.externalSecretRef" .Values.clickhouse.external.passwordSecretKeyRef | nindent 4 }}
-{{- else if .Values.clickhouse.external.password }}
-  value: {{ .Values.clickhouse.external.password | quote }}
-{{- else if .Values.clickhouse.enabled }}
-  valueFrom:
-    {{- include "anyray.secretRef" (dict "key" "CLICKHOUSE_PASSWORD" "context" .) | nindent 4 }}
-{{- else }}
-  value: ""
-{{- end }}
-- name: CLICKHOUSE_CLUSTER_ENABLED
-  value: "false"
-{{- end }}
-
-{{/*
-Object storage env for the observability web/worker.
-*/}}
-{{- define "anyray.objectStorageEnv" -}}
-{{- $defaultEndpoint := "" -}}
-{{- if .Values.minio.enabled -}}
-{{- $defaultEndpoint = printf "http://%s-minio:9000" (include "anyray.fullname" .) -}}
-{{- end -}}
-{{- $eventEndpoint := default $defaultEndpoint .Values.objectStorage.eventUpload.endpoint -}}
-{{- $mediaEndpoint := default $defaultEndpoint .Values.objectStorage.mediaUpload.endpoint -}}
-- name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
-  value: {{ .Values.objectStorage.eventUpload.bucket | quote }}
-- name: LANGFUSE_S3_EVENT_UPLOAD_REGION
-  value: {{ .Values.objectStorage.eventUpload.region | quote }}
-- name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
-{{- if .Values.objectStorage.accessKeyIdSecretKeyRef.name }}
-  valueFrom:
-    {{- include "anyray.externalSecretRef" .Values.objectStorage.accessKeyIdSecretKeyRef | nindent 4 }}
-{{- else }}
-  value: {{ .Values.objectStorage.accessKeyId | quote }}
-{{- end }}
-- name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
-{{- if .Values.objectStorage.secretAccessKeySecretKeyRef.name }}
-  valueFrom:
-    {{- include "anyray.externalSecretRef" .Values.objectStorage.secretAccessKeySecretKeyRef | nindent 4 }}
-{{- else if .Values.objectStorage.secretAccessKey }}
-  value: {{ .Values.objectStorage.secretAccessKey | quote }}
-{{- else if .Values.minio.enabled }}
-  valueFrom:
-    {{- include "anyray.secretRef" (dict "key" "MINIO_ROOT_PASSWORD" "context" .) | nindent 4 }}
-{{- else }}
-  value: ""
-{{- end }}
-- name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
-  value: {{ $eventEndpoint | quote }}
-- name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
-  value: {{ .Values.objectStorage.eventUpload.forcePathStyle | quote }}
-- name: LANGFUSE_S3_EVENT_UPLOAD_PREFIX
-  value: {{ .Values.objectStorage.eventUpload.prefix | quote }}
-- name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
-  value: {{ .Values.objectStorage.mediaUpload.bucket | quote }}
-- name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
-  value: {{ .Values.objectStorage.mediaUpload.region | quote }}
-- name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
-{{- if .Values.objectStorage.accessKeyIdSecretKeyRef.name }}
-  valueFrom:
-    {{- include "anyray.externalSecretRef" .Values.objectStorage.accessKeyIdSecretKeyRef | nindent 4 }}
-{{- else }}
-  value: {{ .Values.objectStorage.accessKeyId | quote }}
-{{- end }}
-- name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
-{{- if .Values.objectStorage.secretAccessKeySecretKeyRef.name }}
-  valueFrom:
-    {{- include "anyray.externalSecretRef" .Values.objectStorage.secretAccessKeySecretKeyRef | nindent 4 }}
-{{- else if .Values.objectStorage.secretAccessKey }}
-  value: {{ .Values.objectStorage.secretAccessKey | quote }}
-{{- else if .Values.minio.enabled }}
-  valueFrom:
-    {{- include "anyray.secretRef" (dict "key" "MINIO_ROOT_PASSWORD" "context" .) | nindent 4 }}
-{{- else }}
-  value: ""
-{{- end }}
-- name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
-  value: {{ $mediaEndpoint | quote }}
-- name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
-  value: {{ .Values.objectStorage.mediaUpload.forcePathStyle | quote }}
-- name: LANGFUSE_S3_MEDIA_UPLOAD_PREFIX
-  value: {{ .Values.objectStorage.mediaUpload.prefix | quote }}
-{{- end }}
-
-{{/*
-Redis env for the observability web/worker.
-*/}}
-{{- define "anyray.redisEnv" -}}
-{{- include "anyray.requireRedis" . }}
-{{- $host := default (printf "%s-redis" (include "anyray.fullname" .)) .Values.redis.external.host -}}
-- name: REDIS_HOST
-  value: {{ $host | quote }}
-- name: REDIS_PORT
-  value: {{ .Values.redis.external.port | quote }}
-- name: REDIS_AUTH
-{{- if .Values.redis.external.authSecretKeyRef.name }}
-  valueFrom:
-    {{- include "anyray.externalSecretRef" .Values.redis.external.authSecretKeyRef | nindent 4 }}
-{{- else if .Values.redis.external.auth }}
-  value: {{ .Values.redis.external.auth | quote }}
-{{- else if .Values.redis.enabled }}
-  valueFrom:
-    {{- include "anyray.secretRef" (dict "key" "REDIS_AUTH" "context" .) | nindent 4 }}
-{{- else }}
-  value: ""
 {{- end }}
 {{- end }}

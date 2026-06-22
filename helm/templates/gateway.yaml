@@ -29,14 +29,7 @@ spec:
           imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "gateway" "context" .) }}
           {{- include "anyray.containerSecurityContext" . | nindent 10 }}
           env:
-            - name: ANYRAY_OBSERVABILITY_BASEURL
-              value: "http://web:3000"
-            - name: ANYRAY_OBSERVABILITY_PUBLIC_KEY
-              valueFrom:
-                {{- include "anyray.secretRef" (dict "key" "ANYRAY_OBSERVABILITY_PUBLIC_KEY" "context" .) | nindent 16 }}
-            - name: ANYRAY_OBSERVABILITY_SECRET_KEY
-              valueFrom:
-                {{- include "anyray.secretRef" (dict "key" "ANYRAY_OBSERVABILITY_SECRET_KEY" "context" .) | nindent 16 }}
+            {{- include "anyray.observabilityDbEnv" . | nindent 12 }}
             - name: ANYRAY_OPTIMIZER_URL
               value: "http://optimizer:8088"
             - name: ANYRAY_OPTIMIZER_TOKEN

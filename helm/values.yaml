@@ -26,38 +26,14 @@ images:
   proxy:
     repository: ghcr.io/anyrayhq/proxy
     tag: ""
-  web:
-    repository: docker.io/langfuse/langfuse
-    tag: "3"
-  worker:
-    repository: docker.io/langfuse/langfuse-worker
-    tag: "3"
-  modelSeeder:
-    repository: docker.io/library/node
-    tag: "20-alpine"
   postgres:
     repository: docker.io/postgres
     tag: "17"
-  clickhouse:
-    repository: docker.io/clickhouse/clickhouse-server
-    tag: "26.3"
-  minio:
-    repository: cgr.dev/chainguard/minio
-    # Chainguard's free tier publishes only :latest, so keep the digest pin — but
-    # pin the multi-arch INDEX digest (a manifest list spanning amd64 + arm64),
-    # NOT a single-platform child manifest, or the pod won't schedule on arm64
-    # nodes (mixed-arch clusters). Refresh the index digest from:
-    #   docker buildx imagetools inspect cgr.dev/chainguard/minio:latest
-    tag: "latest@sha256:1fa1317f8a14251743c131d556aadb17efb85e82bcd95b6564044935c8301ae7"
-  redis:
-    repository: docker.io/redis
-    tag: "7"
 
 # Name of the Kubernetes Secret created by: ./setup.sh --k8s
 secretName: anyray-secrets
 
-# Common pod/runtime controls. These apply to all workload pods unless a template
-# has a component-specific security context, such as ClickHouse.
+# Common pod/runtime controls. These apply to all workload pods.
 serviceAccount:
   create: false
   name: ""
@@ -69,14 +45,14 @@ podSecurityContext: {}
 containerSecurityContext: {}
 
 # Global scheduling defaults applied to every pod. Each component block below
-# (gateway, optimizer, proxy, web, worker, postgres, clickhouse, minio, redis)
-# can override any of these per workload by setting the same key — e.g. pin the
-# heavy ClickHouse pod to a specific node pool while everything else stays on the
-# default. A component-level value REPLACES the global for that field (it does not
-# merge), and an unset component value inherits the global. All images are
-# multi-arch, so an architecture nodeSelector is only needed for deliberate
-# placement, not for the stack to run on mixed arm64/amd64 nodes. Example:
-#   clickhouse:
+# (gateway, optimizer, proxy, postgres) can override any of these per workload by
+# setting the same key — e.g. pin the Postgres pod to a specific node pool while
+# everything else stays on the default. A component-level value REPLACES the
+# global for that field (it does not merge), and an unset component value inherits
+# the global. All images are multi-arch, so an architecture nodeSelector is only
+# needed for deliberate placement, not for the stack to run on mixed arm64/amd64
+# nodes. Example:
+#   postgres:
 #     nodeSelector:
 #       kubernetes.io/arch: amd64
 #     tolerations:
@@ -186,38 +162,10 @@ proxy:
       memory: "128Mi"
   extraEnv: []
 
-# Observability backend web (trace API + UI engine)
-web:
-  replicas: 1
-  nextauthUrl: ""
-  # The console (Next.js) sizes its V8 heap from the container memory
-  # limit; at the previous 1Gi it capped old-space near ~512MB and OOM'd during
-  # init, crashlooping and timing out the post-install model-seeder hook. Pin the
-  # heap explicitly (deterministic regardless of cgroup detection) and give the
-  # container 2Gi of headroom. Set nodeOptions to "" to let Node auto-size.
-  nodeOptions: "--max-old-space-size=1536"
-  resources:
-    requests:
-      cpu: "200m"
-      memory: "1Gi"
-    limits:
-      cpu: "1000m"
-      memory: "2Gi"
-  extraEnv: []
-
-# Observability backend worker
-worker:
-  replicas: 1
-  resources:
-    requests:
-      cpu: "100m"
-      memory: "256Mi"
-    limits:
-      cpu: "500m"
-      memory: "512Mi"
-  extraEnv: []
-
-# Postgres
+# Postgres — the Anyray spend + trace store. The gateway persists content-free
+# traces + observations to the anyray_traces / anyray_observations tables
+# (auto-created on first use; any stored content is AES-256-GCM encrypted at rest)
+# and reads them in-process.
 postgres:
   enabled: true
   storage: 10Gi
@@ -230,98 +178,13 @@ postgres:
       cpu: "500m"
       memory: "512Mi"
   external:
-    # Prefer databaseUrlSecretKeyRef for production credentials.
+    # Point the gateway's trace + spend store at a managed Postgres instead of
+    # the bundled StatefulSet (set postgres.enabled=false). The gateway reads this
+    # as ANYRAY_OBSERVABILITY_DB_URL. Prefer databaseUrlSecretKeyRef in production.
     databaseUrl: ""
     databaseUrlSecretKeyRef: {}
     # name: anyray-external-postgres
     # key: DATABASE_URL
-
-# ClickHouse
-clickhouse:
-  enabled: true
-  storage: 20Gi
-  storageClass: ""
-  podSecurityContext:
-    runAsUser: 101
-    runAsGroup: 101
-    fsGroup: 101
-  resources:
-    requests:
-      cpu: "200m"
-      memory: "512Mi"
-    limits:
-      cpu: "1000m"
-      memory: "2Gi"
-  external:
-    migrationUrl: ""
-    url: ""
-    user: clickhouse
-    password: ""
-    passwordSecretKeyRef: {}
-    # name: anyray-external-clickhouse
-    # key: CLICKHOUSE_PASSWORD
-
-# MinIO
-minio:
-  enabled: true
-  storage: 10Gi
-  storageClass: ""
-  # Chainguard's MinIO runs as nonroot (uid 65532). fsGroup makes the kubelet
-  # chown the mounted volume to that group so MinIO can create the bucket dir —
-  # without it, a freshly provisioned EBS PVC stays root-owned and the startup
-  # `mkdir /data/langfuse` fails with "permission denied".
-  podSecurityContext:
-    runAsUser: 65532
-    runAsGroup: 65532
-    fsGroup: 65532
-  resources:
-    requests:
-      cpu: "50m"
-      memory: "128Mi"
-    limits:
-      cpu: "250m"
-      memory: "256Mi"
-
-# S3-compatible object storage used by the observability backend. Defaults point
-# at the in-chart MinIO service. For external S3, set minio.enabled=false and
-# override the endpoint/bucket/credentials below.
-objectStorage:
-  accessKeyId: minio
-  accessKeyIdSecretKeyRef: {}
-  secretAccessKey: ""
-  secretAccessKeySecretKeyRef: {}
-  eventUpload:
-    bucket: langfuse
-    region: auto
-    endpoint: ""
-    forcePathStyle: "true"
-    prefix: events/
-  mediaUpload:
-    bucket: langfuse
-    region: auto
-    endpoint: ""
-    forcePathStyle: "true"
-    prefix: media/
-
-# Redis
-redis:
-  enabled: true
-  storage: 2Gi
-  storageClass: ""
-  resources:
-    requests:
-      cpu: "50m"
-      memory: "64Mi"
-    limits:
-      cpu: "200m"
-      memory: "128Mi"
-  external:
-    host: ""
-    port: "6379"
-    auth: ""
-    authSecretKeyRef: {}
-    # name: anyray-external-redis
-    # key: REDIS_AUTH
 
 # Ingress — disabled by default; fill in and set enabled: true to expose externally.
 ingress:

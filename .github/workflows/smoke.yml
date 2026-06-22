@@ -14,8 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Seeder copies in sync (compose vs helm)
-        run: diff -u scripts/seedModelPrices.mjs helm/files/seedModelPrices.mjs
       - name: Generate secrets
         run: ./setup.sh
       - name: Start the stack

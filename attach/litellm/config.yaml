@@ -22,7 +22,7 @@ litellm_settings:
     - anyray_optimizer.proxy_handler_instance
 
 # Traces/spend are emitted by the OPTIMIZER, not LiteLLM: the adapter's log hooks
-# POST each call to the optimizer's /v1/record, which writes the Langfuse trace.
+# POST each call to the optimizer's /v1/record, which writes the trace.
 # The attach stack already wires this (ANYRAY_OBSERVABILITY_* on the optimizer
-# service in docker-compose.attach.yml), so nothing Langfuse-related is needed
+# service in docker-compose.attach.yml), so no trace-backend config is needed
 # here. Do NOT add a native `success_callback: langfuse` — it would record twice.

@@ -30,7 +30,7 @@ Drop-in Anyray optimizer integration for that existing LiteLLM proxy gives you:
    ```
 
    `setup.sh` writes `.env`, including `ANYRAY_ADMIN_TOKEN`,
-   `ANYRAY_OPTIMIZER_TOKEN`, Langfuse project keys, and the content-encryption
+   `ANYRAY_OPTIMIZER_TOKEN`, observability backend keys, and the content-encryption
    key. It is safe to re-run; it does not overwrite existing secrets.
 
 2. Run the Anyray attach stack:
@@ -99,14 +99,14 @@ These pages show "Unable to load: request failed" — expected in attach mode.
 
 Traces are produced by the **optimizer**, not LiteLLM. The adapter's log hooks POST
 every call — streaming, embeddings, and errors included — to the optimizer's
-`/v1/record`, which writes the same Langfuse trace the Anyray gateway writes
+`/v1/record`, which writes the same trace the Anyray gateway writes
 in-process. So BYO traffic shows the same spend, model/provider, cost, and the
 optimizer's before/after.
 
 The attach stack enables this for you: `docker-compose.attach.yml` sets
 `ANYRAY_OBSERVABILITY_*` on the optimizer service and `setup.sh` seeds the keys into
-`.env`. The optimizer then ships traces to the in-network Langfuse at `web:3000` — your
-LiteLLM proxy never needs Langfuse access.
+`.env`. The optimizer then ships traces to the in-network trace backend at `web:3000` — your
+LiteLLM proxy never needs trace-backend access.
 
 - **Opt-out:** leave `ANYRAY_OBSERVABILITY_PUBLIC_KEY` / `ANYRAY_OBSERVABILITY_SECRET_KEY`
   empty in `.env` and `/v1/record` returns `404` — recording is disabled and the adapter

@@ -201,7 +201,7 @@ External dependency guardrails.
 {{- end }}
 
 {{/*
-Postgres env for Langfuse web/worker.
+Postgres env for the observability web/worker.
 */}}
 {{- define "anyray.postgresEnv" -}}
 {{- include "anyray.requirePostgres" . }}
@@ -224,7 +224,7 @@ Postgres env for Langfuse web/worker.
 {{- end }}
 
 {{/*
-ClickHouse env for Langfuse web/worker.
+ClickHouse env for the observability web/worker.
 */}}
 {{- define "anyray.clickhouseEnv" -}}
 {{- include "anyray.requireClickHouse" . }}
@@ -253,7 +253,7 @@ ClickHouse env for Langfuse web/worker.
 {{- end }}
 
 {{/*
-Object storage env for Langfuse web/worker.
+Object storage env for the observability web/worker.
 */}}
 {{- define "anyray.objectStorageEnv" -}}
 {{- $defaultEndpoint := "" -}}
@@ -323,7 +323,7 @@ Object storage env for Langfuse web/worker.
 {{- end }}
 
 {{/*
-Redis env for Langfuse web/worker.
+Redis env for the observability web/worker.
 */}}
 {{- define "anyray.redisEnv" -}}
 {{- include "anyray.requireRedis" . }}

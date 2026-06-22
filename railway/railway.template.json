@@ -22,7 +22,7 @@
         "ANYRAY_OPTIMIZER_TOKEN": "${{optimizer.ANYRAY_OPTIMIZER_TOKEN}}",
         "ANYRAY_OPTIMIZER_TIMEOUT_MS": "800",
         "ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS": "10000",
-        "ANYRAY_CONTENT_KEY": "${{secret()}}",
+        "ANYRAY_CONTENT_KEY": "${{secret(64, \"0123456789abcdef\")}}",
         "ANYRAY_CONTENT_MODE": "encrypted",
         "ANYRAY_ALLOW_PLAINTEXT": "false",
         "ANYRAY_ADMIN_TOKEN": "${{secret()}}",

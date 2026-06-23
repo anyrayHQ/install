@@ -78,13 +78,32 @@ dashboard from `railway/railway.template.json`:
 
 ## Publishing the template to Railway's marketplace
 
-After successful verification:
+`railway.template.json` is the **single source of truth**. Re-publishing is a
+dashboard task, not a headless one — Railway's API can't set a template's
+variable values for us (publish input carries no `serializedConfig`,
+generate-from-project strips literal defaults, and reading a published template
+is "Not Authorized"). So the literal defaults can only be restored in the
+dashboard's per-service **Raw Editor**.
 
-1. Go to your workspace's Templates page → "New Template".
-2. Compose the services exactly as specified in `railway/railway.template.json`
-   (images, variables, start commands, volumes).
-3. Fill in display name "Anyray", category "AI / ML", submit for review.
+To make that deterministic — and to avoid rebuilding the variable blocks from
+memory each time — generate the publish artifacts first:
 
-The template is **published** (Othentic workspace, category "AI/ML"). The
-"Deploy on Railway" button URL is:
-`https://railway.com/deploy/anyray`
+```bash
+railway/build-publish.sh
+```
+
+This reads `railway.template.json` and writes (into the gitignored
+`railway/.publish/`):
+
+- `RUNBOOK.md` — the ordered dashboard procedure, the publish metadata, the
+  required README sections, and the cache-busted verify URL.
+- `<service>.vars` — the exact `KEY=VALUE` block to paste into each service's
+  Raw Editor.
+
+Then follow `railway/.publish/RUNBOOK.md`. **Run the script again after every
+`railway.template.json` change** so the artifacts stay in sync.
+
+The template is **published** (Othentic workspace, category "AI / ML"). The
+"Deploy on Railway" button URL is `https://railway.com/deploy/anyray` — when
+verifying after a publish, append `?v=N` (bump `N`) because the plain URL is
+CDN-cached and shows the old render.

@@ -34,6 +34,15 @@ services:
       # Postgres (anyray_traces / anyray_observations, auto-created; content
       # AES-256-GCM encrypted at rest). Falls back to ANYRAY_SPEND_DB_URL if unset.
       ANYRAY_OBSERVABILITY_DB_URL: ${ANYRAY_OBSERVABILITY_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
+      # Durable spend store — Postgres (required; the gateway no longer writes a
+      # JSONL file and refuses to start without this). Defaults to the bundled
+      # Postgres (same DB as the trace store above); the anyray_spend table is
+      # auto-created. Override to point at an external Postgres.
+      ANYRAY_SPEND_DB_URL: ${ANYRAY_SPEND_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
+      # One-time migration off the old file store: set true for one boot to import
+      # a legacy spend.jsonl (under ANYRAY_DATA_DIR) into Postgres; no-ops once the
+      # table has rows.
+      ANYRAY_SPEND_IMPORT_JSONL: ${ANYRAY_SPEND_IMPORT_JSONL:-}
       ANYRAY_OPTIMIZER_URL: http://optimizer:8088
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
       ANYRAY_OPTIMIZER_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_TIMEOUT_MS:-800}

@@ -204,14 +204,21 @@ k8s only resolves $(VAR) against vars declared earlier in the env list.
 - name: ANYRAY_OBSERVABILITY_DB_URL
   valueFrom:
     {{- include "anyray.externalSecretRef" .Values.postgres.external.databaseUrlSecretKeyRef | nindent 4 }}
+- name: ANYRAY_SPEND_DB_URL
+  valueFrom:
+    {{- include "anyray.externalSecretRef" .Values.postgres.external.databaseUrlSecretKeyRef | nindent 4 }}
 {{- else if .Values.postgres.external.databaseUrl }}
 - name: ANYRAY_OBSERVABILITY_DB_URL
+  value: {{ .Values.postgres.external.databaseUrl | quote }}
+- name: ANYRAY_SPEND_DB_URL
   value: {{ .Values.postgres.external.databaseUrl | quote }}
 {{- else }}
 - name: POSTGRES_PASSWORD
   valueFrom:
     {{- include "anyray.secretRef" (dict "key" "POSTGRES_PASSWORD" "context" .) | nindent 4 }}
 - name: ANYRAY_OBSERVABILITY_DB_URL
+  value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
+- name: ANYRAY_SPEND_DB_URL
   value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
 {{- end }}
 {{- end }}

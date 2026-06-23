@@ -180,7 +180,8 @@ postgres:
   external:
     # Point the gateway's trace + spend store at a managed Postgres instead of
     # the bundled StatefulSet (set postgres.enabled=false). The gateway reads this
-    # as ANYRAY_OBSERVABILITY_DB_URL. Prefer databaseUrlSecretKeyRef in production.
+    # as both ANYRAY_OBSERVABILITY_DB_URL and ANYRAY_SPEND_DB_URL (one DB serves
+    # both). Prefer databaseUrlSecretKeyRef in production.
     databaseUrl: ""
     databaseUrlSecretKeyRef: {}
     # name: anyray-external-postgres

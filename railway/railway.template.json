@@ -1,6 +1,6 @@
 {
   "displayName": "Anyray",
-  "description": "Self-hosted AI-spend optimizer — gateway, optimizer, and observability console.",
+  "description": "Self-hosted AI spend optimizer with gateway, optimizer, console, and Postgres.",
   "tags": ["ai", "gateway", "llm", "observability"],
   "icon": "https://docs.anyray.ai/img/favicon.svg",
   "readme": "https://raw.githubusercontent.com/anyrayHQ/install/main/railway/README.md",
@@ -31,19 +31,8 @@
         "ANYRAY_DATA_DIR": "/data",
         "ANYRAY_GATEWAY_PUBLIC_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
         "ANYRAY_CONSOLE_PUBLIC_URL": "https://${{proxy.RAILWAY_PUBLIC_DOMAIN}}",
-        "ANYRAY_REQUIRE_CLIENT_KEYS": "",
-        "ANYRAY_REQUIRE_VERIFIED_DEV": "",
         "ANYRAY_HSTS": "true",
-        "ANYRAY_TRUST_PROXY": "true",
-        "ANYRAY_RATE_LIMIT_RPM": "",
-        "ANYRAY_RATE_LIMIT_IP_RPM": "",
-        "ANYRAY_RATE_LIMIT_UNAUTH_RPM": "",
-        "ANYRAY_MAX_CONCURRENT_REQUESTS": "",
-        "ANYRAY_AUTH_FAIL_LIMIT": "",
-        "ANYRAY_MAX_BODY_BYTES": "",
-        "ANYRAY_UPSTREAM_URL": "",
-        "ANYRAY_CUSTOM_HOST_ALLOWLIST": "",
-        "TRUSTED_CUSTOM_HOSTS": ""
+        "ANYRAY_TRUST_PROXY": "true"
       }
     },
     {
@@ -77,8 +66,7 @@
         "ANYRAY_OPTIMIZER_HOST": "${{optimizer.RAILWAY_PRIVATE_DOMAIN}}",
         "ANYRAY_UPDATER_ENABLED": "false",
         "ANYRAY_UPDATER_PERIODIC_POLLS": "false",
-        "ANYRAY_UPDATER_POLL_INTERVAL": "86400",
-        "ANYRAY_UPDATER_TOKEN": ""
+        "ANYRAY_UPDATER_POLL_INTERVAL": "86400"
       }
     },
     {

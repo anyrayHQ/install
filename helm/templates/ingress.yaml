@@ -24,7 +24,11 @@ spec:
     {{- end }}
     {{- range $entry := $hosts }}
     {{- $paths := default dict $entry.paths }}
-    - host: {{ default $.Values.host $entry.host }}
+    {{- $host := default $.Values.host $entry.host }}
+    {{- if not $host }}
+    {{- fail "ingress.enabled=true requires host or ingress.hosts[].host" }}
+    {{- end }}
+    - host: {{ $host }}
       http:
         paths:
           - path: {{ default "/" $paths.console }}

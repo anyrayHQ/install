@@ -67,8 +67,8 @@ Parameters:
     ConstraintDescription: Must be a CIDR like 203.0.113.0/24 (not 0.0.0.0/0).
   ImageTag:
     Type: String
-    Default: v1.10.18
-    Description: Anyray image tag to deploy (see github.com/anyrayHQ/install releases).
+    Default: stable
+    Description: Anyray image tag to deploy. stable is the nightly release channel; use vX.Y.Z to pin.
   DefaultModel:
     Type: String
     Default: 'anthropic/claude-sonnet-4-5'
@@ -94,14 +94,13 @@ Parameters:
     Description: Optional externally reachable console URL (defaults to the load balancer DNS).
   DeploymentToken:
     Type: String
-    Default: ''
     NoEcho: true
-    AllowedPattern: '^$|^adt_[A-Za-z0-9_-]+$'
-    Description: Optional Anyray Cloud deployment token (adt_...) for usage metering.
+    AllowedPattern: '^adt_[A-Za-z0-9_-]+$'
+    Description: Anyray Cloud deployment token (adt_...) for usage metering.
   ContentMode:
     Type: String
     Default: encrypted
-    AllowedValues: [encrypted, off, plaintext]
+    AllowedValues: ['encrypted', 'off', 'plaintext']
     Description: Content-privacy mode. `encrypted` (default) keeps content as AES-256-GCM ciphertext.
   AllowPlaintext:
     Type: String
@@ -206,6 +205,11 @@ Resources:
                   - secretsmanager:DeleteSecret
                   - secretsmanager:TagResource
                 Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/anyray/*'
+              # The DbUrl composer reads the RDS-managed master secret (named rds!db-…,
+              # outside the ${StackName}/anyray/* prefix) to compose the connection URL.
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !GetAtt Db.MasterUserSecret.SecretArn
 
   SecretFn:
     Type: AWS::Lambda::Function
@@ -216,7 +220,7 @@ Resources:
       Role: !GetAtt SecretFnRole.Arn
       Code:
         ZipFile: |
-          import json, secrets as rnd, urllib.request, boto3
+          import json, secrets as rnd, urllib.request, traceback, boto3
           sm = boto3.client('secretsmanager')
 
           def send(event, context, status, data=None, pid=None):
@@ -273,6 +277,7 @@ Resources:
                           {'DbUrlArn': put(prefix + 'db-url', url)}, prefix + 'composeDbUrl')
                   return send(event, context, 'FAILED', {'Error': 'unknown action'}, prefix + action)
               except Exception as e:
+                  print('SecretFn FAILED:', traceback.format_exc())
                   return send(event, context, 'FAILED', {'Error': str(e)}, event.get('PhysicalResourceId'))
 
   AppSecrets:
@@ -341,7 +346,7 @@ Resources:
       FromPort: 8787
       ToPort: 8787
       SourceSecurityGroupId: !Ref TasksSg
-      Description: Service Connect — proxy/optimizer to gateway
+      Description: Service Connect - proxy/optimizer to gateway
 
   TasksSelfOptimizer:
     Type: AWS::EC2::SecurityGroupIngress
@@ -351,7 +356,7 @@ Resources:
       FromPort: 8088
       ToPort: 8088
       SourceSecurityGroupId: !Ref TasksSg
-      Description: Service Connect — gateway/proxy to optimizer
+      Description: Service Connect - gateway/proxy to optimizer
 
   RdsSg:
     Type: AWS::EC2::SecurityGroup
@@ -563,8 +568,8 @@ Resources:
       Family: !Sub '${AWS::StackName}-optimizer'
       RequiresCompatibilities: [FARGATE]
       NetworkMode: awsvpc
-      Cpu: '512'
-      Memory: '1024'
+      Cpu: '256'
+      Memory: '512'
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       Volumes:
@@ -606,8 +611,8 @@ Resources:
       Family: !Sub '${AWS::StackName}-gateway'
       RequiresCompatibilities: [FARGATE]
       NetworkMode: awsvpc
-      Cpu: '1024'
-      Memory: '2048'
+      Cpu: '512'
+      Memory: '1024'
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       Volumes:
@@ -712,6 +717,7 @@ Resources:
   # ---- Services (Service Connect wires bare hostnames) ------------------------
   OptimizerService:
     Type: AWS::ECS::Service
+    DependsOn: [EfsMountA, EfsMountB]
     Properties:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
@@ -777,13 +783,19 @@ Resources:
 Outputs:
   ConsoleURL:
     Description: Open this and sign in with the admin token (see AdminTokenCmd below).
-    Value: !If [HasCert, !Sub 'https://${Alb.DNSName}:3000', !Sub 'http://${Alb.DNSName}:3000']
+    Value: !If
+      - HasConsoleUrl
+      - !Ref ConsolePublicUrl
+      - !If [HasCert, !Sub 'https://${Alb.DNSName}:3000', !Sub 'http://${Alb.DNSName}:3000']
   GatewayURL:
     Description: Gateway API base URL — point local tools at it with `anyray-connect --gateway <url>`.
-    Value: !If [HasCert, !Sub 'https://${Alb.DNSName}:8787', !Sub 'http://${Alb.DNSName}:8787']
+    Value: !If
+      - HasGatewayUrl
+      - !Ref GatewayPublicUrl
+      - !If [HasCert, !Sub 'https://${Alb.DNSName}:8787', !Sub 'http://${Alb.DNSName}:8787']
   AdminTokenCmd:
     Description: Fetch the generated admin key from Secrets Manager (it is NOT printed in stack outputs).
-    Value: !Sub 'aws secretsmanager get-secret-value --secret-id ${AppSecrets.AdminTokenArn} --query SecretString --output text'
+    Value: !Sub 'aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${AppSecrets.AdminTokenArn} --query SecretString --output text'
   FirstBootNote:
     Description: First boot pulls images, provisions RDS, and seeds prices; allow ~5-10 min. The gateway restarts until RDS is reachable.
     Value: 'Watch the ECS services in the console; the gateway + console go healthy once RDS is up.'

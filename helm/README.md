@@ -13,7 +13,7 @@ in-process — there is no separate observability backend to run.
 - Helm 3.10+
 - A default StorageClass (or set `*.storageClass` in values)
 - A target namespace that already exists, if you install outside your current namespace
-- `setup.sh --k8s` run locally to generate the Secret manifest
+- `setup.sh --k8s --connect <adt_token>` run locally to generate the Secret manifest
 
 ## Install
 
@@ -22,7 +22,7 @@ in-process — there is no separate observability backend to run.
 export ANYRAY_NAMESPACE="team-ai"   # replace with your target namespace
 
 # 2. Generate secrets
-./setup.sh --k8s --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
+./setup.sh --k8s --connect adt_XXXX --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
 # Emits: anyray-secrets.yaml  my-values.yaml
 
 # 3. Apply the Secret
@@ -36,8 +36,8 @@ kubectl rollout status -n "$ANYRAY_NAMESPACE" deployment/anyray-gateway
 kubectl rollout status -n "$ANYRAY_NAMESPACE" deployment/anyray-proxy
 
 # 6. Access
-#   Console: http://<host>:3000  (via NodePort or Ingress — see values.yaml)
-#   Gateway: http://<host>:8787
+#   Ingress:  console https://<host>/  gateway https://<host>/v1
+#   NodePort: console http://<node-ip>:30000  gateway http://<node-ip>:30787
 ```
 
 Use an existing namespace unless your cluster policy says the installer should
@@ -190,10 +190,10 @@ All component images can be redirected to an internal registry:
 images:
   gateway:
     repository: registry.example.com/anyray/gateway
-    tag: v1.10.3
+    tag: stable
   optimizer:
     repository: registry.example.com/anyray/optimizer
-    tag: v1.10.3
+    tag: stable
   postgres:
     repository: registry.example.com/postgres
     tag: "17"
@@ -210,7 +210,9 @@ gateway:
   hsts: "true"
   trustProxy: "true"
   rateLimitRpm: "600"
+  rateLimitIpRpm: "1200"
   rateLimitUnauthRpm: "60"
+  maxConcurrentRequests: "20"
   maxBodyBytes: "10485760"
 ```
 

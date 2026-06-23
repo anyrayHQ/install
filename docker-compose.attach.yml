@@ -29,8 +29,10 @@ services:
       PORT: 8088
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
       ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
-      ANYRAY_OPTIMIZER_CONFIG: /data/optimizer.config.json
-      ANYRAY_OPTIMIZER_AUDIT_FILE: /data/optimizer-settings-audit.log
+      # Runtime config + audit log under ANYRAY_DATA_DIR; the runtime config
+      # starts empty and is seeded from the image-baked optimizer.config.json
+      # until the first admin edit writes here.
+      ANYRAY_DATA_DIR: /data
       # BYO trace persistence (opt-in): the optimizer's /v1/record writes the same
       # traces the Anyray gateway writes in-process. Set ONLY in attach/BYO
       # mode (no Anyray gateway in the path) — never on the optimizer in an

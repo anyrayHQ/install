@@ -21,7 +21,7 @@ x-logging: &default-logging
 services:
   optimizer:
     logging: *default-logging
-    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.16}}"
+    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.17}}"
     restart: always
     depends_on:
       postgres:
@@ -57,7 +57,7 @@ services:
 
   proxy:
     logging: *default-logging
-    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.16}}"
+    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-v1.10.17}}"
     restart: always
     # optimizer healthy first: nginx auth_request hits optimizer:8088/admin/auth
     # on every console load (attach mode has no gateway) — starting earlier just

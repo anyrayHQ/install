@@ -2,8 +2,8 @@ apiVersion: v2
 name: anyray
 description: Self-hosted AI-spend optimizer — gateway, optimizer, console, and Postgres trace/spend store.
 type: application
-version: 0.4.14
-appVersion: "v1.10.16"
+version: 0.4.15
+appVersion: "v1.10.17"
 keywords:
   - anyray
   - ai-gateway

@@ -88,6 +88,9 @@ gateway:
   allowPlaintext: "false"
   optimizerTimeoutMs: "800"
   optimizerVisionTimeoutMs: "10000"
+  # Target for the `anyray-default` model alias (request names no model). Matches
+  # the other deploy artifacts; blank it to fall back to the gateway's own default.
+  defaultModel: "anthropic/claude-sonnet-4-5"
   # On-top mode: point Anyray at an existing OpenAI-compatible gateway (LiteLLM,
   # OpenRouter, …) so clients send NO per-request x-anyray-config header — the
   # gateway seeds its default routing config from this URL on first boot. For an

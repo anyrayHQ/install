@@ -55,10 +55,15 @@ desc_warn=""
 [ "$desc_len" -gt 75 ] && desc_warn=" (WARNING: $desc_len chars > 75 -- Railway truncates; shorten it)"
 
 # --- per-service Raw Editor blocks ------------------------------------------
+# Skip empty-valued vars: in a Railway *template* an empty value renders as
+# "Empty value to be filled by the user" (a required prompt), which breaks the
+# one-click "No config required" UX. The empty optional knobs (rate limits,
+# verified-dev gate, upstream) behave identically unset or "" at the gateway,
+# so they're omitted from the published template rather than prompted for.
 for svc in $services; do
   jq -r --arg n "$svc" '
     .services[] | select(.name == $n) | .variables // {}
-    | to_entries[] | "\(.key)=\(.value)"
+    | to_entries[] | select(.value != "") | "\(.key)=\(.value)"
   ' "$tpl" > "$out/$svc.vars"
 done
 
@@ -91,6 +96,10 @@ lint="$(jq -r '
     echo
   fi
   echo "## Services (compose in this order)"
+  echo
+  echo "> Empty-valued optional knobs are intentionally omitted from each block:"
+  echo "> in a Railway template an empty value becomes a required user prompt,"
+  echo "> which would break the one-click \"No config required\" experience."
   echo
   for svc in $services; do
     image="$(jq -r --arg n "$svc" '.services[]|select(.name==$n)|.source.image // "(no image / source build)"' "$tpl")"

@@ -72,7 +72,7 @@ Parameters:
       EC2 key pair for SSH — used once to read the generated admin token.
   ImageTag:
     Type: String
-    Default: v1.10.3
+    Default: v1.10.17
     Description: Anyray image tag to deploy (see github.com/anyrayHQ/install releases).
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>

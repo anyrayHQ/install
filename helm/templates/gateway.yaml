@@ -39,6 +39,12 @@ spec:
               value: {{ .Values.gateway.optimizerTimeoutMs | quote }}
             - name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS
               value: {{ .Values.gateway.optimizerVisionTimeoutMs | quote }}
+            {{- with .Values.gateway.defaultModel }}
+            # What `anyray-default` routes to when a request names no model;
+            # without it the gateway falls back to a stale alias and 404s.
+            - name: ANYRAY_DEFAULT_MODEL
+              value: {{ . | quote }}
+            {{- end }}
             - name: ANYRAY_CONTENT_KEY
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_CONTENT_KEY" "context" .) | nindent 16 }}

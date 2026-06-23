@@ -47,6 +47,9 @@ services:
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
       ANYRAY_OPTIMIZER_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_TIMEOUT_MS:-800}
       ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS:-10000}
+      # Model the `anyray-default` routing sentinel resolves to. Set it to a model
+      # your configured provider serves (a bare model is read under `anthropic`).
+      ANYRAY_DEFAULT_MODEL: ${ANYRAY_DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:?run ./setup.sh first}
       ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}

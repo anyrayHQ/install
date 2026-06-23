@@ -286,6 +286,7 @@ EOF
     echo "  Admin key: $(get_env ANYRAY_ADMIN_TOKEN)   (also stored in .env as ANYRAY_ADMIN_TOKEN)"
     echo "  Gateway:   http://${HOST}:8787"
     [ -n "$CONNECT_TOKEN" ] || { echo ""; echo "  Next:      docker compose up -d"; }
+    echo "  Verify:    ./scripts/verify-deploy.sh   (after 'docker compose up -d' — checks every leg)"
   elif [ "$ADDED" -gt 0 ]; then
     echo "✓ .env reconciled — added ${ADDED} missing variable(s); existing values kept"
     grep '^# Console:' .env | sed 's/^# //' || true

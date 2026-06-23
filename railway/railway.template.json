@@ -26,20 +26,7 @@
         "ANYRAY_CONTENT_MODE": "encrypted",
         "ANYRAY_ALLOW_PLAINTEXT": "false",
         "ANYRAY_ADMIN_TOKEN": "${{secret()}}",
-        "ANYRAY_SETTINGS_FILE": "/data/anyray-settings.json",
-        "ANYRAY_AUDIT_FILE": "/data/anyray-settings-audit.log",
-        "ANYRAY_SPEND_FILE": "/data/spend.jsonl",
-        "ANYRAY_PROVIDER_KEYS_FILE": "/data/provider-keys.config.json",
-        "ANYRAY_PROVIDER_KEYS_AUDIT_FILE": "/data/provider-keys-audit.log",
-        "ANYRAY_ROUTING_CONFIG_FILE": "/data/routing.config.json",
-        "ANYRAY_ROUTING_CONFIG_AUDIT_FILE": "/data/routing-config-audit.log",
-        "ANYRAY_PRICING_CONFIG": "/data/pricing.config.json",
-        "ANYRAY_PRICING_AUDIT_FILE": "/data/pricing-settings-audit.log",
-        "ANYRAY_CLIENT_KEYS_FILE": "/data/client-keys.config.json",
-        "ANYRAY_CLIENT_KEYS_AUDIT_FILE": "/data/client-keys-audit.log",
-        "ANYRAY_USER_CAPS_FILE": "/data/user-caps.config.json",
-        "ANYRAY_USER_CAPS_AUDIT_FILE": "/data/user-caps-audit.log",
-        "ANYRAY_ENTITLEMENT_FILE": "/data/entitlement.lease.json",
+        "ANYRAY_DATA_DIR": "/data",
         "ANYRAY_GATEWAY_PUBLIC_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
         "ANYRAY_CONSOLE_PUBLIC_URL": "https://${{proxy.RAILWAY_PUBLIC_DOMAIN}}",
         "ANYRAY_REQUIRE_CLIENT_KEYS": "",
@@ -71,8 +58,7 @@
         "PORT": "8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{secret()}}",
         "ANYRAY_ADMIN_TOKEN": "${{gateway.ANYRAY_ADMIN_TOKEN}}",
-        "ANYRAY_OPTIMIZER_CONFIG": "/data/optimizer.config.json",
-        "ANYRAY_OPTIMIZER_AUDIT_FILE": "/data/optimizer-settings-audit.log"
+        "ANYRAY_DATA_DIR": "/data"
       }
     },
     {

@@ -37,10 +37,11 @@ spec:
             - name: ANYRAY_ADMIN_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_ADMIN_TOKEN" "context" .) | nindent 16 }}
-            - name: ANYRAY_OPTIMIZER_CONFIG
-              value: /data/optimizer.config.json
-            - name: ANYRAY_OPTIMIZER_AUDIT_FILE
-              value: /data/optimizer-settings-audit.log
+            # Runtime config + audit log under ANYRAY_DATA_DIR; the runtime
+            # config starts empty and is seeded from the image-baked
+            # optimizer.config.json until the first admin edit writes here.
+            - name: ANYRAY_DATA_DIR
+              value: /data
             {{- with .Values.optimizer.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

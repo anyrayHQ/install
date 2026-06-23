@@ -49,34 +49,13 @@ spec:
             - name: ANYRAY_ADMIN_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_ADMIN_TOKEN" "context" .) | nindent 16 }}
-            - name: ANYRAY_SETTINGS_FILE
-              value: /data/anyray-settings.json
-            - name: ANYRAY_AUDIT_FILE
-              value: /data/anyray-settings-audit.log
-            - name: ANYRAY_SPEND_FILE
-              value: /data/spend.jsonl
-            - name: ANYRAY_PROVIDER_KEYS_FILE
-              value: /data/provider-keys.config.json
-            - name: ANYRAY_PROVIDER_KEYS_AUDIT_FILE
-              value: /data/provider-keys-audit.log
-            - name: ANYRAY_ROUTING_CONFIG_FILE
-              value: /data/routing.config.json
-            - name: ANYRAY_ROUTING_CONFIG_AUDIT_FILE
-              value: /data/routing-config-audit.log
-            - name: ANYRAY_PRICING_CONFIG
-              value: /data/pricing.config.json
-            - name: ANYRAY_PRICING_AUDIT_FILE
-              value: /data/pricing-settings-audit.log
-            - name: ANYRAY_CLIENT_KEYS_FILE
-              value: /data/client-keys.config.json
-            - name: ANYRAY_CLIENT_KEYS_AUDIT_FILE
-              value: /data/client-keys-audit.log
-            - name: ANYRAY_USER_CAPS_FILE
-              value: /data/user-caps.config.json
-            - name: ANYRAY_USER_CAPS_AUDIT_FILE
-              value: /data/user-caps-audit.log
-            - name: ANYRAY_ENTITLEMENT_FILE
-              value: /data/entitlement.lease.json
+            # All runtime-state files (settings, spend, provider/client keys,
+            # routing, user caps, audit logs, GDPR log, entitlement lease) live
+            # under one directory on the volume; the gateway derives every path
+            # from ANYRAY_DATA_DIR. Override an individual file with its
+            # ANYRAY_*_FILE var only if you need to (the per-file var wins).
+            - name: ANYRAY_DATA_DIR
+              value: /data
             {{- if .Values.gateway.metering.enabled }}
             # Anyray Cloud metering. The deployment token + pseudonym salt come from
             # the Secret (folded in by setup.sh --connect); the control-plane host and

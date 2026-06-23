@@ -138,7 +138,7 @@ write_values_stub() {
     echo "host: \"${HOST}\""
     echo ""
     echo "image:"
-    echo "  tag: \"v1.10.17\""
+    echo "  tag: \"v1.10.18\""
     if [ -n "$CONNECT_TOKEN" ]; then
       echo ""
       echo "# Anyray Cloud metering — deployment token + pseudonym salt live in anyray-secrets.yaml."

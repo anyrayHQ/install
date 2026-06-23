@@ -149,6 +149,12 @@ Parameters:
     Default: '10000'
     AllowedPattern: '^[0-9]+$'
     Description: Optimizer timeout for vision requests in milliseconds.
+  DefaultModel:
+    Type: String
+    Default: 'anthropic/claude-sonnet-4-5'
+    Description: >-
+      Model the `anyray-default` routing sentinel resolves to. Set it to a model
+      your configured provider serves (a bare model is read under `anthropic`).
 
 Rules:
   AllowedCidrMustNotBePublic:
@@ -247,6 +253,7 @@ Resources:
           set_env ANYRAY_MAX_BODY_BYTES '${MaxBodyBytes}'
           set_env ANYRAY_OPTIMIZER_TIMEOUT_MS '${OptimizerTimeoutMs}'
           set_env ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS '${OptimizerVisionTimeoutMs}'
+          set_env ANYRAY_DEFAULT_MODEL '${DefaultModel}'
           docker compose up -d
 
 Outputs:
@@ -254,7 +261,7 @@ Outputs:
     Description: Open this and sign in with the admin token (see AdminToken below).
     Value: !Sub 'http://${AnyrayInstance.PublicIp}:3000'
   GatewayURL:
-    Description: Gateway API base URL — use this in `anyray-connect <url>`.
+    Description: Gateway API base URL — point local tools at it with `anyray-connect --gateway <url>`.
     Value: !Sub 'http://${AnyrayInstance.PublicIp}:8787'
   AdminToken:
     Description: >-
@@ -263,4 +270,4 @@ Outputs:
     Value: !Sub 'ssh ec2-user@${AnyrayInstance.PublicIp} "sudo grep ANYRAY_ADMIN_TOKEN /opt/anyray/.env"'
   FirstBootNote:
     Description: First boot pulls images + seeds prices; allow ~3-5 min before the console responds.
-    Value: 'docker compose ps on the host shows all services healthy when ready.'
+    Value: 'docker compose ps shows services healthy; run /opt/anyray/scripts/verify-deploy.sh on the host to check every leg.'

@@ -19,13 +19,14 @@ optimizer + observability console). Docs: https://docs.anyray.ai
    the current kubectl/Helm namespace, confirm that explicitly and omit
    `--namespace`.
 4. Their Anyray Cloud deployment token (starts with `adt_`) — they get it at
-   https://app.anyray.ai (Deployments → Connect a deployment). If they don't
-   want to connect to Anyray Cloud, install standalone (omit `--connect`).
+   https://app.anyray.ai (Deployments → Connect a deployment). Full-gateway
+   deployments require this for usage metering; omit `--connect` only for the
+   gateway-less LiteLLM attach mode.
 
 ## Step 2 — Platform preparation (your job)
 
 - For Docker/VM installs, ensure the target machine has Docker Engine + Compose
-  v2 and ~8 GB RAM free.
+  v2 and ~2 GB RAM free.
 - For Kubernetes installs, ensure Kubernetes 1.24+, Helm 3.10+, a default
   StorageClass or explicit chart storage classes, and access to the target
   namespace. Do not create a namespace unless the operator approved it.
@@ -42,7 +43,7 @@ On the target machine (or with DOCKER_HOST=ssh://user@<vm> from here):
     ./setup.sh --host <host> --connect <adt_token>
     docker compose up -d
 
-(Standalone install: drop `--connect <adt_token>`. If the gateway will be
+(If the gateway will be
 reached at a URL other than http://<host>:8787 — e.g. behind TLS or a
 load balancer — add `--gateway-url <url>` so the portal shows developers
 the right connect URL.)
@@ -57,9 +58,8 @@ For Kubernetes/Helm:
     kubectl apply -n <existing-namespace> -f anyray-secrets.yaml
     helm install anyray ./helm -f my-values.yaml --namespace <existing-namespace>
 
-(Standalone install: drop `--connect <adt_token>`. If the operator explicitly
-chooses the current kubectl/Helm namespace, omit `--namespace` and the `-n` /
-`--namespace` flags. Never assume `default`; ask.)
+(If the operator explicitly chooses the current kubectl/Helm namespace, omit
+`--namespace` and the `-n` / `--namespace` flags. Never assume `default`; ask.)
 
 ## Step 4 — Verify and hand off
 
@@ -72,15 +72,16 @@ For Docker/VM:
 For Kubernetes:
 
     kubectl rollout status -n <namespace> deployment/anyray-gateway
-    kubectl rollout status -n <namespace> deployment/anyray-web
+    kubectl rollout status -n <namespace> deployment/anyray-proxy
     curl -fsI https://<gateway-ingress-hostname>/ && echo console-ok
 
-Report to the operator: the console URL (http://<host>:3000), where the admin
-key lives (`ANYRAY_ADMIN_TOKEN` in `.env`, or in `anyray-secrets.yaml` for
+Report to the operator: the console URL (Docker: `http://<host>:3000`;
+Kubernetes Ingress: `https://<gateway-ingress-hostname>/`), where the admin key
+lives (`ANYRAY_ADMIN_TOKEN` in `.env`, or in `anyray-secrets.yaml` for
 Kubernetes — `setup.sh` printed it once), and that the next step is the
 in-console setup (~3 min): connect a provider key, send a test request, invite
-developers. If `--connect` was used, also tell them the deployment will appear
-as Connected at https://app.anyray.ai within a minute.
+developers. Also tell them the deployment will appear as Connected at
+https://app.anyray.ai within a minute.
 
 ## Hard rules
 

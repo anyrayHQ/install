@@ -127,8 +127,16 @@ spec:
             - name: ANYRAY_RATE_LIMIT_RPM
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.gateway.rateLimitIpRpm }}
+            - name: ANYRAY_RATE_LIMIT_IP_RPM
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.gateway.rateLimitUnauthRpm }}
             - name: ANYRAY_RATE_LIMIT_UNAUTH_RPM
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.maxConcurrentRequests }}
+            - name: ANYRAY_MAX_CONCURRENT_REQUESTS
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.gateway.authFailLimit }}

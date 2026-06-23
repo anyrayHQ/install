@@ -24,8 +24,26 @@ CONTROL_PLANE="https://app.anyray.ai"
 GATEWAY_URL=""
 UPSTREAM_URL=""
 NAMESPACE=""
+
+usage() {
+  cat <<'EOF'
+Usage: ./setup.sh [options]
+
+Options:
+  --host <hostname-or-ip>         Host users reach for Docker/VM installs.
+  --k8s                          Generate Kubernetes Secret + Helm values.
+  --namespace <namespace>         Existing Kubernetes namespace for --k8s.
+  --connect <adt_token>           Connect deployment to Anyray Portal.
+  --gateway-url <url>             Public gateway URL shown to developers.
+  --upstream <url>                Seed an OpenAI-compatible upstream gateway.
+  --control-plane <url>           Dev/internal control plane only.
+  -h, --help                      Show this help.
+EOF
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help) usage; exit 0 ;;
     --host) HOST="${2:?--host needs a value}"; shift 2 ;;
     --k8s)  K8S=1; shift ;;
     --namespace)     NAMESPACE="${2:?--namespace needs a Kubernetes namespace}"; shift 2 ;;
@@ -33,7 +51,7 @@ while [ $# -gt 0 ]; do
     --control-plane) CONTROL_PLANE="${2:?--control-plane needs a URL}"; shift 2 ;;
     --gateway-url)   GATEWAY_URL="${2:?--gateway-url needs a URL}"; shift 2 ;;
     --upstream)      UPSTREAM_URL="${2:?--upstream needs a URL (e.g. http://host.docker.internal:4000)}"; shift 2 ;;
-    *) echo "✗ unknown flag: $1 (supported: --host <hostname-or-ip> --k8s --namespace <namespace> --connect <adt_token> --control-plane <url> --gateway-url <url> --upstream <url>)" >&2; exit 1 ;;
+    *) echo "✗ unknown flag: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
@@ -138,7 +156,7 @@ write_values_stub() {
     echo "host: \"${HOST}\""
     echo ""
     echo "image:"
-    echo "  tag: \"v1.10.18\""
+    echo "  tag: \"stable\""
     if [ -n "$CONNECT_TOKEN" ]; then
       echo ""
       echo "# Anyray Cloud metering — deployment token + pseudonym salt live in anyray-secrets.yaml."
@@ -272,8 +290,9 @@ if [ "$K8S" -eq 0 ]; then
     cat >> .env <<'EOF'
 
 # Opt-in updater — one-click + auto-update from the console. DEFAULT OFF.
-# To enable: track the moving channel (ANYRAY_IMAGE_TAG=stable), uncomment the
-# token below (any random secret, e.g. openssl rand -hex 32), then start it with
+# The stack uses the moving stable channel by default. To enable updates,
+# uncomment the token below (any random secret, e.g. openssl rand -hex 32),
+# then start it with
 #   docker compose --profile updater up -d
 # Docs: docs.anyray.ai -> Configure -> Updates, and Security -> the Docker socket.
 # ANYRAY_UPDATER_TOKEN=
@@ -594,7 +613,7 @@ echo "    $(kubectl_apply_command)"
 echo "    $(helm_install_command)"
 echo ""
 echo "  Admin key: ${ADMIN_TOKEN}   (base64-encoded in anyray-secrets.yaml)"
-echo "  Console:   http://${HOST}:3000  (after pods are ready)"
-echo "  Gateway:   http://${HOST}:8787"
+echo "  Ingress:   console https://${HOST}/  gateway https://${HOST}/v1"
+echo "  NodePort:  console http://${HOST}:30000  gateway http://${HOST}:30787 (if you set the NodePort values)"
 [ -n "$CONNECT_TOKEN" ] && echo "  Then:      this deployment appears as Connected at ${CONTROL_PLANE} within a minute"
 exit 0

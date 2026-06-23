@@ -11,7 +11,7 @@
 host: ""
 
 image:
-  tag: "v1.10.18"
+  tag: "stable"
   pullPolicy: IfNotPresent
   pullSecrets: []
 
@@ -106,7 +106,9 @@ gateway:
   hsts: ""
   trustProxy: ""
   rateLimitRpm: ""
+  rateLimitIpRpm: ""
   rateLimitUnauthRpm: ""
+  maxConcurrentRequests: ""
   authFailLimit: ""
   maxBodyBytes: ""
   # Anyray Portal metering. ON by default — every deployment connects for content-free

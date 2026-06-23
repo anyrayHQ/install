@@ -60,6 +60,14 @@ desc_warn=""
 # one-click "No config required" UX. The empty optional knobs (rate limits,
 # verified-dev gate, upstream) behave identically unset or "" at the gateway,
 # so they're omitted from the published template rather than prompted for.
+#
+# CAVEAT (do not set proxy ANYRAY_UPDATER_TOKEN back to ""): the proxy's nginx
+# template injects ${ANYRAY_UPDATER_TOKEN} via envsubst, which only substitutes
+# vars present in the environment. Stripping it (empty) leaves a literal $... that
+# nginx rejects at startup -> the console crash-loops. It is therefore set to a
+# (harmless, updater-off) ${{secret()}} so it survives this filter. Once the proxy
+# image that bakes an empty ANYRAY_UPDATER_TOKEN default ships to :stable
+# (monorepo: observability/ui/Dockerfile), this template var is no longer needed.
 for svc in $services; do
   jq -r --arg n "$svc" '
     .services[] | select(.name == $n) | .variables // {}

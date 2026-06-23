@@ -81,22 +81,33 @@ is "Not Authorized"). So the literal defaults can only be restored in the
 dashboard's per-service **Raw Editor**.
 
 To make that deterministic — and to avoid rebuilding the variable blocks from
-memory each time — generate the publish artifacts first:
+memory each time — use the publish-assist helper:
 
 ```bash
-railway/build-publish.sh
+railway/publish-template.sh          # prep: validate + regenerate + print the
+                                     #       ordered republish checklist (blocks inlined)
+railway/publish-template.sh test     # deploy the LIVE published template to a
+                                     #       throwaway project, health-check it, delete it
 ```
 
-This reads `railway.template.json` and writes (into the gitignored
-`railway/.publish/`):
+`prep` (the default) wraps `build-publish.sh` and prints the exact per-service
+Raw-Editor blocks in dashboard order, so the manual step is copy-paste. `test`
+deploys the *currently published* template and runs the health-check battery
+(gateway `/`, console `/anyray-login`, `/admin/health`, default-model routing),
+which catches boot regressions a static config review can't — e.g. a proxy
+crash-loop from a stripped env var. It needs a **workspace token**
+(`RAILWAY_WORKSPACE_TOKEN`) and the `railway` CLI logged in; see the script
+header.
+
+`build-publish.sh` is still the underlying generator (called by `prep`). It
+reads `railway.template.json` and writes (into the gitignored `railway/.publish/`):
 
 - `RUNBOOK.md` — the ordered dashboard procedure, the publish metadata, the
   required README sections, and the cache-busted verify URL.
 - `<service>.vars` — the exact `KEY=VALUE` block to paste into each service's
   Raw Editor.
 
-Then follow `railway/.publish/RUNBOOK.md`. **Run the script again after every
-`railway.template.json` change** so the artifacts stay in sync.
+**Re-run after every `railway.template.json` change** so the artifacts stay in sync.
 
 The template is **published** (Othentic workspace, category "AI / ML"). The
 "Deploy on Railway" button URL is `https://railway.com/deploy/anyray` — when

@@ -17,8 +17,8 @@
       "volumes": [{ "mountPath": "/data" }],
       "variables": {
         "PORT": "8787",
-        "ANYRAY_OBSERVABILITY_DB_URL": "postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.POSTGRES_DB}}",
-        "ANYRAY_SPEND_DB_URL": "postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.POSTGRES_DB}}",
+        "ANYRAY_OBSERVABILITY_DB_URL": "${{Postgres.DATABASE_URL}}",
+        "ANYRAY_SPEND_DB_URL": "${{Postgres.DATABASE_URL}}",
         "ANYRAY_OPTIMIZER_URL": "http://${{optimizer.RAILWAY_PRIVATE_DOMAIN}}:8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{optimizer.ANYRAY_OPTIMIZER_TOKEN}}",
         "ANYRAY_OPTIMIZER_TIMEOUT_MS": "800",

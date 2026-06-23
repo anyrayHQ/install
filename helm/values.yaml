@@ -102,7 +102,6 @@ gateway:
   requireVerifiedDev: ""
   hsts: ""
   trustProxy: ""
-  responsesOptimize: ""
   rateLimitRpm: ""
   rateLimitUnauthRpm: ""
   authFailLimit: ""

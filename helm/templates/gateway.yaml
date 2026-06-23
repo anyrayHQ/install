@@ -117,10 +117,6 @@ spec:
             - name: ANYRAY_TRUST_PROXY
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.gateway.responsesOptimize }}
-            - name: ANYRAY_RESPONSES_OPTIMIZE
-              value: {{ . | quote }}
-            {{- end }}
             {{- with .Values.gateway.rateLimitRpm }}
             - name: ANYRAY_RATE_LIMIT_RPM
               value: {{ . | quote }}

@@ -17,7 +17,9 @@ x-logging: &default-logging
 services:
   gateway:
     logging: *default-logging
-    image: "${ANYRAY_GATEWAY_IMAGE:-ghcr.io/anyrayhq/gateway:${ANYRAY_IMAGE_TAG:-stable}}"
+    image: "${ANYRAY_GATEWAY_IMAGE:-ghcr.io/anyrayhq/gateway:${ANYRAY_IMAGE_TAG:-latest}}"
+    # Re-pull the moving tag on every `up`; never run a cached older image.
+    pull_policy: always
     restart: always
     # Watched by the opt-in updater (the `updater` service below, --profile
     # updater) — never the datastores or anything else on the host. No-op unless
@@ -107,7 +109,8 @@ services:
 
   optimizer:
     logging: *default-logging
-    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-stable}}"
+    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-latest}}"
+    pull_policy: always
     restart: always
     labels:
       com.centurylinklabs.watchtower.enable: "true"
@@ -130,7 +133,8 @@ services:
 
   proxy:
     logging: *default-logging
-    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-stable}}"
+    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-latest}}"
+    pull_policy: always
     restart: always
     labels:
       com.centurylinklabs.watchtower.enable: "true"
@@ -199,7 +203,7 @@ services:
   # containers (gateway/optimizer/proxy), driven by the console's "Update now"
   # button (Watchtower HTTP API) or, opt-in, a periodic poll.
   #
-  # Uses the moving stable channel by default so there is a newer digest to roll
+  # Uses the moving latest channel by default so there is a newer digest to roll
   # forward to. Override ANYRAY_IMAGE_TAG=vX.Y.Z when you want pinned/manual
   # updates. Watchtower only touches containers labelled
   # com.centurylinklabs.watchtower.enable=true (the three app services above).

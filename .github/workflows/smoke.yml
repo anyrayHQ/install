@@ -34,7 +34,10 @@ jobs:
           test "$(curl -so /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN" http://localhost:8787/admin/auth)" = "200"
           test "$(curl -so /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" http://localhost:8787/admin/auth)" = "401"
       - name: Idempotent re-run of setup.sh
-        run: ./setup.sh | grep -q "already exists"
+        # Re-running must keep existing secrets, not regenerate them. setup.sh
+        # reports this as "… existing values kept" (both the already-complete
+        # and the reconciled branch); assert on that phrase.
+        run: ./setup.sh | grep -q "existing values kept"
       - name: Logs on failure
         if: failure()
         run: docker compose ps && docker compose logs

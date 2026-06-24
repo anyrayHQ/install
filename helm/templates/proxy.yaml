@@ -36,6 +36,20 @@ spec:
               value: "false"
             - name: ANYRAY_UPDATER_POLL_INTERVAL
               value: "86400"
+            # Point nginx at the gateway/optimizer Services by FQDN. The proxy
+            # resolves upstreams at request time via nginx's `resolver`, which —
+            # unlike libc/Node — does NOT apply the cluster's DNS search domains.
+            # So the image defaults (bare `gateway`/`optimizer`, fine on Docker
+            # Compose) resolve to NXDOMAIN here, and every gated route (/console/,
+            # /admin/*) 500s when the /__auth subrequest can't reach the gateway
+            # ("gateway could not be resolved (3: Host not found)"). The Services
+            # are named `gateway`/`optimizer` (see gateway.yaml / optimizer.yaml).
+            # Listed before extraEnv so an operator override still wins (last
+            # duplicate env entry is the one kubelet keeps).
+            - name: ANYRAY_GATEWAY_HOST
+              value: "gateway.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}"
+            - name: ANYRAY_OPTIMIZER_HOST
+              value: "optimizer.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}"
             {{- with .Values.proxy.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

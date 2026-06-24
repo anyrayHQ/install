@@ -220,7 +220,7 @@ Resources:
       Role: !GetAtt SecretFnRole.Arn
       Code:
         ZipFile: |
-          import json, secrets as rnd, urllib.request, traceback, boto3
+          import json, secrets as rnd, urllib.request, urllib.parse, traceback, boto3
           sm = boto3.client('secretsmanager')
 
           def send(event, context, status, data=None, pid=None):
@@ -271,8 +271,15 @@ Resources:
                       return send(event, context, 'SUCCESS', data, prefix + 'generate')
                   if action == 'composeDbUrl':
                       m = json.loads(sm.get_secret_value(SecretId=props['MasterSecretArn'])['SecretString'])
-                      url = 'postgresql://%s:%s@%s:5432/%s' % (
-                          m['username'], m['password'], props['DbHost'], props['DbName'])
+                      # URL-encode credentials: the RDS-managed master password can
+                      # contain URL-reserved chars (?, #, /, @, %, …) that otherwise
+                      # corrupt the postgresql:// connection string ("Invalid URL").
+                      # sslmode=no-verify: RDS (PG15+) forces SSL via rds.force_ssl, and
+                      # the gateway's pg client has no RDS CA bundle — encrypt in transit
+                      # without cert verification (the DB is private, in-VPC only).
+                      q = lambda s: urllib.parse.quote(s, safe='')
+                      url = 'postgresql://%s:%s@%s:5432/%s?sslmode=no-verify' % (
+                          q(m['username']), q(m['password']), props['DbHost'], props['DbName'])
                       return send(event, context, 'SUCCESS',
                           {'DbUrlArn': put(prefix + 'db-url', url)}, prefix + 'composeDbUrl')
                   return send(event, context, 'FAILED', {'Error': 'unknown action'}, prefix + action)

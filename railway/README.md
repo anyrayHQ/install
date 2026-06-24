@@ -25,6 +25,29 @@ The gateway persists content-free traces to Postgres (`anyray_traces` /
 `anyray_observations`, auto-created) and reads them back in-process for the
 console — no separate observability datastores are needed.
 
+## Connect to Anyray Portal
+
+The template ships with usage metering **off**, so the stack deploys and runs
+unmetered. To connect it to the Portal (required for usage metering), add two
+**new** variables to the `gateway` service — the template does not pre-create
+them, so add them, don't edit existing ones. Get your `<adt_token>` (`adt_…`) at
+<https://app.anyray.ai> → Deployments → Connect a deployment.
+
+| Service   | Variable                  | Value         | Add as       |
+|-----------|---------------------------|---------------|--------------|
+| `gateway` | `ANYRAY_METERING_ENABLED` | `true`        | New variable |
+| `gateway` | `ANYRAY_DEPLOYMENT_TOKEN` | `<adt_token>` | New variable |
+
+> **Add both together.** `ANYRAY_METERING_ENABLED=true` switches the gateway into
+> entitlement-enforced mode — it then expects a valid Portal connection. Always
+> add it alongside a working `ANYRAY_DEPLOYMENT_TOKEN`. If metering is enabled
+> without a valid token, the gateway serves normally for a short grace period,
+> then returns `402` on `/v1/*` until it connects. To return to unmetered, remove
+> `ANYRAY_METERING_ENABLED` (or set it to `false`).
+
+Once the gateway redeploys and phones home (~10s), the deployment flips to
+**Connected** at <https://app.anyray.ai>.
+
 ## Variables reference
 
 | Variable                       | Source                          | Notes                                                                       |

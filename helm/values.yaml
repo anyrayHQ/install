@@ -10,6 +10,13 @@
 # which matches on the HTTP Host header.
 host: ""
 
+# In-cluster DNS domain, used to build the gateway/optimizer Service FQDNs the
+# proxy's nginx dials. nginx's `resolver` does not apply Kubernetes search
+# domains, so these must be fully qualified. Override only if your cluster was
+# brought up with a non-default DNS domain (the kubeadm/EKS/GKE/AKS default is
+# cluster.local).
+clusterDomain: cluster.local
+
 image:
   tag: "latest"
   # Always re-pull: the moving tag must not be served from a stale node cache.

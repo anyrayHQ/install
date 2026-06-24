@@ -190,10 +190,10 @@ All component images can be redirected to an internal registry:
 images:
   gateway:
     repository: registry.example.com/anyray/gateway
-    tag: stable
+    tag: latest
   optimizer:
     repository: registry.example.com/anyray/optimizer
-    tag: stable
+    tag: latest
   postgres:
     repository: registry.example.com/postgres
     tag: "17"

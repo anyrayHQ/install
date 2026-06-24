@@ -156,7 +156,7 @@ write_values_stub() {
     echo "host: \"${HOST}\""
     echo ""
     echo "image:"
-    echo "  tag: \"stable\""
+    echo "  tag: \"latest\""
     if [ -n "$CONNECT_TOKEN" ]; then
       echo ""
       echo "# Anyray Cloud metering — deployment token + pseudonym salt live in anyray-secrets.yaml."
@@ -290,7 +290,7 @@ if [ "$K8S" -eq 0 ]; then
     cat >> .env <<'EOF'
 
 # Opt-in updater — one-click + auto-update from the console. DEFAULT OFF.
-# The stack uses the moving stable channel by default. To enable updates,
+# The stack uses the moving latest channel by default. To enable updates,
 # uncomment the token below (any random secret, e.g. openssl rand -hex 32),
 # then start it with
 #   docker compose --profile updater up -d

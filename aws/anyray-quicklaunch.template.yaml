@@ -67,8 +67,8 @@ Parameters:
     ConstraintDescription: Must be a CIDR like 203.0.113.0/24 (not 0.0.0.0/0).
   ImageTag:
     Type: String
-    Default: stable
-    Description: Anyray image tag to deploy. stable is the nightly release channel; use vX.Y.Z to pin.
+    Default: latest
+    Description: Anyray image tag to deploy. latest is the moving release channel; use vX.Y.Z to pin.
   DefaultModel:
     Type: String
     Default: 'anthropic/claude-sonnet-4-5'

@@ -11,8 +11,9 @@
 host: ""
 
 image:
-  tag: "stable"
-  pullPolicy: IfNotPresent
+  tag: "latest"
+  # Always re-pull: the moving tag must not be served from a stale node cache.
+  pullPolicy: Always
   pullSecrets: []
 
 # Per-component image repository overrides. Empty app tags inherit image.tag.

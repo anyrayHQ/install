@@ -17,7 +17,7 @@ x-logging: &default-logging
 services:
   gateway:
     logging: *default-logging
-    image: "${ANYRAY_GATEWAY_IMAGE:-ghcr.io/anyrayhq/gateway:${ANYRAY_IMAGE_TAG:-latest}}"
+    image: "${ANYRAY_GATEWAY_IMAGE:-public.ecr.aws/h4e6s7a8/gateway:${ANYRAY_IMAGE_TAG:-latest}}"
     # Re-pull the moving tag on every `up`; never run a cached older image.
     pull_policy: always
     restart: always
@@ -109,7 +109,7 @@ services:
 
   optimizer:
     logging: *default-logging
-    image: "${ANYRAY_OPTIMIZER_IMAGE:-ghcr.io/anyrayhq/optimizer:${ANYRAY_IMAGE_TAG:-latest}}"
+    image: "${ANYRAY_OPTIMIZER_IMAGE:-public.ecr.aws/h4e6s7a8/optimizer:${ANYRAY_IMAGE_TAG:-latest}}"
     pull_policy: always
     restart: always
     labels:
@@ -133,7 +133,7 @@ services:
 
   proxy:
     logging: *default-logging
-    image: "${ANYRAY_PROXY_IMAGE:-ghcr.io/anyrayhq/proxy:${ANYRAY_IMAGE_TAG:-latest}}"
+    image: "${ANYRAY_PROXY_IMAGE:-public.ecr.aws/h4e6s7a8/proxy:${ANYRAY_IMAGE_TAG:-latest}}"
     pull_policy: always
     restart: always
     labels:

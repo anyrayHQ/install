@@ -587,7 +587,7 @@ Resources:
             AuthorizationConfig: { AccessPointId: !Ref OptimizerAp, IAM: ENABLED }
       ContainerDefinitions:
         - Name: optimizer
-          Image: !Sub 'ghcr.io/anyrayhq/optimizer:${ImageTag}'
+          Image: !Sub 'public.ecr.aws/h4e6s7a8/optimizer:${ImageTag}'
           Essential: true
           PortMappings:
             - { Name: optimizer, ContainerPort: 8088, Protocol: tcp }
@@ -630,7 +630,7 @@ Resources:
             AuthorizationConfig: { AccessPointId: !Ref GatewayAp, IAM: ENABLED }
       ContainerDefinitions:
         - Name: gateway
-          Image: !Sub 'ghcr.io/anyrayhq/gateway:${ImageTag}'
+          Image: !Sub 'public.ecr.aws/h4e6s7a8/gateway:${ImageTag}'
           Essential: true
           PortMappings:
             - { Name: gateway, ContainerPort: 8787, Protocol: tcp }
@@ -697,7 +697,7 @@ Resources:
       TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
         - Name: proxy
-          Image: !Sub 'ghcr.io/anyrayhq/proxy:${ImageTag}'
+          Image: !Sub 'public.ecr.aws/h4e6s7a8/proxy:${ImageTag}'
           Essential: true
           PortMappings:
             - { Name: proxy, ContainerPort: 80, Protocol: tcp }

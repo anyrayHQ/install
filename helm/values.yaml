@@ -26,13 +26,13 @@ image:
 # Per-component image repository overrides. Empty app tags inherit image.tag.
 images:
   gateway:
-    repository: ghcr.io/anyrayhq/gateway
+    repository: public.ecr.aws/h4e6s7a8/gateway
     tag: ""
   optimizer:
-    repository: ghcr.io/anyrayhq/optimizer
+    repository: public.ecr.aws/h4e6s7a8/optimizer
     tag: ""
   proxy:
-    repository: ghcr.io/anyrayhq/proxy
+    repository: public.ecr.aws/h4e6s7a8/proxy
     tag: ""
   postgres:
     repository: docker.io/postgres

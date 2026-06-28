@@ -289,12 +289,13 @@ if [ "$K8S" -eq 0 ]; then
   if [ "$NEW_ENV" -eq 1 ]; then
     cat >> .env <<'EOF'
 
-# Opt-in updater — one-click + auto-update from the console. DEFAULT OFF.
-# The stack uses the moving latest channel by default. To enable updates,
-# uncomment the token below (any random secret, e.g. openssl rand -hex 32),
-# then start it with
-#   docker compose --profile updater up -d
+# Updater — the console's one-click "Update now" button, on by default. The stack
+# uses the moving latest channel so there is a newer build to pull, and the
+# trigger is gated by ANYRAY_ADMIN_TOKEN automatically (no token to set). Set
+# ANYRAY_UPDATER_ENABLED=false to hide the button. Unattended auto-update is
+# separate and stays opt-in (ANYRAY_UPDATER_PERIODIC_POLLS).
 # Docs: docs.anyray.ai -> Configure -> Updates, and Security -> the Docker socket.
+# ANYRAY_UPDATER_ENABLED=true
 # ANYRAY_UPDATER_TOKEN=
 # ANYRAY_UPDATER_PERIODIC_POLLS=false
 # ANYRAY_UPDATER_POLL_INTERVAL=86400

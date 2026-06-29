@@ -152,6 +152,14 @@ hosted for the Launch button at
 `https://anyray-quicklaunch.s3.us-east-1.amazonaws.com/anyray-quicklaunch.template.yaml`
 (re-upload after editing). See the docs "AWS (CloudFormation)" install page.
 
+**Google Cloud (GKE Autopilot)** — one-click deploy via Cloud Shell: provisions a managed
+**GKE Autopilot** cluster and installs the bundled Helm chart (gateway + optimizer + console
+proxy + Postgres). The gateway API (:8787) and console (:3000) come up as **LoadBalancer
+Services scoped to a CIDR** you provide; every secret is generated locally by `setup.sh`. The
+artifact is [`gcp/deploy.sh`](./gcp/deploy.sh) + [`gcp/walkthrough.md`](./gcp/walkthrough.md),
+launched from the "Open in Cloud Shell" button in [`gcp/README.md`](./gcp/README.md). See the
+docs "Google Cloud (GKE Autopilot)" install page.
+
 **Railway** — one-click deploy; Railway auto-generates every secret. The authoritative
 spec is [`railway/railway.template.json`](./railway); see [`railway/README.md`](./railway/README.md).
 

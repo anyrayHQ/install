@@ -67,7 +67,9 @@
         "ANYRAY_UPDATER_ENABLED": "false",
         "ANYRAY_UPDATER_PERIODIC_POLLS": "false",
         "ANYRAY_UPDATER_POLL_INTERVAL": "86400",
-        "ANYRAY_UPDATER_TOKEN": "${{secret()}}"
+        "ANYRAY_UPDATER_TOKEN": "${{secret()}}",
+        "ANYRAY_IMAGE_TAG": "latest",
+        "ANYRAY_UPDATE_HINT": "Set the proxy/gateway/optimizer image tag and redeploy the Railway services"
       }
     },
     {

@@ -9,6 +9,11 @@ come up as LoadBalancer Services scoped to a CIDR you provide.
 It reuses the same [Helm chart](../helm) as the manual Kubernetes install — the
 one-click only adds the cluster provisioning and the GKE-specific exposure.
 
+> **Want something lighter?** If you don't already run Kubernetes, the
+> [Compute Engine VM one-click](./gce/README.md) runs the same stack with
+> `docker compose` on a single VM — no cluster, no managed database, no load
+> balancer. GKE is the better fit for teams already on Kubernetes.
+
 ## One-click (Cloud Shell)
 
 [![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/anyrayHQ/install&cloudshell_workspace=.&cloudshell_tutorial=gcp/walkthrough.md)

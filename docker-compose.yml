@@ -21,9 +21,10 @@ services:
     # Re-pull the moving tag on every `up`; never run a cached older image.
     pull_policy: always
     restart: always
-    # Watched by the opt-in updater (the `updater` service below, --profile
-    # updater) — never the datastores or anything else on the host. No-op unless
-    # the updater profile is started.
+    # Watched by the always-on updater (the `updater` service below) so the
+    # console's one-click "Update now" works with no setup — never the datastores
+    # or anything else on the host. Auto-pull stays opt-in
+    # (ANYRAY_UPDATER_PERIODIC_POLLS).
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     depends_on:
@@ -150,6 +151,12 @@ services:
       ANYRAY_UPDATER_ENABLED: ${ANYRAY_UPDATER_ENABLED:-true}
       ANYRAY_UPDATER_PERIODIC_POLLS: ${ANYRAY_UPDATER_PERIODIC_POLLS:-false}
       ANYRAY_UPDATER_POLL_INTERVAL: ${ANYRAY_UPDATER_POLL_INTERVAL:-86400}
+      # Running image tag: the console uses it to tell a moving tag (one-click can
+      # roll forward) from a pinned one. ANYRAY_UPDATE_HINT is the manual upgrade
+      # command the banner shows for this install method (keep it double-quote
+      # free so the proxy's update-config JSON stays valid).
+      ANYRAY_IMAGE_TAG: ${ANYRAY_IMAGE_TAG:-latest}
+      ANYRAY_UPDATE_HINT: "docker compose pull && docker compose up -d"
     # gateway healthy first: nginx auth_request hits gateway:8787 on every
     # console load — starting earlier just serves 502s.
     depends_on:

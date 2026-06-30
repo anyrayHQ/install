@@ -708,6 +708,10 @@ Resources:
             - { Name: ANYRAY_UPDATER_TOKEN, Value: '' }
             - { Name: ANYRAY_UPDATER_PERIODIC_POLLS, Value: 'false' }
             - { Name: ANYRAY_UPDATER_POLL_INTERVAL, Value: '86400' }
+            # Running tag + the manual upgrade command the console shows. On ECS
+            # an update is a CloudFormation stack update with a new ImageTag.
+            - { Name: ANYRAY_IMAGE_TAG, Value: !Ref ImageTag }
+            - { Name: ANYRAY_UPDATE_HINT, Value: 'Update the ImageTag parameter and redeploy the CloudFormation stack' }
           HealthCheck:
             Command: [CMD-SHELL, 'wget -qO- http://localhost:80/anyray-login || exit 1']
             Interval: 10

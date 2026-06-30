@@ -138,18 +138,14 @@ services:
     restart: always
     labels:
       com.centurylinklabs.watchtower.enable: "true"
-    # The proxy image bakes nginx.conf, which carries the gated updater routes
-    # (/admin/update/run + /admin/update/config). These are substituted into it at
-    # start (envsubst): ANYRAY_UPDATER_TOKEN is injected as the Watchtower bearer
-    # server-side (never reaches the browser); ANYRAY_UPDATER_ENABLED defaults to
-    # "true" so the console shows the one-click button (set "false" to hide it).
-    # The token defaults to the admin key, so the trigger the proxy injects matches
-    # Watchtower's expected token with no extra setup.
+    # The proxy image bakes nginx.conf, which carries the gated updater trigger
+    # route (/admin/update/run). It is substituted into it at start (envsubst):
+    # ANYRAY_UPDATER_TOKEN is injected as the Watchtower bearer server-side (never
+    # reaches the browser). One-click is always on (the console always shows the
+    # button); the token defaults to the admin key, so the trigger the proxy
+    # injects matches Watchtower's expected token with no extra setup.
     environment:
       ANYRAY_UPDATER_TOKEN: ${ANYRAY_UPDATER_TOKEN:-${ANYRAY_ADMIN_TOKEN}}
-      ANYRAY_UPDATER_ENABLED: ${ANYRAY_UPDATER_ENABLED:-true}
-      ANYRAY_UPDATER_PERIODIC_POLLS: ${ANYRAY_UPDATER_PERIODIC_POLLS:-false}
-      ANYRAY_UPDATER_POLL_INTERVAL: ${ANYRAY_UPDATER_POLL_INTERVAL:-86400}
     # gateway healthy first: nginx auth_request hits gateway:8787 on every
     # console load — starting earlier just serves 502s.
     depends_on:
@@ -199,21 +195,20 @@ services:
     volumes:
       - anyray_postgres_data:/var/lib/postgresql/data
 
-  # ── Updater: one-click + (opt-in) auto-update for the Anyray images ─────────
-  # On by default — the console's "Update now" button works with no setup. The
-  # token it needs derives from ANYRAY_ADMIN_TOKEN (override with
-  # ANYRAY_UPDATER_TOKEN); set ANYRAY_UPDATER_ENABLED=false to hide the button.
+  # ── Updater: one-click update for the Anyray images ─────────────────────────
+  # Always on — the console's "Update now" button works with no setup, and there
+  # is no toggle to disable it. The token the trigger needs derives from
+  # ANYRAY_ADMIN_TOKEN (override with ANYRAY_UPDATER_TOKEN).
   # Bundles Watchtower to pull newer images and recreate the Anyray app
-  # containers (gateway/optimizer/proxy), driven by the console's "Update now"
-  # button (Watchtower HTTP API) or, opt-in, a periodic poll.
+  # containers (gateway/optimizer/proxy) when the operator clicks the console's
+  # "Update now" button (Watchtower HTTP API). Updates apply only on that click —
+  # there is no unattended polling.
   #
   # Uses the moving latest channel by default so there is a newer digest to roll
   # forward to. Override ANYRAY_IMAGE_TAG=vX.Y.Z when you want pinned/manual
   # updates. Watchtower only touches containers labelled
-  # com.centurylinklabs.watchtower.enable=true (the three app services above).
-  #
-  # Unattended auto-update stays opt-in: the button is always available, but the
-  # stack pulls + restarts on its own only when ANYRAY_UPDATER_PERIODIC_POLLS=true.
+  # com.centurylinklabs.watchtower.enable=true (the three app services above),
+  # never the datastores or anything else on the host.
   #
   # SECURITY: Watchtower never gets the raw Docker socket — it talks to the
   # docker-socket-proxy below, which exposes only the minimal Docker API needed
@@ -245,8 +240,6 @@ services:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       WATCHTOWER_HTTP_API_UPDATE: "true"
       WATCHTOWER_HTTP_API_TOKEN: ${ANYRAY_UPDATER_TOKEN:-${ANYRAY_ADMIN_TOKEN}}
-      WATCHTOWER_HTTP_API_PERIODIC_POLLS: ${ANYRAY_UPDATER_PERIODIC_POLLS:-false}
-      WATCHTOWER_POLL_INTERVAL: ${ANYRAY_UPDATER_POLL_INTERVAL:-86400}
       WATCHTOWER_INCLUDE_RESTARTING: "true"
 
 volumes:

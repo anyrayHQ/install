@@ -702,12 +702,9 @@ Resources:
           PortMappings:
             - { Name: proxy, ContainerPort: 80, Protocol: tcp }
           Environment:
-            # The baked nginx envsubst template needs these set or it crashloops
-            # (the EKS proxy incident — install #54).
-            - { Name: ANYRAY_UPDATER_ENABLED, Value: 'false' }
+            # The baked nginx envsubst template needs ANYRAY_UPDATER_TOKEN set or
+            # it crashloops (the EKS proxy incident — install #54).
             - { Name: ANYRAY_UPDATER_TOKEN, Value: '' }
-            - { Name: ANYRAY_UPDATER_PERIODIC_POLLS, Value: 'false' }
-            - { Name: ANYRAY_UPDATER_POLL_INTERVAL, Value: '86400' }
           HealthCheck:
             Command: [CMD-SHELL, 'wget -qO- http://localhost:80/anyray-login || exit 1']
             Interval: 10

@@ -1,208 +1,147 @@
 # Anyray — install
 
-Self-host [Anyray](https://docs.anyray.ai) (the AI-spend optimizer gateway) from
-published images. Full docs and platform-specific recipes: https://docs.anyray.ai
+Self-host [Anyray](https://docs.anyray.ai), the AI-spend optimizer gateway, from
+published images. This repo is the install path for every target: Docker, Kubernetes,
+AWS, Google Cloud, and Railway.
 
-## Quick start (any machine with Docker)
+> Full docs and platform recipes: **https://docs.anyray.ai**
+
+## Quick start (Docker)
 
 Grab a deployment token (`adt_…`) from [app.anyray.ai](https://app.anyray.ai)
-(Deployments → Connect a deployment), then:
+→ *Deployments → Connect a deployment*, then:
 
-    git clone https://github.com/anyrayHQ/install anyray && cd anyray
-    ./setup.sh --connect adt_XXXX
-    docker compose up -d
+```bash
+git clone https://github.com/anyrayHQ/install anyray && cd anyray
+./setup.sh --connect adt_XXXX
+docker compose up -d
+```
 
-- Your deployment shows up as **Connected** at app.anyray.ai within a minute.
-- Console → http://<your-host>:3000 — sign in with the admin key `setup.sh` printed,
-  then follow the in-console setup steps (~3 min).
-- **Add your LLM provider key** (required before the gateway can serve requests):
-  either in the console's provider-keys settings, or in `.env`
-  (`ANYRAY_PROVIDER_KEY_OPENAI=…` / `ANYRAY_PROVIDER_KEY_ANTHROPIC=…` /
-  `ANYRAY_PROVIDER_KEY_AZURE_OPENAI=…`) followed by `docker compose up -d`.
-  Developers never see this key — their tools use a placeholder.
-- Gateway → point AI tools/SDKs at http://<your-host>:8787/v1/...
-- Developers connect with **one line, nothing to install** (see below).
+That's it. Within a minute the deployment shows as **Connected** at app.anyray.ai.
 
-## Point Anyray at an existing gateway (on-top mode)
+| What | Where |
+| --- | --- |
+| **Console** | `http://<host>:3000` — sign in with the admin key `setup.sh` printed, then run the ~3-min in-console setup |
+| **Gateway** | `http://<host>:8787/v1/…` — point AI tools and SDKs here |
 
-Already running LiteLLM / OpenRouter / your own OpenAI-compatible gateway? Run
-Anyray in front of it with `--upstream <url>`:
+> Keep ports 3000 and 8787 reachable from your org network only — never public.
 
-    ./setup.sh --connect adt_XXXX --upstream http://host.docker.internal:4000
-    docker compose up -d
+## Add a provider key (required)
 
-On first boot the gateway seeds its default route to that upstream, so your
-tools just point at the Anyray gateway (`http://<host>:8787/v1`) and send normal
-requests — **no `x-anyray-config` header on each request**. `--upstream` also
-clears the proxy guard for the upstream host (allowlist + trusted hosts)
-automatically.
+The gateway can't serve requests until it has an LLM provider key. Add it in the
+console (*provider-keys settings*), or in `.env` then re-run `docker compose up -d`:
 
-> Inside Docker, `localhost` is the gateway container itself — use
-> `host.docker.internal:4000` (or the host's LAN IP) for an upstream running on
-> the host. To change the upstream later, re-run `./setup.sh --upstream <url>`,
-> or edit the route in the console (Routing). On Helm set `gateway.upstreamUrl`
-> (plus `customHostAllowlist` / `trustedCustomHosts` for an internal upstream).
+```bash
+ANYRAY_PROVIDER_KEY_OPENAI=…      # or _ANTHROPIC / _AZURE_OPENAI
+```
 
-## Developers connect — zero install
+Developers never see this key — their tools use a placeholder.
 
-A developer points their local AI tools (Claude Code, Codex, …) at the gateway
-with a single line. Nothing to install — no Node, no npm, no global package. The
-installer downloads a standalone `anyray-connect` binary for their OS, verifies
-its checksum, and runs it. Grab the **shareable setup link** (`https://app.anyray.ai/setup/dvl_…`)
-from the portal and hand it to your team:
+## Connect developers — zero install
 
-**macOS / Linux**
+Hand your team the **setup link** (`https://app.anyray.ai/setup/dvl_…`) from the
+portal. They run one line — no Node, no npm, nothing to install. The installer
+fetches a checksum-verified `anyray-connect` binary for their OS and points their
+AI tools (Claude Code, Codex, …) at the gateway.
 
-    curl -fsSL https://app.anyray.ai/connect.sh | sh -s -- <setup-link>
+```bash
+# macOS / Linux
+curl -fsSL https://app.anyray.ai/connect.sh | sh -s -- <setup-link>
+```
+```powershell
+# Windows (PowerShell)
+& ([scriptblock]::Create((irm https://app.anyray.ai/connect.ps1))) "<setup-link>"
+```
 
-**Windows (PowerShell)**
+Flags pass straight through (e.g. `--subscription`; subscription-org links set it
+automatically). Prefer a package manager? `npx anyray-connect <setup-link>` still
+works (needs Node).
 
-    & ([scriptblock]::Create((irm https://app.anyray.ai/connect.ps1))) "<setup-link>"
+## Deployment options
 
-Flags pass straight through (e.g. `--subscription` for seat/subscription auth —
-the setup link sets this automatically for subscription orgs). A subscription
-org's link turns on pass-through auth with no flag at all.
+Docker Compose (above) is the default. Each target has its own recipe:
 
-> Prefer a package manager? `npx anyray-connect <setup-link>` still works (needs
-> Node). The one-liners above need only `curl`/PowerShell.
+| Target | Command / artifact | Docs |
+| --- | --- | --- |
+| **Kubernetes (Helm)** | `./setup.sh --k8s --connect adt_XXXX --host <host> --namespace <ns>` → apply Secret + `helm install` | [`helm/README.md`](./helm/README.md) |
+| **AWS (CloudFormation)** | One-click ECS/Fargate + RDS + EFS stack; secrets via Secrets Manager | [`aws/`](./aws/) |
+| **Google Cloud (GKE Autopilot)** | One-click Cloud Shell deploy of the bundled Helm chart | [`gcp/README.md`](./gcp/README.md) |
+| **Railway** | One-click; Railway generates every secret | [`railway/README.md`](./railway/README.md) |
+| **LiteLLM attach** | Runs only the optimizer + console as a LiteLLM hook (no Anyray gateway) | [`attach/litellm/README.md`](./attach/litellm/README.md) |
 
-When the operator turns on verified-developer access (see *Public exposure*
-below), the first `anyray-connect` run provisions a per-device key and enrolls
-the developer automatically — passwordless, no SSO login. It's offline
-public-key verification against the trust anchor the gateway already pins, so
-there's nothing extra for the developer to configure.
+For Helm, use an existing namespace unless your cluster policy says otherwise.
 
-`--connect` only sends the deployment token to Anyray Cloud. The control-plane
-host (`app.anyray.ai`) and the Ed25519 lease-verify key are **pinned in the
-gateway image**, so the signed billing kill-switch can't be bypassed by
-re-pointing the URL — nothing about the trust anchor is configured on your box.
-Metering reports are content-free rollups; the pseudonym salt that masks
-employee identifiers is generated locally and never leaves the machine. Re-run
-`./setup.sh --connect <token>` any time to reconnect — it only rewrites the
-connect vars, never your secrets.
+## Other setups
 
-Useful extras: `--gateway-url <url>` overrides the gateway URL shown to
-developers in the portal. `--control-plane <url>` points at a non-default
-control plane — this is for **internal/dev gateway builds only**: it sets
-`ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1` and a stock image will still refuse to meter
-against a non-pinned host.
+**Remote Docker host** (EC2 / GCP / any VM with SSH + Docker):
 
-## Remote Docker host (EC2 / GCP / any VM with SSH + Docker)
+```bash
+./setup.sh --host <vm-ip-or-hostname> --connect adt_XXXX
+DOCKER_HOST=ssh://user@<vm> docker compose up -d
+```
 
-    ./setup.sh --host <vm-ip-or-hostname> --connect adt_XXXX
-    DOCKER_HOST=ssh://user@<vm> docker compose up -d
+**Front an existing gateway** (LiteLLM / OpenRouter / any OpenAI-compatible) — run
+Anyray on top with `--upstream`. Tools point at the Anyray gateway and send normal
+requests; no per-request `x-anyray-config` header needed.
 
-Open ports 3000 and 8787 to your org network only — never publicly.
+```bash
+./setup.sh --connect adt_XXXX --upstream http://host.docker.internal:4000
+docker compose up -d
+```
 
-## Public exposure (remote devs / Cursor / Copilot BYOK)
+> Inside Docker, `localhost` is the gateway container — use `host.docker.internal`
+> (or the host LAN IP) for an upstream on the host. Re-run `./setup.sh --upstream <url>`
+> to change it later. `--upstream` also clears the proxy allowlist for that host.
 
-To expose the gateway API over TLS, set in `.env`: `ANYRAY_PUBLIC_DOMAIN`
-(a DNS A record pointing at the host), `ANYRAY_GATEWAY_BIND=127.0.0.1`,
-`ANYRAY_TRUST_PROXY=true`, and `ANYRAY_REQUIRE_CLIENT_KEYS=true`, then:
+**Public exposure** (remote devs / Cursor / Copilot BYOK) — terminate TLS with the
+bundled Caddy. In `.env` set `ANYRAY_PUBLIC_DOMAIN` (DNS A record → host),
+`ANYRAY_GATEWAY_BIND=127.0.0.1`, `ANYRAY_TRUST_PROXY=true`, and
+`ANYRAY_REQUIRE_CLIENT_KEYS=true`, then:
 
-    docker compose --profile public up -d
+```bash
+docker compose --profile public up -d
+```
 
-Caddy terminates HTTPS on 443 with automatic Let's Encrypt certs and 403s the
-admin surface — the console and `/admin` stay in-network only.
+Caddy serves HTTPS on 443 with automatic Let's Encrypt certs and 403s the admin
+surface, so the console and `/admin` stay in-network only. This HTTPS URL is what
+editor BYOK endpoints (Copilot Chat, Cursor) point at —
+`anyray-connect --tools copilot` prints the exact VS Code steps.
 
-To restrict the gateway to verified developers, set
-`ANYRAY_REQUIRE_VERIFIED_DEV=true` in `.env` (default off). It's opt-in,
-passwordless hardening: only developers whose `anyray-connect` run enrolled a
-per-device public key against the trust anchor the gateway already pins may use
-the gateway. Verified developers bypass rate limits; everyone else is blocked
-with a 403. Verification is offline — the gateway checks each request against
-the pinned key, with no SSO and no extra outbound calls.
-
-This HTTPS URL is what editor BYOK ("bring your own key") endpoints point at.
-For **GitHub Copilot Chat** (VS Code), `anyray-connect --tools copilot` prints the
-exact *Manage Language Models → Custom Endpoint* steps: endpoint
-`https://<ANYRAY_PUBLIC_DOMAIN>/v1/chat/completions`, a per-user key as the API
-key (issued via an invite, since public exposure sets
-`ANYRAY_REQUIRE_CLIENT_KEYS=true`), and a `requestHeaders` entry carrying
-`x-anyray-metadata` for spend attribution. Copilot Chat routes through Anyray;
-inline completions still go to GitHub. **Cursor** chat works the same way.
-
-## More ways to deploy
-
-Docker Compose (above) is the default. The repo also ships:
-
-**Kubernetes (Helm)** — the full stack as a self-contained chart (no external chart
-dependencies):
-
-    export ANYRAY_NAMESPACE="team-ai"          # optional; replace with your target namespace
-    ./setup.sh --k8s --connect adt_XXXX --host <hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
-    # emits anyray-secrets.yaml + my-values.yaml (folds the token + salt into the Secret; metering on)
-    kubectl apply -n "$ANYRAY_NAMESPACE" -f anyray-secrets.yaml
-    helm install anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
-
-Use an existing namespace unless your cluster policy says this installer should
-create one. If so, run `kubectl create namespace "$ANYRAY_NAMESPACE"` explicitly
-before applying the Secret. Omit the namespace flags only when you intentionally
-want the current kubectl/Helm namespace.
-
-See [`helm/README.md`](./helm/README.md).
-
-**AWS** — one-click deploy via a CloudFormation quick-launch stack: the full stack as
-managed containers on **ECS/Fargate** (gateway + optimizer + console proxy), with a managed
-**RDS PostgreSQL** store and **EFS** for runtime config. An Application Load Balancer fronts
-the gateway API (:8787) and console (:3000), scoped to a CIDR you provide. Every secret is
-generated by CloudFormation into **Secrets Manager** — there is no bootstrap script. The
-template is [`aws/anyray-quicklaunch.template.yaml`](./aws/anyray-quicklaunch.template.yaml),
-hosted for the Launch button at
-`https://anyray-quicklaunch.s3.us-east-1.amazonaws.com/anyray-quicklaunch.template.yaml`
-(re-upload after editing). See the docs "AWS (CloudFormation)" install page.
-
-**Google Cloud (GKE Autopilot)** — one-click deploy via Cloud Shell: provisions a managed
-**GKE Autopilot** cluster and installs the bundled Helm chart (gateway + optimizer + console
-proxy + Postgres). The gateway API (:8787) and console (:3000) come up as **LoadBalancer
-Services scoped to a CIDR** you provide; every secret is generated locally by `setup.sh`. The
-artifact is [`gcp/deploy.sh`](./gcp/deploy.sh) + [`gcp/walkthrough.md`](./gcp/walkthrough.md),
-launched from the "Open in Cloud Shell" button in [`gcp/README.md`](./gcp/README.md). See the
-docs "Google Cloud (GKE Autopilot)" install page.
-
-**Railway** — one-click deploy; Railway auto-generates every secret. The authoritative
-spec is [`railway/railway.template.json`](./railway); see [`railway/README.md`](./railway/README.md).
-
-**Optional LiteLLM attach mode** — the default Anyray install runs the Anyray
-gateway. Use attach mode only when an existing LiteLLM endpoint must remain the
-developer-facing gateway. It runs only Anyray's optimizer + console and calls the
-optimizer as a LiteLLM before/after-request hook:
-
-    ./setup.sh --host <anyray-host>
-    docker compose -f docker-compose.attach.yml up -d
-
-Attach mode does not run the Anyray gateway on `:8787`, so `anyray-connect` is
-not used; developers keep pointing at LiteLLM. If LiteLLM runs on a different
-machine, set `ANYRAY_OPTIMIZER_BIND=0.0.0.0` in `.env` and expose `:8088` only
-over a private network or VPN. See
-[`attach/litellm/README.md`](./attach/litellm/README.md).
-
-## Install with your AI agent
-
-Paste [AGENT.md](./AGENT.md) into Claude Code / Codex on the machine with your
-infra access and it will drive this install for you.
+To restrict the gateway to enrolled developers, set `ANYRAY_REQUIRE_VERIFIED_DEV=true`
+(default off). Passwordless, offline hardening: only devices whose `anyray-connect`
+run enrolled a per-device key against the gateway's pinned trust anchor get through;
+everyone else gets a 403.
 
 ## Upgrade
 
-    git pull && docker compose pull && docker compose up -d
+```bash
+git pull && docker compose pull && docker compose up -d
+```
 
-New optimizer **default profiles** (e.g. the cache-aware profile for subscription
-seats) ship inside the optimizer image but seed the config volume only on first
-run, so an existing deployment keeps its saved optimizer config after an upgrade.
-To adopt new defaults on an existing box, update the optimizer config from the
-console (or the admin `PUT /admin/optimizer/settings` API) — your secrets and
-other `.env` values are untouched.
+New optimizer default profiles ship in the image but seed config only on first run,
+so an existing deployment keeps its saved config. To adopt new defaults, update the
+optimizer config from the console — your `.env` and secrets are untouched.
 
 ## Repair / status
 
-    docker compose ps          # service health
-    docker compose logs <svc>  # diagnose a failing service
-    ./setup.sh                 # safe to re-run; never overwrites .env
-                               # (--connect rewrites only the connect vars)
+```bash
+docker compose ps           # service health
+docker compose logs <svc>   # diagnose a failing service
+./setup.sh                  # safe to re-run; never overwrites .env
+                            # (--connect rewrites only the connect vars)
+```
 
-## Security notes
+## Security
 
-- `setup.sh` generates every secret locally; nothing leaves your machine.
+- `setup.sh` generates every secret locally — nothing leaves your machine.
 - Prompt/response content is encrypted at rest (AES-256-GCM) by default.
-- The single admin key (`ANYRAY_ADMIN_TOKEN` in `.env`) gates the console and
-  all admin APIs. Rotate by editing `.env` and `docker compose up -d`.
+- The admin key (`ANYRAY_ADMIN_TOKEN` in `.env`) gates the console and all admin
+  APIs. Rotate by editing `.env` and running `docker compose up -d`.
+- The control-plane host and lease-verify key are pinned in the gateway image, so
+  the billing kill-switch can't be bypassed by re-pointing the URL. Metering reports
+  are content-free rollups; the pseudonym salt never leaves the machine.
+
+## Install with an AI agent
+
+Paste [AGENT.md](./AGENT.md) into Claude Code / Codex on a machine with your infra
+access and it will drive the install for you.

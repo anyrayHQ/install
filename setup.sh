@@ -289,16 +289,12 @@ if [ "$K8S" -eq 0 ]; then
   if [ "$NEW_ENV" -eq 1 ]; then
     cat >> .env <<'EOF'
 
-# Updater — the console's one-click "Update now" button, on by default. The stack
-# uses the moving latest channel so there is a newer build to pull, and the
-# trigger is gated by ANYRAY_ADMIN_TOKEN automatically (no token to set). Set
-# ANYRAY_UPDATER_ENABLED=false to hide the button. Unattended auto-update is
-# separate and stays opt-in (ANYRAY_UPDATER_PERIODIC_POLLS).
+# Updater — the console's one-click "Update now" button, always on (no toggle to
+# disable it). The stack uses the moving latest channel so there is a newer build
+# to pull, and the trigger is gated by ANYRAY_ADMIN_TOKEN automatically (no token
+# to set). Updates apply only on that click — there is no unattended polling.
 # Docs: docs.anyray.ai -> Configure -> Updates, and Security -> the Docker socket.
-# ANYRAY_UPDATER_ENABLED=true
 # ANYRAY_UPDATER_TOKEN=
-# ANYRAY_UPDATER_PERIODIC_POLLS=false
-# ANYRAY_UPDATER_POLL_INTERVAL=86400
 EOF
     echo "✓ Secrets generated → .env"
     echo ""

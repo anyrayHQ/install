@@ -36,6 +36,13 @@ spec:
               value: "false"
             - name: ANYRAY_UPDATER_POLL_INTERVAL
               value: "86400"
+            # The running tag (movingTag is moot here since one-click is off) and
+            # the manual upgrade command the console shows. On Kubernetes that is
+            # `helm upgrade`, not the Docker-Compose command the image defaults to.
+            - name: ANYRAY_IMAGE_TAG
+              value: {{ .Values.image.tag | default "latest" | quote }}
+            - name: ANYRAY_UPDATE_HINT
+              value: "helm upgrade anyray ./helm --set image.tag=<version>"
             # Point nginx at the gateway/optimizer Services by FQDN. The proxy
             # resolves upstreams at request time via nginx's `resolver`, which —
             # unlike libc/Node — does NOT apply the cluster's DNS search domains.

@@ -258,12 +258,12 @@ images:
 
 ## Gateway runtime knobs
 
-Gateway security and traffic controls are first-class Helm values:
+`/v1/*` is always restricted to verified developers (a minted client key) —
+secure-by-default, no toggle. The remaining gateway security and traffic controls
+are first-class Helm values:
 
 ```yaml
 gateway:
-  requireClientKeys: "true"
-  requireVerifiedDev: "true"
   hsts: "true"
   trustProxy: "true"
   rateLimitRpm: "600"

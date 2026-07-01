@@ -107,14 +107,6 @@ spec:
             - name: ANYRAY_CONSOLE_PUBLIC_URL
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.gateway.requireClientKeys }}
-            - name: ANYRAY_REQUIRE_CLIENT_KEYS
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.gateway.requireVerifiedDev }}
-            - name: ANYRAY_REQUIRE_VERIFIED_DEV
-              value: {{ . | quote }}
-            {{- end }}
             {{- with .Values.gateway.hsts }}
             - name: ANYRAY_HSTS
               value: {{ . | quote }}

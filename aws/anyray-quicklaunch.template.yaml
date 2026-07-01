@@ -25,8 +25,6 @@ Metadata:
       - Label: { default: Gateway hardening }
         Parameters:
           [
-            RequireClientKeys,
-            RequireVerifiedDev,
             Hsts,
             RateLimitRpm,
             RateLimitIpRpm,
@@ -107,16 +105,6 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: Deploy gate that must be true before `plaintext` content mode can be selected.
-  RequireClientKeys:
-    Type: String
-    Default: 'false'
-    AllowedValues: ['true', 'false']
-    Description: Require minted Anyray client keys for gateway requests.
-  RequireVerifiedDev:
-    Type: String
-    Default: 'false'
-    AllowedValues: ['true', 'false']
-    Description: Restrict /v1 traffic to verified developers.
   Hsts:
     Type: String
     Default: 'false'
@@ -646,8 +634,6 @@ Resources:
             - { Name: ANYRAY_DATA_DIR, Value: /data }
             - { Name: ANYRAY_TRUST_PROXY, Value: 'true' }
             - { Name: ANYRAY_HSTS, Value: !Ref Hsts }
-            - { Name: ANYRAY_REQUIRE_CLIENT_KEYS, Value: !Ref RequireClientKeys }
-            - { Name: ANYRAY_REQUIRE_VERIFIED_DEV, Value: !Ref RequireVerifiedDev }
             - { Name: ANYRAY_RATE_LIMIT_RPM, Value: !Ref RateLimitRpm }
             - { Name: ANYRAY_RATE_LIMIT_IP_RPM, Value: !Ref RateLimitIpRpm }
             - { Name: ANYRAY_RATE_LIMIT_UNAUTH_RPM, Value: !Ref RateLimitUnauthRpm }

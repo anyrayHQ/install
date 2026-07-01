@@ -109,8 +109,9 @@ gateway:
   trustedCustomHosts: ""
   publicUrl: ""
   consolePublicUrl: ""
-  requireClientKeys: ""
-  requireVerifiedDev: ""
+  # Note: /v1/* is always restricted to verified developers (a minted client key),
+  # secure-by-default with no toggle — the former requireClientKeys /
+  # requireVerifiedDev values were removed.
   hsts: ""
   trustProxy: ""
   rateLimitRpm: ""

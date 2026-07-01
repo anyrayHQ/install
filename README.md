@@ -96,8 +96,7 @@ docker compose up -d
 
 **Public exposure** (remote devs / Cursor / Copilot BYOK) — terminate TLS with the
 bundled Caddy. In `.env` set `ANYRAY_PUBLIC_DOMAIN` (DNS A record → host),
-`ANYRAY_GATEWAY_BIND=127.0.0.1`, `ANYRAY_TRUST_PROXY=true`, and
-`ANYRAY_REQUIRE_CLIENT_KEYS=true`, then:
+`ANYRAY_GATEWAY_BIND=127.0.0.1`, and `ANYRAY_TRUST_PROXY=true`, then:
 
 ```bash
 docker compose --profile public up -d
@@ -108,10 +107,11 @@ surface, so the console and `/admin` stay in-network only. This HTTPS URL is wha
 editor BYOK endpoints (Copilot Chat, Cursor) point at —
 `anyray-connect --tools copilot` prints the exact VS Code steps.
 
-To restrict the gateway to enrolled developers, set `ANYRAY_REQUIRE_VERIFIED_DEV=true`
-(default off). Passwordless, offline hardening: only devices whose `anyray-connect`
+The gateway is **always** restricted to enrolled developers — secure-by-default,
+no toggle. Passwordless, offline hardening: only devices whose `anyray-connect`
 run enrolled a per-device key against the gateway's pinned trust anchor get through;
-everyone else gets a 403.
+everyone else gets a 403. Enroll developers (`anyray-connect --enroll` / `--sso`)
+before sending traffic.
 
 ## Upgrade
 

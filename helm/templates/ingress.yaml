@@ -45,12 +45,19 @@ spec:
                 name: gateway
                 port:
                   number: 8787
+          # /admin/* MUST go through the proxy, NOT straight to the gateway. The
+          # browser console authenticates with the `anyray_key` cookie, which only
+          # the proxy understands: it runs the auth_request gate and injects the
+          # admin key as a `Bearer` from that cookie. Routed to the gateway directly,
+          # the console's /admin/* calls (and the /admin/auth login probe) carry no
+          # Bearer the gateway accepts, so login 401s behind an ingress/ALB even
+          # though it works via `kubectl port-forward` to the proxy.
           - path: {{ default "/admin" $paths.admin }}
             pathType: Prefix
             backend:
               service:
-                name: gateway
+                name: {{ include "anyray.fullname" $ }}-proxy
                 port:
-                  number: 8787
+                  number: 3000
     {{- end }}
 {{- end }}

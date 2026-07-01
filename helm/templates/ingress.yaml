@@ -20,7 +20,7 @@ spec:
   rules:
     {{- $hosts := .Values.ingress.hosts }}
     {{- if not $hosts }}
-    {{- $hosts = list (dict "host" .Values.host "paths" (dict "console" "/" "gateway" "/v1" "admin" "/admin")) }}
+    {{- $hosts = list (dict "host" .Values.host "paths" (dict "console" "/" "gateway" "/v1" "connect" "/connect" "admin" "/admin")) }}
     {{- end }}
     {{- range $entry := $hosts }}
     {{- $paths := default dict $entry.paths }}
@@ -39,6 +39,22 @@ spec:
                 port:
                   number: 3000
           - path: {{ default "/v1" $paths.gateway }}
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8787
+          # /connect/* is the developer enrollment + policy lane the connect CLI
+          # uses (/connect/verify, /connect/policy, /connect/savings,
+          # /connect/fallback-config). It authenticates with the developer's OWN key
+          # as a Bearer — or is unauthenticated, for /connect/verify — and is served
+          # in-process by the gateway, so it must go STRAIGHT to the gateway like
+          # /v1, NOT through the proxy. Routed to the proxy it hits the console's
+          # admin-cookie auth gate + catch-all and 302s to /console/, which the CLI
+          # then can't parse ("the gateway returned a malformed response") — which
+          # breaks BOTH SSO and enrollment-link developer enrollment.
+          - path: {{ default "/connect" $paths.connect }}
             pathType: Prefix
             backend:
               service:

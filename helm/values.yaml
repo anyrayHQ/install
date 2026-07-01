@@ -210,6 +210,7 @@ ingress:
   #   paths:
   #     console: /
   #     gateway: /v1
+  #     connect: /connect
   #     admin: /admin
   # Example annotations for nginx ingress:
   #   kubernetes.io/ingress.class: nginx

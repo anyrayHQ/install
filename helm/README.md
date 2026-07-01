@@ -15,7 +15,64 @@ in-process — there is no separate observability backend to run.
 - A target namespace that already exists, if you install outside your current namespace
 - `setup.sh --k8s --connect <adt_token>` run locally to generate the Secret manifest
 
-## Install
+## Install from the OCI registry (recommended for ArgoCD / GitOps)
+
+The chart is published as an OCI artifact to the same public registry as the
+images — no git clone, no `setup.sh`:
+
+```bash
+helm install anyray oci://public.ecr.aws/h4e6s7a8/anyray \
+  --version <x.y.z> \
+  --namespace "$ANYRAY_NAMESPACE" \
+  -f my-values.yaml
+```
+
+Browse released versions with `helm show chart oci://public.ecr.aws/h4e6s7a8/anyray`.
+Pulls are anonymous — nothing to authenticate.
+
+### ArgoCD
+
+Point an Application straight at the OCI chart:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: anyray
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: public.ecr.aws/h4e6s7a8   # registry, no chart name
+    chart: anyray
+    targetRevision: 0.4.17             # a released chart version
+    helm:
+      valuesObject:
+        host: anyray.example.com
+        gateway:
+          publicUrl: https://anyray.example.com
+          consolePublicUrl: https://anyray.example.com
+        image:
+          tag: vX.Y.Z                  # pin images too — see note below
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: team-ai
+```
+
+The chart reads every credential from a Secret named `anyray-secrets` (see
+[Secrets](#secrets)). Manage it the GitOps way — External Secrets Operator,
+Sealed Secrets, or SOPS — or apply a plain manifest once. You do **not** need
+`setup.sh` for a GitOps install; it is only a local convenience that writes that
+Secret plus a starter values file, and it never runs inside your cluster. The two
+keys that must be present are `ANYRAY_DEPLOYMENT_TOKEN` (your `adt_…` connect
+token) and an `ANYRAY_PSEUDONYM_SALT` you generate once and keep in-cluster.
+
+> **Pin your image tag for reproducible syncs.** The chart defaults to
+> `image.tag: latest` (a moving channel). Under GitOps, set `image.tag` to a
+> released `vX.Y.Z` in your values so each sync deploys an exact, auditable build
+> rather than whatever `latest` resolves to at that moment.
+
+## Install from source (setup.sh)
 
 ```bash
 # 1. Choose the namespace (optional, but recommended)

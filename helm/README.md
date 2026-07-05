@@ -52,8 +52,7 @@ spec:
         gateway:
           publicUrl: https://anyray.example.com
           consolePublicUrl: https://anyray.example.com
-        image:
-          tag: vX.Y.Z                  # pin images too — see note below
+        # image.tag omitted → pinned to the chart's appVersion (see note below)
   destination:
     server: https://kubernetes.default.svc
     namespace: team-ai
@@ -67,10 +66,12 @@ Secret plus a starter values file, and it never runs inside your cluster. The tw
 keys that must be present are `ANYRAY_DEPLOYMENT_TOKEN` (your `adt_…` connect
 token) and an `ANYRAY_PSEUDONYM_SALT` you generate once and keep in-cluster.
 
-> **Pin your image tag for reproducible syncs.** The chart defaults to
-> `image.tag: latest` (a moving channel). Under GitOps, set `image.tag` to a
-> released `vX.Y.Z` in your values so each sync deploys an exact, auditable build
-> rather than whatever `latest` resolves to at that moment.
+> **Image tags are pinned by default.** Each chart version ships a fixed
+> `appVersion`, and images default to it — so a given `targetRevision` always
+> deploys the same, auditable build, exactly what you want under GitOps. To
+> test the newest build instead, set `image.tag: latest` (a moving channel) in
+> your values and pair it with `image.pullPolicy: Always`; leave it unset for
+> production.
 
 ## Install from source (setup.sh)
 
@@ -241,16 +242,17 @@ postgres:
       effect: NoSchedule
 ```
 
-All component images can be redirected to an internal registry:
+All component images can be redirected to an internal registry. Leave the app
+`tag` empty to keep the chart's pinned appVersion, or set a concrete `vX.Y.Z`:
 
 ```yaml
 images:
   gateway:
     repository: registry.example.com/anyray/gateway
-    tag: latest
+    tag: ""            # inherits the chart appVersion
   optimizer:
     repository: registry.example.com/anyray/optimizer
-    tag: latest
+    tag: ""
   postgres:
     repository: registry.example.com/postgres
     tag: "17"

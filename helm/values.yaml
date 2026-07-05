@@ -18,12 +18,17 @@ host: ""
 clusterDomain: cluster.local
 
 image:
-  tag: "latest"
-  # Always re-pull: the moving tag must not be served from a stale node cache.
-  pullPolicy: Always
+  # Empty → images pin to the chart's appVersion (the release this chart ships),
+  # so production deploys are reproducible and auditable. Set to "latest" (or any
+  # moving channel) for testing when you want the newest build on every pull —
+  # pair that with pullPolicy: Always so a moving tag is never served stale.
+  tag: ""
+  # Pinned, immutable tags don't need re-pulling; a cached layer is the same build.
+  pullPolicy: IfNotPresent
   pullSecrets: []
 
-# Per-component image repository overrides. Empty app tags inherit image.tag.
+# Per-component image repository overrides. Empty app tags inherit image.tag,
+# which in turn inherits the chart appVersion.
 images:
   gateway:
     repository: public.ecr.aws/h4e6s7a8/gateway

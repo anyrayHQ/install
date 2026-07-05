@@ -55,12 +55,18 @@ secretKeyRef:
 {{- end }}
 
 {{/*
-Image helper. App images inherit .Values.image.tag when their component tag is empty.
+Image helper. Tag resolution, most specific first:
+  images.<component>.tag  >  image.tag  >  .Chart.AppVersion
+So by default every app image is pinned to the chart's appVersion (the release
+this chart ships), giving reproducible, auditable deploys. Set image.tag (e.g.
+"latest") to ride a moving channel for testing, or a per-component tag to pin one
+image. appVersion is always set, so a bare (untagged) reference should not occur;
+the else branch is a defensive fallback.
 */}}
 {{- define "anyray.image" -}}
 {{- $image := index .context.Values.images .component | default dict -}}
 {{- $repository := required (printf "images.%s.repository is required" .component) $image.repository -}}
-{{- $tag := default .context.Values.image.tag $image.tag -}}
+{{- $tag := $image.tag | default .context.Values.image.tag | default .context.Chart.AppVersion -}}
 {{- if $tag -}}
 {{- printf "%s:%s" $repository $tag -}}
 {{- else -}}

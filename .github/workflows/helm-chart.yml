@@ -1,0 +1,67 @@
+name: Helm chart
+
+# Validates the Helm chart and enforces the production pinning invariant: each
+# chart version ships a fixed appVersion (helm/Chart.yaml) and images default to
+# it (helm/values.yaml image.tag is empty), so a given chart version always
+# deploys the same, auditable build — never the moving :latest tag. Also guards
+# the CI-generated appVersion bump PR opened by the monorepo prod promotion.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'helm/**'
+      - '.github/workflows/helm-chart.yml'
+  pull_request:
+    paths:
+      - 'helm/**'
+      - '.github/workflows/helm-chart.yml'
+  workflow_dispatch:
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+          token: ${{ github.token }}
+
+      - name: Lint
+        run: helm lint helm --set host=anyray.example.com
+
+      - name: appVersion must be a pinned vX.Y.Z (never a moving tag)
+        run: |
+          set -euo pipefail
+          app="$(sed -nE 's/^appVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' helm/Chart.yaml | head -1)"
+          echo "appVersion=$app"
+          if ! printf '%s' "$app" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error file=helm/Chart.yaml::appVersion must be a pinned vX.Y.Z — production must not ship a moving tag like 'latest' (got '$app')"
+            exit 1
+          fi
+          echo "APP_VERSION=$app" >> "$GITHUB_ENV"
+
+      - name: Default render pins every app image to appVersion
+        run: |
+          set -euo pipefail
+          render="$(helm template t helm --set host=anyray.example.com)"
+          fail=0
+          for c in gateway optimizer proxy; do
+            if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/h4e6s7a8/${c}:${APP_VERSION}"; then
+              echo "::error::default render does not pin ${c} to appVersion ${APP_VERSION}:"
+              printf '%s\n' "$render" | grep -E "image:.*/${c}:" || true
+              fail=1
+            fi
+          done
+          if printf '%s\n' "$render" | grep -Eq 'h4e6s7a8/(gateway|optimizer|proxy):latest'; then
+            echo "::error::default render uses a moving :latest tag — production images must be pinned"
+            fail=1
+          fi
+          [ "$fail" = 0 ]
+
+      - name: image.tag override still rides a moving channel (testing opt-in)
+        run: |
+          set -euo pipefail
+          render="$(helm template t helm --set host=anyray.example.com --set image.tag=latest)"
+          printf '%s\n' "$render" | grep -q "public.ecr.aws/h4e6s7a8/gateway:latest" \
+            || { echo "::error::image.tag override no longer pins :latest — the testing opt-in is broken"; exit 1; }

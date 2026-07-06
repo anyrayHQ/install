@@ -890,6 +890,11 @@ Resources:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
       DesiredCount: 1
+      # Same hardening the production stack runs: a deployment whose tasks keep
+      # failing rolls back automatically instead of hanging the service (and the
+      # CloudFormation update fails fast instead of waiting out the full timeout).
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
       TaskDefinition: !Ref OptimizerTask
       NetworkConfiguration:
         AwsvpcConfiguration:
@@ -906,6 +911,11 @@ Resources:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
       DesiredCount: 1
+      # Same hardening the production stack runs: a deployment whose tasks keep
+      # failing rolls back automatically instead of hanging the service (and the
+      # CloudFormation update fails fast instead of waiting out the full timeout).
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
       TaskDefinition: !Ref GatewayTask
       HealthCheckGracePeriodSeconds: 300
       NetworkConfiguration:
@@ -925,6 +935,11 @@ Resources:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
       DesiredCount: 1
+      # Same hardening the production stack runs: a deployment whose tasks keep
+      # failing rolls back automatically instead of hanging the service (and the
+      # CloudFormation update fails fast instead of waiting out the full timeout).
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
       TaskDefinition: !Ref ProxyTask
       HealthCheckGracePeriodSeconds: 120
       NetworkConfiguration:

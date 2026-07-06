@@ -566,10 +566,17 @@ Resources:
   # /__auth subrequest and surfaced as a bare nginx 500. Classic service
   # discovery creates records every consumer resolves — nginx (runtime DNS)
   # and the gateway's Node runtime (getaddrinfo) alike.
+  #
+  # The `-dns` suffix is load-bearing for UPDATES: stacks deployed before this
+  # fix have Service Connect-managed Cloud Map services already named
+  # `gateway`/`optimizer` in this namespace, and those are only deleted after
+  # the old ECS services wind down — long after CloudFormation creates these
+  # resources. Reusing the bare names makes a one-step stack update fail with
+  # "Service already exists" and roll back.
   GatewayDiscovery:
     Type: AWS::ServiceDiscovery::Service
     Properties:
-      Name: gateway
+      Name: gateway-dns
       NamespaceId: !GetAtt Namespace.Id
       DnsConfig:
         DnsRecords: [{ Type: A, TTL: 10 }]
@@ -579,7 +586,7 @@ Resources:
   OptimizerDiscovery:
     Type: AWS::ServiceDiscovery::Service
     Properties:
-      Name: optimizer
+      Name: optimizer-dns
       NamespaceId: !GetAtt Namespace.Id
       DnsConfig:
         DnsRecords: [{ Type: A, TTL: 10 }]
@@ -773,7 +780,7 @@ Resources:
           MountPoints:
             - { SourceVolume: data, ContainerPath: /data }
           Environment:
-            - { Name: ANYRAY_OPTIMIZER_URL, Value: 'http://optimizer.anyray.internal:8088' }
+            - { Name: ANYRAY_OPTIMIZER_URL, Value: 'http://optimizer-dns.anyray.internal:8088' }
             - { Name: ANYRAY_OPTIMIZER_TIMEOUT_MS, Value: !Ref OptimizerTimeoutMs }
             - { Name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS, Value: !Ref OptimizerVisionTimeoutMs }
             - { Name: ANYRAY_DEFAULT_MODEL, Value: !Ref DefaultModel }
@@ -848,7 +855,7 @@ Resources:
             # with a real DNS record — the Cloud Map A record registered by
             # GatewayDiscovery. The image default (`gateway`) only works where
             # the platform DNS resolves bare service names (Docker Compose).
-            - { Name: ANYRAY_GATEWAY_HOST, Value: gateway.anyray.internal }
+            - { Name: ANYRAY_GATEWAY_HOST, Value: gateway-dns.anyray.internal }
             # The baked nginx envsubst template needs updater status/token
             # placeholders set. QuickLaunch does not run the Docker/Watchtower
             # updater, so report it disabled.

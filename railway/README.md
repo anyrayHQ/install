@@ -64,8 +64,6 @@ resolves the template's public-domain references. `ANYRAY_TRUST_PROXY` and
 Optional hardening and traffic controls:
 
 ```bash
-ANYRAY_REQUIRE_CLIENT_KEYS=true
-ANYRAY_REQUIRE_VERIFIED_DEV=true
 ANYRAY_RATE_LIMIT_RPM=600
 ANYRAY_RATE_LIMIT_IP_RPM=1200
 ANYRAY_RATE_LIMIT_UNAUTH_RPM=60

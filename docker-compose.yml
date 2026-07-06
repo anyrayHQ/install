@@ -66,8 +66,6 @@ services:
       # var only if you need to (the per-file var wins).
       ANYRAY_DATA_DIR: /data
       # Optional hardening / features — set in .env to enable.
-      ANYRAY_REQUIRE_CLIENT_KEYS: ${ANYRAY_REQUIRE_CLIENT_KEYS:-}
-      ANYRAY_REQUIRE_VERIFIED_DEV: ${ANYRAY_REQUIRE_VERIFIED_DEV:-}
       ANYRAY_HSTS: ${ANYRAY_HSTS:-}
       ANYRAY_RATE_LIMIT_RPM: ${ANYRAY_RATE_LIMIT_RPM:-}
       ANYRAY_RATE_LIMIT_IP_RPM: ${ANYRAY_RATE_LIMIT_IP_RPM:-}

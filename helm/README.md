@@ -205,8 +205,6 @@ Gateway security and traffic controls are first-class Helm values:
 
 ```yaml
 gateway:
-  requireClientKeys: "true"
-  requireVerifiedDev: "true"
   hsts: "true"
   trustProxy: "true"
   rateLimitRpm: "600"

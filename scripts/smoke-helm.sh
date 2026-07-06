@@ -37,8 +37,24 @@ stop_forwards() {
   pkill -f "port-forward --namespace ${NS}" 2>/dev/null || true
 }
 
+dump_diagnostics() {
+  echo "== pods"; kubectl get pods -n "$NS" -o wide || true
+  echo "== events"; kubectl get events -n "$NS" --sort-by=.lastTimestamp | tail -40 || true
+  local pod
+  for pod in $(kubectl get pods -n "$NS" -o name); do
+    echo "== describe ${pod}"; kubectl describe -n "$NS" "$pod" | tail -25 || true
+    echo "== logs ${pod}"
+    kubectl logs -n "$NS" "$pod" --all-containers --tail=40 2>/dev/null || true
+  done
+}
+
 cleanup() {
+  local rc=$?
   stop_forwards
+  # Teardown destroys the evidence — dump cluster state FIRST on failure.
+  if [ "$rc" -ne 0 ]; then
+    echo "::group::diagnostics (exit ${rc})"; dump_diagnostics; echo "::endgroup::"
+  fi
   [ "${KEEP:-0}" = 1 ] && { echo "KEEP=1 — leaving release ${RELEASE} in ${NS}"; return 0; }
   helm uninstall "$RELEASE" -n "$NS" --wait --timeout 3m 2>/dev/null || true
   kubectl delete namespace "$NS" --ignore-not-found --timeout=2m || true
@@ -67,12 +83,20 @@ probe() {
     -l app.kubernetes.io/component=proxy -o jsonpath='{.items[0].metadata.name}')"
 
   # helm --wait returns as soon as the (loosely-gated) deployments count
-  # ready, often while images are still pulling — wait for real pod
-  # readiness first, best-effort (the probe loop below is authoritative).
-  kubectl wait --namespace "$NS" --for=condition=ready pod \
-    -l app.kubernetes.io/component=proxy --timeout=420s || true
-  kubectl wait --namespace "$NS" --for=condition=ready pod \
-    -l app.kubernetes.io/component=gateway --timeout=420s || true
+  # ready, often while images are still pulling — wait until the Services
+  # have READY endpoints (label-agnostic), best-effort: the probe loop
+  # below stays authoritative.
+  wait_endpoints() {
+    local svc="$1" i
+    for i in $(seq 1 96); do
+      [ -n "$(kubectl get endpoints -n "$NS" "$svc" \
+            -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)" ] && return 0
+      sleep 5
+    done
+    echo "::warning::service ${svc} has no ready endpoints after 8m"
+  }
+  wait_endpoints "$proxy_svc"
+  wait_endpoints gateway
 
   # Port-forwards for the probe round (the chart's Ingress needs a controller
   # kind doesn't run; the seams under test — proxy→gateway DNS, auth gate —

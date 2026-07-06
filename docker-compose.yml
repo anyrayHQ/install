@@ -122,6 +122,14 @@ services:
       # runtime config starts empty and is seeded from the image-baked
       # optimizer.config.json until the first admin edit writes here.
       ANYRAY_DATA_DIR: /data
+      # Durable CCR stash tier (same bundled Postgres as the gateway): stashed
+      # originals are persisted as AES-256-GCM ciphertext, so retrieval handles
+      # survive optimizer restarts/updates and semantic recall works. Degrades
+      # to in-memory-only when the key is absent or the content mode is off.
+      ANYRAY_SPEND_DB_URL: ${ANYRAY_SPEND_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
+      ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:-}
+      ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
+      ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
     volumes:
       - anyray_optimizer_data:/data
     healthcheck:

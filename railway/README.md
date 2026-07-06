@@ -61,11 +61,11 @@ After generating public domains, redeploy or restart the gateway so Railway
 resolves the template's public-domain references. `ANYRAY_TRUST_PROXY` and
 `ANYRAY_HSTS` are already set by the template.
 
-Optional hardening and traffic controls:
+`/v1/*` is always restricted to verified developers (a minted client key) —
+secure-by-default, no toggle; enroll developers before sending traffic. Optional
+traffic controls:
 
 ```bash
-ANYRAY_REQUIRE_CLIENT_KEYS=true
-ANYRAY_REQUIRE_VERIFIED_DEV=true
 ANYRAY_RATE_LIMIT_RPM=600
 ANYRAY_RATE_LIMIT_IP_RPM=1200
 ANYRAY_RATE_LIMIT_UNAUTH_RPM=60

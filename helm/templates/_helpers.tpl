@@ -222,3 +222,27 @@ k8s only resolves $(VAR) against vars declared earlier in the env list.
   value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
 {{- end }}
 {{- end }}
+
+{{/*
+Optimizer durable-stash env: ANYRAY_SPEND_DB_URL only (same three source
+branches as anyray.observabilityDbEnv). Deliberately NOT the paired helper —
+setting ANYRAY_OBSERVABILITY_DB_URL on the optimizer would half-enable its
+BYO /v1/record path, which full-stack installs don't use.
+*/}}
+{{- define "anyray.spendDbEnv" -}}
+{{- include "anyray.requirePostgres" . }}
+{{- if .Values.postgres.external.databaseUrlSecretKeyRef.name }}
+- name: ANYRAY_SPEND_DB_URL
+  valueFrom:
+    {{- include "anyray.externalSecretRef" .Values.postgres.external.databaseUrlSecretKeyRef | nindent 4 }}
+{{- else if .Values.postgres.external.databaseUrl }}
+- name: ANYRAY_SPEND_DB_URL
+  value: {{ .Values.postgres.external.databaseUrl | quote }}
+{{- else }}
+- name: POSTGRES_PASSWORD
+  valueFrom:
+    {{- include "anyray.secretRef" (dict "key" "POSTGRES_PASSWORD" "context" .) | nindent 4 }}
+- name: ANYRAY_SPEND_DB_URL
+  value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
+{{- end }}
+{{- end }}

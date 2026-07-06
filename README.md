@@ -142,6 +142,26 @@ docker compose logs <svc>   # diagnose a failing service
   the billing kill-switch can't be bypassed by re-pointing the URL. Metering reports
   are content-free rollups; the pseudonym salt never leaves the machine.
 
+## Testing policy — every artifact gets a LIVE lane
+
+Static validation (`cfn-lint`, `helm template`, `jq`, `docker compose config`) proves an
+artifact parses — it cannot prove it behaves. The July 2026 console-500 shipped green through
+every static check and was only observable on a real deployment. Rule: **an install artifact
+is not "supported" until CI deploys it for real, probes the golden paths (console sign-in,
+authenticated console, `/admin/health` through the proxy, `scripts/verify-deploy.sh`), tests
+the UPDATE path from the currently published version, and tears it down.**
+
+| Artifact | Static check | Live lane |
+| --- | --- | --- |
+| `docker-compose.yml` | `validate-artifacts` | `smoke.yml` ✓ |
+| `docker-compose.attach.yml` | `validate-artifacts` | `smoke-attach.yml` ✓ |
+| `aws/anyray-quicklaunch.template.yaml` | `validate-artifacts` (cfn-lint) | `smoke-aws-live.yml` ✓ (fresh + customer-upgrade lanes, weekly + on PR) |
+| `helm/` | `validate-artifacts` (render) | ✗ TODO — kind-based lane (#126) |
+| `railway/railway.template.json` | `validate-artifacts` (jq) | ✗ TODO (#127) |
+| `gcp/` GCE one-click | — | ✗ TODO (#128) |
+
+Adding or materially changing an artifact? Add/extend its live lane in the same PR.
+
 ## Install with an AI agent
 
 Paste [AGENT.md](./AGENT.md) into Claude Code / Codex on a machine with your infra

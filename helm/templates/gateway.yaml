@@ -103,7 +103,16 @@ spec:
             - name: TRUSTED_CUSTOM_HOSTS
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.gateway.publicUrl }}
+            {{- /* The gateway self-reports this URL to Anyray Cloud on each metering
+                   beat; it's what enrollment links hand a developer's tools. Default it
+                   to https://<host> (the Ingress endpoint) when publicUrl isn't set, so a
+                   plain `--host` install doesn't leave enrollment links with no gateway.
+                   NodePort / non-TLS installs override via gateway.publicUrl. */}}
+            {{- $gatewayPublicUrl := .Values.gateway.publicUrl }}
+            {{- if and (not $gatewayPublicUrl) .Values.host }}
+            {{- $gatewayPublicUrl = printf "https://%s" .Values.host }}
+            {{- end }}
+            {{- with $gatewayPublicUrl }}
             - name: ANYRAY_GATEWAY_PUBLIC_URL
               value: {{ . | quote }}
             {{- end }}

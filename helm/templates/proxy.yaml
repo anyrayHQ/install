@@ -6,7 +6,9 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: proxy
 spec:
+  {{- if not .Values.proxy.autoscaling.enabled }}
   replicas: {{ .Values.proxy.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" "proxy" "context" .) | nindent 6 }}

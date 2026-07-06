@@ -30,6 +30,13 @@ jobs:
             sleep 5
           done
           echo "gateway never became healthy"; docker compose ps; docker compose logs gateway; exit 1
+      - name: Wait for console
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fs http://localhost:3000/anyray-login >/dev/null 2>&1; then exit 0; fi
+            sleep 5
+          done
+          echo "console never became healthy"; docker compose ps; docker compose logs proxy; exit 1
       - name: Probe surfaces
         run: |
           set -e

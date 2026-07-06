@@ -150,12 +150,15 @@ services:
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     # The proxy image bakes nginx.conf, which carries the gated updater trigger
-    # route (/admin/update/run). It is substituted into it at start (envsubst):
-    # ANYRAY_UPDATER_TOKEN is injected as the Watchtower bearer server-side (never
-    # reaches the browser). One-click is always on (the console always shows the
-    # button); the token defaults to the admin key, so the trigger the proxy
-    # injects matches Watchtower's expected token with no extra setup.
+    # route (/admin/update/run) and read-only updater status
+    # (/admin/update/config). These values are substituted into it at start
+    # (envsubst). One-click is on for a normal `docker compose up -d`; the token
+    # defaults to the admin key, so the trigger the proxy injects matches
+    # Watchtower's expected token with no extra setup.
     environment:
+      ANYRAY_UPDATER_ENABLED: ${ANYRAY_UPDATER_ENABLED:-true}
+      ANYRAY_UPDATER_PERIODIC_POLLS: ${ANYRAY_UPDATER_PERIODIC_POLLS:-false}
+      ANYRAY_UPDATER_POLL_INTERVAL: ${ANYRAY_UPDATER_POLL_INTERVAL:-0}
       ANYRAY_UPDATER_TOKEN: ${ANYRAY_UPDATER_TOKEN:-${ANYRAY_ADMIN_TOKEN}}
     # gateway healthy first: nginx auth_request hits gateway:8787 on every
     # console load — starting earlier just serves 502s.

@@ -22,14 +22,18 @@ spec:
           image: {{ include "anyray.image" (dict "component" "proxy" "context" .) }}
           imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "proxy" "context" .) }}
           {{- include "anyray.containerSecurityContext" . | nindent 10 }}
-          # The proxy image bakes an nginx template whose ANYRAY_UPDATER_TOKEN
-          # placeholder is envsubst-substituted at start; if it is unset nginx
-          # keeps the literal "$..." and aborts with `unknown variable`. The
-          # one-click self-updater is Docker/Watchtower-only (it drives the host
-          # docker socket) and never runs under Kubernetes (upgrades go through
-          # `helm upgrade`), but the var must still be present so the baked
-          # template renders and nginx can start.
+          # The proxy image bakes nginx envsubst placeholders for the
+          # Docker/Watchtower updater route and status endpoint. The updater is
+          # not wired under Kubernetes (upgrades go through `helm upgrade`), but
+          # these vars must still be present so the baked template renders and
+          # nginx can start.
           env:
+            - name: ANYRAY_UPDATER_ENABLED
+              value: "false"
+            - name: ANYRAY_UPDATER_PERIODIC_POLLS
+              value: "false"
+            - name: ANYRAY_UPDATER_POLL_INTERVAL
+              value: "0"
             - name: ANYRAY_UPDATER_TOKEN
               value: ""
             # Point nginx at the gateway/optimizer Services by FQDN. The proxy

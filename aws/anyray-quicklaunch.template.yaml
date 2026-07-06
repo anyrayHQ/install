@@ -877,7 +877,13 @@ Resources:
               awslogs-stream-prefix: proxy
 
   # ---- Services (Cloud Map DNS wires *.anyray.internal hostnames) --------------
-  OptimizerService:
+  # The V2 logical ids are load-bearing for UPDATES: they force CloudFormation
+  # to REPLACE the services (create new, delete old) instead of an in-place
+  # Service Connect -> ServiceRegistries transition, which trips ECS deployment
+  # hooks on stacks deployed before the DNS fix. Replacement is also what lets
+  # the old Service Connect-managed Cloud Map services be torn down cleanly
+  # (ECS deletes them with the old services).
+  OptimizerServiceV2:
     Type: AWS::ECS::Service
     DependsOn: [EfsMountA, EfsMountB]
     Properties:
@@ -893,7 +899,7 @@ Resources:
       ServiceRegistries:
         - RegistryArn: !GetAtt OptimizerDiscovery.Arn
 
-  GatewayService:
+  GatewayServiceV2:
     Type: AWS::ECS::Service
     DependsOn: [GatewayListener, EfsMountA, EfsMountB]
     Properties:
@@ -912,7 +918,7 @@ Resources:
       ServiceRegistries:
         - RegistryArn: !GetAtt GatewayDiscovery.Arn
 
-  ProxyService:
+  ProxyServiceV2:
     Type: AWS::ECS::Service
     DependsOn: [ConsoleListener]
     Properties:

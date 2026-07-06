@@ -31,8 +31,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${HERE}/.." && pwd)"
 PF_PIDS=()
 
-cleanup() {
+stop_forwards() {
   for pid in "${PF_PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+  PF_PIDS=()
+  pkill -f "port-forward --namespace ${NS}" 2>/dev/null || true
+}
+
+cleanup() {
+  stop_forwards
   [ "${KEEP:-0}" = 1 ] && { echo "KEEP=1 — leaving release ${RELEASE} in ${NS}"; return 0; }
   helm uninstall "$RELEASE" -n "$NS" --wait --timeout 3m 2>/dev/null || true
   kubectl delete namespace "$NS" --ignore-not-found --timeout=2m || true
@@ -60,18 +66,36 @@ probe() {
   proxy_svc="$(kubectl get svc -n "$NS" \
     -l app.kubernetes.io/component=proxy -o jsonpath='{.items[0].metadata.name}')"
 
+  # helm --wait returns as soon as the (loosely-gated) deployments count
+  # ready, often while images are still pulling — wait for real pod
+  # readiness first, best-effort (the probe loop below is authoritative).
+  kubectl wait --namespace "$NS" --for=condition=ready pod \
+    -l app.kubernetes.io/component=proxy --timeout=420s || true
+  kubectl wait --namespace "$NS" --for=condition=ready pod \
+    -l app.kubernetes.io/component=gateway --timeout=420s || true
+
   # Port-forwards for the probe round (the chart's Ingress needs a controller
   # kind doesn't run; the seams under test — proxy→gateway DNS, auth gate —
-  # sit behind the Services, which port-forward exercises).
-  kubectl port-forward -n "$NS" "svc/${proxy_svc}" 13000:80 >/dev/null 2>&1 &
+  # sit behind the Services, which port-forward exercises). kubectl
+  # port-forward exits whenever its pod restarts (gateway boots against
+  # postgres, images still pulling), so each forward runs in a respawn loop.
+  ( while true; do
+      kubectl port-forward --namespace "$NS" "svc/${proxy_svc}" 13000:80 \
+        >/dev/null 2>&1
+      sleep 1
+    done ) &
   PF_PIDS+=($!)
-  kubectl port-forward -n "$NS" svc/gateway 18787:8787 >/dev/null 2>&1 &
+  ( while true; do
+      kubectl port-forward --namespace "$NS" svc/gateway 18787:8787 \
+        >/dev/null 2>&1
+      sleep 1
+    done ) &
   PF_PIDS+=($!)
   sleep 3
 
   echo "→ [${round}] probing console via ${proxy_svc}"
   local i code=""
-  for i in $(seq 1 60); do
+  for i in $(seq 1 120); do
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
       http://127.0.0.1:13000/console/ || true)"
     [ "$code" = 200 ] && break
@@ -96,8 +120,7 @@ probe() {
 
   "${HERE}/verify-deploy.sh" http://127.0.0.1:18787 "$token"
 
-  for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
-  PF_PIDS=()
+  stop_forwards
   echo "✓ [${round}] console + gateway healthy"
 }
 

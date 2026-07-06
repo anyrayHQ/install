@@ -63,7 +63,7 @@ Docker Compose (above) is the default. Each target has its own recipe:
 
 | Target | Command / artifact | Docs |
 | --- | --- | --- |
-| **Kubernetes (Helm)** | `./setup.sh --k8s --connect adt_XXXX --host <host> --namespace <ns>` → apply Secret + `helm install` | [`helm/README.md`](./helm/README.md) |
+| **Kubernetes (Helm / ArgoCD)** | GitOps-native OCI chart: `oci://public.ecr.aws/h4e6s7a8/anyray` (or `./setup.sh --k8s …` + `helm install` from source) | [`helm/README.md`](./helm/README.md) |
 | **AWS (CloudFormation)** | One-click ECS/Fargate + RDS + EFS stack; secrets via Secrets Manager | [`aws/`](./aws/) |
 | **Google Cloud (GKE Autopilot)** | One-click Cloud Shell deploy of the bundled Helm chart | [`gcp/README.md`](./gcp/README.md) |
 | **Google Cloud (Compute Engine VM)** | One-click Cloud Shell deploy; docker compose on one VM (no Kubernetes, no managed DB) | [`gcp/gce/README.md`](./gcp/gce/README.md) |

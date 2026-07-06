@@ -155,8 +155,12 @@ write_values_stub() {
     fi
     echo "host: \"${HOST}\""
     echo ""
-    echo "image:"
-    echo "  tag: \"latest\""
+    echo "# Image tag is pinned to this chart version's appVersion by default"
+    echo "# (recommended for production — every deploy is a fixed, auditable build)."
+    echo "# To test the newest build instead, uncomment and pair with pullPolicy: Always:"
+    echo "# image:"
+    echo "#   tag: latest"
+    echo "#   pullPolicy: Always"
     if [ -n "$CONNECT_TOKEN" ]; then
       echo ""
       echo "# Anyray Cloud metering — deployment token + pseudonym salt live in anyray-secrets.yaml."

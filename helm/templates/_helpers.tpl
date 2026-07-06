@@ -55,12 +55,18 @@ secretKeyRef:
 {{- end }}
 
 {{/*
-Image helper. App images inherit .Values.image.tag when their component tag is empty.
+Image helper. Tag resolution, most specific first:
+  images.<component>.tag  >  image.tag  >  .Chart.AppVersion
+So by default every app image is pinned to the chart's appVersion (the release
+this chart ships), giving reproducible, auditable deploys. Set image.tag (e.g.
+"latest") to ride a moving channel for testing, or a per-component tag to pin one
+image. appVersion is always set, so a bare (untagged) reference should not occur;
+the else branch is a defensive fallback.
 */}}
 {{- define "anyray.image" -}}
 {{- $image := index .context.Values.images .component | default dict -}}
 {{- $repository := required (printf "images.%s.repository is required" .component) $image.repository -}}
-{{- $tag := default .context.Values.image.tag $image.tag -}}
+{{- $tag := $image.tag | default .context.Values.image.tag | default .context.Chart.AppVersion -}}
 {{- if $tag -}}
 {{- printf "%s:%s" $repository $tag -}}
 {{- else -}}
@@ -218,6 +224,30 @@ k8s only resolves $(VAR) against vars declared earlier in the env list.
     {{- include "anyray.secretRef" (dict "key" "POSTGRES_PASSWORD" "context" .) | nindent 4 }}
 - name: ANYRAY_OBSERVABILITY_DB_URL
   value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
+- name: ANYRAY_SPEND_DB_URL
+  value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
+{{- end }}
+{{- end }}
+
+{{/*
+Optimizer durable-stash env: ANYRAY_SPEND_DB_URL only (same three source
+branches as anyray.observabilityDbEnv). Deliberately NOT the paired helper —
+setting ANYRAY_OBSERVABILITY_DB_URL on the optimizer would half-enable its
+BYO /v1/record path, which full-stack installs don't use.
+*/}}
+{{- define "anyray.spendDbEnv" -}}
+{{- include "anyray.requirePostgres" . }}
+{{- if .Values.postgres.external.databaseUrlSecretKeyRef.name }}
+- name: ANYRAY_SPEND_DB_URL
+  valueFrom:
+    {{- include "anyray.externalSecretRef" .Values.postgres.external.databaseUrlSecretKeyRef | nindent 4 }}
+{{- else if .Values.postgres.external.databaseUrl }}
+- name: ANYRAY_SPEND_DB_URL
+  value: {{ .Values.postgres.external.databaseUrl | quote }}
+{{- else }}
+- name: POSTGRES_PASSWORD
+  valueFrom:
+    {{- include "anyray.secretRef" (dict "key" "POSTGRES_PASSWORD" "context" .) | nindent 4 }}
 - name: ANYRAY_SPEND_DB_URL
   value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
 {{- end }}

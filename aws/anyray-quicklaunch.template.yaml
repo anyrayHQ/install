@@ -584,9 +584,16 @@ Resources:
           Environment:
             - { Name: PORT, Value: '8088' }
             - { Name: ANYRAY_DATA_DIR, Value: /data }
+            - { Name: ANYRAY_CONTENT_MODE, Value: !Ref ContentMode }
+            - { Name: ANYRAY_ALLOW_PLAINTEXT, Value: !Ref AllowPlaintext }
           Secrets:
             - { Name: ANYRAY_OPTIMIZER_TOKEN, ValueFrom: !GetAtt AppSecrets.OptimizerTokenArn }
             - { Name: ANYRAY_ADMIN_TOKEN, ValueFrom: !GetAtt AppSecrets.AdminTokenArn }
+            # Durable CCR stash tier (same RDS the gateway uses): stashed
+            # originals persist as ciphertext, so retrieval handles survive task
+            # restarts and resolve from any replica if DesiredCount is raised.
+            - { Name: ANYRAY_SPEND_DB_URL, ValueFrom: !GetAtt DbUrlSecret.DbUrlArn }
+            - { Name: ANYRAY_CONTENT_KEY, ValueFrom: !GetAtt AppSecrets.ContentKeyArn }
           HealthCheck:
             Command: [CMD-SHELL, 'wget -qO- http://localhost:8088/health || exit 1']
             Interval: 10

@@ -27,23 +27,23 @@ console — no separate observability datastores are needed.
 
 ## Connect to Anyray Portal
 
-The template ships with usage metering **off**, so the stack deploys and runs
-unmetered. To connect it to the Portal (required for usage metering), add two
-**new** variables to the `gateway` service — the template does not pre-create
-them, so add them, don't edit existing ones. Get your `<adt_token>` (`adt_…`) at
-<https://app.anyray.ai> → Deployments → Connect a deployment.
+The template ships with usage metering **on** — every Anyray deployment connects
+to the Portal for metering (see the main README). The template pre-creates
+`ANYRAY_METERING_ENABLED=true` and an auto-generated `ANYRAY_PSEUDONYM_SALT`, and
+leaves `ANYRAY_DEPLOYMENT_TOKEN` **empty for you to fill** — so you only supply
+one value. Get your `<adt_token>` (`adt_…`) at <https://app.anyray.ai> →
+Deployments → Connect a deployment, and set it on the `gateway` service:
 
-| Service   | Variable                  | Value         | Add as       |
-|-----------|---------------------------|---------------|--------------|
-| `gateway` | `ANYRAY_METERING_ENABLED` | `true`        | New variable |
-| `gateway` | `ANYRAY_DEPLOYMENT_TOKEN` | `<adt_token>` | New variable |
+| Service   | Variable                  | Value         | Note                        |
+|-----------|---------------------------|---------------|-----------------------------|
+| `gateway` | `ANYRAY_DEPLOYMENT_TOKEN` | `<adt_token>` | Pre-created empty — fill it  |
 
-> **Add both together.** `ANYRAY_METERING_ENABLED=true` switches the gateway into
-> entitlement-enforced mode — it then expects a valid Portal connection. Always
-> add it alongside a working `ANYRAY_DEPLOYMENT_TOKEN`. If metering is enabled
-> without a valid token, the gateway serves normally for a short grace period,
-> then returns `402` on `/v1/*` until it connects. To return to unmetered, remove
-> `ANYRAY_METERING_ENABLED` (or set it to `false`).
+> **Set the token before the grace window closes.** With metering on, the gateway
+> serves for a short first-boot grace period, then returns `402` on `/v1/*` until
+> it connects. `ANYRAY_METERING_ENABLED` is already `true` and
+> `ANYRAY_PSEUDONYM_SALT` is auto-generated — you only paste the token. To run
+> unmetered for local evaluation only, set `ANYRAY_METERING_ENABLED=false` (not
+> for production — every deployment is expected to meter).
 
 Once the gateway redeploys and phones home (~10s), the deployment flips to
 **Connected** at <https://app.anyray.ai>.

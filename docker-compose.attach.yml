@@ -47,6 +47,9 @@ services:
       # an Anyray-gateway deployment, or every call would be recorded twice. A
       # missing content key degrades persistence to 'off'.
       ANYRAY_OBSERVABILITY_DB_URL: ${ANYRAY_OBSERVABILITY_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
+      # Durable CCR stash tier (same DB): stashed originals persist as
+      # ciphertext, so retrieval handles survive optimizer restarts.
+      ANYRAY_SPEND_DB_URL: ${ANYRAY_SPEND_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:-}
       ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}

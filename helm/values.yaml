@@ -112,6 +112,10 @@ gateway:
   upstreamUrl: ""
   customHostAllowlist: ""
   trustedCustomHosts: ""
+  # Public URL the gateway advertises to Anyray Cloud (what enrollment links point
+  # developer tools at). Leave blank on an Ingress install and it defaults to
+  # https://<host>; set it explicitly for NodePort / non-TLS (e.g.
+  # http://gw.example.com:30787) so enrollment links resolve.
   publicUrl: ""
   consolePublicUrl: ""
   # Note: /v1/* is always restricted to verified developers (a minted client key),

@@ -167,6 +167,15 @@ write_values_stub() {
       echo "gateway:"
       echo "  metering:"
       echo "    enabled: true"
+      # publicUrl is what the gateway advertises to Anyray Cloud — enrollment
+      # links hand it to developer tools. The chart defaults it to https://<host>
+      # (Ingress); only a NodePort/IP host needs an explicit non-TLS override.
+      case "$HOST" in
+        *[!0-9.]*)  # hostname → Ingress; chart's https://<host> default is right
+          echo "  # publicUrl: \"https://${HOST}\"  # default; override for non-TLS ingress" ;;
+        *)          # raw IP → NodePort dev; https://<ip> would be wrong, so set it
+          echo "  publicUrl: \"http://${HOST}:30787\"  # NodePort dev (set the gateway NodePort to match)" ;;
+      esac
     fi
   } > my-values.yaml
 }

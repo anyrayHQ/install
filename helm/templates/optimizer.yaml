@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/component: optimizer
 spec:
   {{- if gt (int .Values.optimizer.replicas) 1 }}
-  {{- if eq (lower (toString .Values.gateway.contentMode)) "off" }}
+  {{- if eq (toString .Values.gateway.contentMode) "off" }}
   {{- fail "optimizer.replicas > 1 needs gateway.contentMode != off: the durable CCR stash is disabled when content mode is off, so retrieval handles won't resolve across replicas" }}
   {{- end }}
   {{- end }}

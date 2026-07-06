@@ -6,15 +6,21 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: optimizer
 spec:
+  {{- if .Values.optimizer.autoscaling.enabled }}
+  {{- if eq (toString .Values.gateway.contentMode) "off" }}
+  {{- fail "optimizer.autoscaling.enabled needs gateway.contentMode != off: the durable CCR stash is disabled when content mode is off, so retrieval handles won't resolve across replicas" }}
+  {{- end }}
+  {{- else }}
   {{- if gt (int .Values.optimizer.replicas) 1 }}
   {{- if eq (toString .Values.gateway.contentMode) "off" }}
   {{- fail "optimizer.replicas > 1 needs gateway.contentMode != off: the durable CCR stash is disabled when content mode is off, so retrieval handles won't resolve across replicas" }}
   {{- end }}
   {{- end }}
   replicas: {{ .Values.optimizer.replicas }}
+  {{- end }}
   {{- if .Values.optimizer.persistence.enabled }}
-  {{- if gt (int .Values.optimizer.replicas) 1 }}
-  {{- fail "optimizer.replicas > 1 needs optimizer.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
+  {{- if or .Values.optimizer.autoscaling.enabled (gt (int .Values.optimizer.replicas) 1) }}
+  {{- fail "optimizer.replicas > 1 or optimizer.autoscaling.enabled needs optimizer.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
   {{- end }}
   # Recreate: the RWO volume must detach before the replacement pod can mount it
   strategy:

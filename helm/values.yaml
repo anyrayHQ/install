@@ -82,6 +82,13 @@ priorityClassName: ""
 # Gateway
 gateway:
   replicas: 1
+  # Autoscaling needs gateway.persistence.enabled=false because the bundled data
+  # PVC is ReadWriteOnce. Use an external/shared state backend before enabling.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
   service:
     type: ClusterIP
     # Set for NodePort installs, for example: 30787
@@ -90,11 +97,11 @@ gateway:
     loadBalancerSourceRanges: []
   resources:
     requests:
-      cpu: "100m"
-      memory: "256Mi"
-    limits:
-      cpu: "500m"
+      cpu: "250m"
       memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
   # Content privacy: encrypted | off
   # Never set to plaintext in production.
   contentMode: encrypted
@@ -154,9 +161,17 @@ gateway:
 
 # Optimizer
 optimizer:
-  # replicas > 1 needs gateway.contentMode != off AND a non-empty ANYRAY_CONTENT_KEY, else the
-  # durable CCR stash degrades to per-pod in-memory (cross-replica retrieval breaks). Only off is render-guarded.
+  # replicas > 1 or autoscaling needs gateway.contentMode != off AND a non-empty
+  # ANYRAY_CONTENT_KEY, else the durable CCR stash degrades to per-pod in-memory
+  # (cross-replica retrieval breaks). Only off is render-guarded.
   replicas: 1
+  # Autoscaling also needs optimizer.persistence.enabled=false because the
+  # bundled data PVC is ReadWriteOnce.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
   # Persist /data (optimizer config + audit log) across pod restarts.
   persistence:
     enabled: true
@@ -164,16 +179,21 @@ optimizer:
     storageClass: ""
   resources:
     requests:
-      cpu: "50m"
-      memory: "128Mi"
-    limits:
       cpu: "250m"
-      memory: "256Mi"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
   extraEnv: []
 
 # Proxy (nginx reverse proxy / console)
 proxy:
-  replicas: 1
+  replicas: 2
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
   service:
     type: ClusterIP
     # Set for NodePort installs, for example: 30000
@@ -182,11 +202,11 @@ proxy:
     loadBalancerSourceRanges: []
   resources:
     requests:
-      cpu: "25m"
-      memory: "64Mi"
-    limits:
       cpu: "100m"
       memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
   extraEnv: []
 
 # Postgres — the Anyray spend + trace store. The gateway persists content-free

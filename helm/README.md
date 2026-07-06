@@ -278,6 +278,40 @@ gateway:
 Use `gateway.extraEnv`, `optimizer.extraEnv`, or `proxy.extraEnv` for advanced
 environment variables not modeled directly.
 
+## Scaling
+
+The proxy is stateless and defaults to two replicas. Enable its HPA when console
+traffic needs to scale with cluster load:
+
+```yaml
+proxy:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+```
+
+Gateway and optimizer HPAs are also available, but the bundled data PVCs are
+`ReadWriteOnce`, so autoscaling those components requires disabling their bundled
+persistence and providing an external/shared state plan for production:
+
+```yaml
+gateway:
+  persistence:
+    enabled: false
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+optimizer:
+  persistence:
+    enabled: false
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+```
+
 ## External Postgres
 
 The chart bundles a single-replica Postgres StatefulSet for the gateway's trace +

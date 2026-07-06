@@ -6,9 +6,15 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
 spec:
-  replicas: {{ .Values.gateway.replicas }}
+  {{- if .Values.gateway.autoscaling.enabled }}
   {{- if .Values.gateway.persistence.enabled }}
-  {{- if gt (int .Values.gateway.replicas) 1 }}
+  {{- fail "gateway.autoscaling.enabled needs gateway.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
+  {{- end }}
+  {{- else }}
+  replicas: {{ .Values.gateway.replicas }}
+  {{- end }}
+  {{- if .Values.gateway.persistence.enabled }}
+  {{- if and (not .Values.gateway.autoscaling.enabled) (gt (int .Values.gateway.replicas) 1) }}
   {{- fail "gateway.replicas > 1 needs gateway.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
   {{- end }}
   # Recreate: the RWO volume must detach before the replacement pod can mount it

@@ -707,7 +707,7 @@ Resources:
             - { Name: ANYRAY_SPEND_DB_URL, ValueFrom: !GetAtt DbUrlSecret.DbUrlArn }
             - { Name: ANYRAY_CONTENT_KEY, ValueFrom: !GetAtt AppSecrets.ContentKeyArn }
           HealthCheck:
-            Command: [CMD-SHELL, 'wget -qO- http://localhost:8088/health || exit 1']
+            Command: [CMD-SHELL, 'node -e "fetch(''http://localhost:8088/health'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"']
             Interval: 10
             Timeout: 5
             Retries: 10
@@ -785,7 +785,7 @@ Resources:
             - { Name: ANYRAY_PSEUDONYM_SALT, ValueFrom: !GetAtt AppSecrets.SaltArn }
             - { Name: ANYRAY_DEPLOYMENT_TOKEN, ValueFrom: !Ref DeploymentTokenSecret }
           HealthCheck:
-            Command: [CMD-SHELL, 'wget -qO- http://localhost:8787/ || exit 1']
+            Command: [CMD-SHELL, 'node -e "fetch(''http://localhost:8787/'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"']
             Interval: 10
             Timeout: 5
             Retries: 10

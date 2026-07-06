@@ -1,0 +1,73 @@
+name: Publish quicklaunch template
+
+# Keeps the served one-click template in sync with the repo. Nothing else
+# uploads it, so without this a merged template change never reaches customers
+# until someone remembers to `aws s3 cp` it by hand.
+#
+# Auth: GitHub OIDC -> a dedicated least-privilege role in the account that owns
+# the bucket (s3:PutObject on the one template key only). The role ARN is a repo
+# variable (AWS_QUICKLAUNCH_PUBLISH_ROLE_ARN) so the account id stays out of this
+# public workflow. The trust policy is scoped to this repo's `main` ref, so fork
+# PRs cannot assume it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - aws/anyray-quicklaunch.template.yaml
+      - .github/workflows/publish-quicklaunch.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-quicklaunch
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Validate + publish to S3
+    runs-on: ubuntu-latest
+    # Skip when the publisher role isn't configured (forks) instead of failing.
+    if: vars.AWS_QUICKLAUNCH_PUBLISH_ROLE_ARN != ''
+    permissions:
+      id-token: write # assume the OIDC publisher role
+      contents: read
+    env:
+      TEMPLATE: aws/anyray-quicklaunch.template.yaml
+      BUCKET: anyray-quicklaunch
+      KEY: anyray-quicklaunch.template.yaml
+      URL: https://anyray-quicklaunch.s3.us-east-1.amazonaws.com/anyray-quicklaunch.template.yaml
+    steps:
+      - uses: actions/checkout@v4
+
+      # Never publish a template that would break the one-click deploy. cfn-lint
+      # expands the AWS::LanguageExtensions transform, so it catches errors that
+      # `aws cloudformation validate-template` misses.
+      - name: Validate template (cfn-lint)
+        run: |
+          python3 -m pip install --quiet cfn-lint
+          cfn-lint "$TEMPLATE"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_QUICKLAUNCH_PUBLISH_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # Bucket has ACLs disabled (BucketOwnerEnforced); public read is via bucket
+      # policy, so upload with no --acl (a public-read ACL would be rejected).
+      - name: Publish template to S3
+        run: aws s3 cp "$TEMPLATE" "s3://$BUCKET/$KEY" --content-type text/yaml
+
+      # Confirm the served object is publicly reachable and byte-identical.
+      - name: Verify served copy
+        run: |
+          sleep 3
+          curl -fsS -o served.yaml -w 'http=%{http_code}\n' "$URL"
+          if ! cmp -s "$TEMPLATE" served.yaml; then
+            echo "::error::Served template does not match the published file"
+            exit 1
+          fi
+          echo "Published and verified: $URL"

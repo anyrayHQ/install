@@ -19,7 +19,7 @@ Metadata:
       - Label: { default: Ingress / TLS }
         Parameters: [CertificateArn, GatewayPublicUrl, ConsolePublicUrl]
       - Label: { default: Anyray Cloud (metering) }
-        Parameters: [DeploymentToken, SeatExclude]
+        Parameters: [DeploymentToken, SeatExclude, MeteringIntervalMs, EntitlementGraceMs]
       - Label: { default: Content privacy }
         Parameters: [ContentMode, AllowPlaintext]
       - Label: { default: Gateway hardening }
@@ -30,7 +30,11 @@ Metadata:
             RateLimitIpRpm,
             RateLimitUnauthRpm,
             MaxConcurrentRequests,
+            AuthFailLimit,
             MaxBodyBytes,
+            CustomHostAllowlist,
+            TrustedCustomHosts,
+            UpstreamUrl,
           ]
       - Label: { default: Optimizer }
         Parameters: [OptimizerTimeoutMs, OptimizerVisionTimeoutMs]
@@ -102,6 +106,18 @@ Parameters:
       Optional comma-separated globs of user ids to exclude from the billed
       seat count (CI bots, service accounts), e.g. "bot-*,ci-*". Empty bills
       every active user.
+  MeteringIntervalMs:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: Optional metering rollup upload interval in milliseconds (empty = gateway default).
+  EntitlementGraceMs:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: >-
+      Optional grace window in milliseconds the gateway keeps serving after the
+      entitlement lease expires (empty = gateway default).
   ContentMode:
     Type: String
     Default: encrypted
@@ -137,11 +153,37 @@ Parameters:
     Default: ''
     AllowedPattern: '^$|^[0-9]+$'
     Description: Optional max concurrent /v1 requests per identity or IP.
+  AuthFailLimit:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: Optional max failed auth attempts per identity/IP before a temporary lockout.
   MaxBodyBytes:
     Type: String
     Default: ''
     AllowedPattern: '^$|^[0-9]+$'
     Description: Optional max request body size in bytes.
+  CustomHostAllowlist:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional comma-separated hostnames (no port) allowed as custom provider
+      hosts — set together with TrustedCustomHosts when UpstreamUrl points at an
+      internal host, so it clears the SSRF proxy guard.
+  TrustedCustomHosts:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional comma-separated custom hosts trusted by the SSRF proxy guard
+      (pair with CustomHostAllowlist).
+  UpstreamUrl:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^https?://\S+$'
+    Description: >-
+      On-top mode: optional OpenAI-compatible upstream gateway (LiteLLM,
+      OpenRouter, ...) that seeds the default routing config, so clients send no
+      x-anyray-config header. Empty = route directly to providers.
   OptimizerTimeoutMs:
     Type: String
     Default: '800'
@@ -300,6 +342,18 @@ Resources:
       MasterSecretArn: !GetAtt Db.MasterUserSecret.SecretArn
       DbHost: !GetAtt Db.Endpoint.Address
       DbName: postgres
+
+  # The deployment token arrives as a NoEcho parameter; hold it in Secrets
+  # Manager and inject it via the task Secrets list so it is not readable by
+  # anyone with ecs:DescribeTaskDefinition (the app secrets already flow this
+  # way). No explicit Name: a CFN-generated name avoids the scheduled-deletion
+  # collision on stack delete + re-create.
+  DeploymentTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Anyray Cloud deployment token (adt_...) for usage metering.
+      SecretString: !Ref DeploymentToken
+      Tags: [{ Key: Name, Value: anyray-deployment-token }]
 
   # ---- Networking / security groups -----------------------------------------
   AlbSg:
@@ -472,7 +526,9 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/anyray/*'
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/anyray/*'
+                  - !Ref DeploymentTokenSecret
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -652,10 +708,15 @@ Resources:
             - { Name: ANYRAY_RATE_LIMIT_IP_RPM, Value: !Ref RateLimitIpRpm }
             - { Name: ANYRAY_RATE_LIMIT_UNAUTH_RPM, Value: !Ref RateLimitUnauthRpm }
             - { Name: ANYRAY_MAX_CONCURRENT_REQUESTS, Value: !Ref MaxConcurrentRequests }
+            - { Name: ANYRAY_AUTH_FAIL_LIMIT, Value: !Ref AuthFailLimit }
             - { Name: ANYRAY_MAX_BODY_BYTES, Value: !Ref MaxBodyBytes }
+            - { Name: ANYRAY_CUSTOM_HOST_ALLOWLIST, Value: !Ref CustomHostAllowlist }
+            - { Name: TRUSTED_CUSTOM_HOSTS, Value: !Ref TrustedCustomHosts }
+            - { Name: ANYRAY_UPSTREAM_URL, Value: !Ref UpstreamUrl }
             - { Name: ANYRAY_METERING_ENABLED, Value: 'true' }
-            - { Name: ANYRAY_DEPLOYMENT_TOKEN, Value: !Ref DeploymentToken }
             - { Name: ANYRAY_SEAT_EXCLUDE, Value: !Ref SeatExclude }
+            - { Name: ANYRAY_METERING_INTERVAL_MS, Value: !Ref MeteringIntervalMs }
+            - { Name: ANYRAY_ENTITLEMENT_GRACE_MS, Value: !Ref EntitlementGraceMs }
             - Name: ANYRAY_GATEWAY_PUBLIC_URL
               Value: !If
                 - HasGatewayUrl
@@ -673,6 +734,7 @@ Resources:
             - { Name: ANYRAY_ADMIN_TOKEN, ValueFrom: !GetAtt AppSecrets.AdminTokenArn }
             - { Name: ANYRAY_OPTIMIZER_TOKEN, ValueFrom: !GetAtt AppSecrets.OptimizerTokenArn }
             - { Name: ANYRAY_PSEUDONYM_SALT, ValueFrom: !GetAtt AppSecrets.SaltArn }
+            - { Name: ANYRAY_DEPLOYMENT_TOKEN, ValueFrom: !Ref DeploymentTokenSecret }
           HealthCheck:
             Command: [CMD-SHELL, 'wget -qO- http://localhost:8787/ || exit 1']
             Interval: 10

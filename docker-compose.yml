@@ -95,6 +95,9 @@ services:
       ANYRAY_CONSOLE_PUBLIC_URL: ${ANYRAY_CONSOLE_PUBLIC_URL:-}
       ANYRAY_METERING_INTERVAL_MS: ${ANYRAY_METERING_INTERVAL_MS:-}
       ANYRAY_ENTITLEMENT_GRACE_MS: ${ANYRAY_ENTITLEMENT_GRACE_MS:-}
+      # Globs of x-anyray-metadata user ids to exclude from the billed seat
+      # count (CI bots, service accounts) — e.g. "bot-*,ci-*". Empty = bill all.
+      ANYRAY_SEAT_EXCLUDE: ${ANYRAY_SEAT_EXCLUDE:-}
       # Dev/staging ONLY — override the pinned key + host for an internal build.
       ANYRAY_DEV_UNSAFE_CONTROL_PLANE: ${ANYRAY_DEV_UNSAFE_CONTROL_PLANE:-}
       ANYRAY_LICENSE_PUBLIC_KEY: ${ANYRAY_LICENSE_PUBLIC_KEY:-}

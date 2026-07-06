@@ -135,6 +135,9 @@ gateway:
     enabled: true
     intervalMs: "900000"
     graceMs: "86400000"
+    # Globs of x-anyray-metadata user ids to exclude from the billed seat
+    # count (CI bots, service accounts) — e.g. "bot-*,ci-*". Empty = bill all.
+    seatExclude: ""
   # Extra env vars (provider-key fallbacks, rate limits, …)
   # in plain k8s env syntax: [{name: ANYRAY_RATE_LIMIT_RPM, value: "600"}]
   extraEnv: []

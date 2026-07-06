@@ -87,6 +87,10 @@ spec:
             - name: ANYRAY_ENTITLEMENT_GRACE_MS
               value: {{ .Values.gateway.metering.graceMs | quote }}
             {{- end }}
+            {{- with .Values.gateway.metering.seatExclude }}
+            - name: ANYRAY_SEAT_EXCLUDE
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.gateway.upstreamUrl }}
             - name: ANYRAY_UPSTREAM_URL
               value: {{ . | quote }}

@@ -19,7 +19,7 @@ Metadata:
       - Label: { default: Ingress / TLS }
         Parameters: [CertificateArn, GatewayPublicUrl, ConsolePublicUrl]
       - Label: { default: Anyray Cloud (metering) }
-        Parameters: [DeploymentToken]
+        Parameters: [DeploymentToken, SeatExclude]
       - Label: { default: Content privacy }
         Parameters: [ContentMode, AllowPlaintext]
       - Label: { default: Gateway hardening }
@@ -95,6 +95,13 @@ Parameters:
     NoEcho: true
     AllowedPattern: '^adt_[A-Za-z0-9_-]+$'
     Description: Anyray Cloud deployment token (adt_...) for usage metering.
+  SeatExclude:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional comma-separated globs of user ids to exclude from the billed
+      seat count (CI bots, service accounts), e.g. "bot-*,ci-*". Empty bills
+      every active user.
   ContentMode:
     Type: String
     Default: encrypted
@@ -648,6 +655,7 @@ Resources:
             - { Name: ANYRAY_MAX_BODY_BYTES, Value: !Ref MaxBodyBytes }
             - { Name: ANYRAY_METERING_ENABLED, Value: 'true' }
             - { Name: ANYRAY_DEPLOYMENT_TOKEN, Value: !Ref DeploymentToken }
+            - { Name: ANYRAY_SEAT_EXCLUDE, Value: !Ref SeatExclude }
             - Name: ANYRAY_GATEWAY_PUBLIC_URL
               Value: !If
                 - HasGatewayUrl

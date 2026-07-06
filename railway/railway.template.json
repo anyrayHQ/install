@@ -1,7 +1,12 @@
 {
   "displayName": "Anyray",
   "description": "Self-hosted AI spend optimizer with gateway, optimizer, console, and Postgres.",
-  "tags": ["ai", "gateway", "llm", "observability"],
+  "tags": [
+    "ai",
+    "gateway",
+    "llm",
+    "observability"
+  ],
   "icon": "https://docs.anyray.ai/img/favicon.svg",
   "readme": "https://raw.githubusercontent.com/anyrayHQ/install/main/railway/README.md",
   "services": [
@@ -14,7 +19,11 @@
         "healthcheckPath": "/",
         "restartPolicyType": "ON_FAILURE"
       },
-      "volumes": [{ "mountPath": "/data" }],
+      "volumes": [
+        {
+          "mountPath": "/data"
+        }
+      ],
       "variables": {
         "PORT": "8787",
         "ANYRAY_OBSERVABILITY_DB_URL": "${{Postgres.DATABASE_URL}}",
@@ -35,7 +44,8 @@
         "ANYRAY_GATEWAY_PUBLIC_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
         "ANYRAY_CONSOLE_PUBLIC_URL": "https://${{proxy.RAILWAY_PUBLIC_DOMAIN}}",
         "ANYRAY_HSTS": "true",
-        "ANYRAY_TRUST_PROXY": "true"
+        "ANYRAY_TRUST_PROXY": "true",
+        "ANYRAY_SEAT_EXCLUDE": ""
       }
     },
     {
@@ -47,7 +57,11 @@
         "healthcheckPath": "/health",
         "restartPolicyType": "ON_FAILURE"
       },
-      "volumes": [{ "mountPath": "/data" }],
+      "volumes": [
+        {
+          "mountPath": "/data"
+        }
+      ],
       "variables": {
         "PORT": "8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{secret()}}",
@@ -82,7 +96,11 @@
       "deploy": {
         "restartPolicyType": "ON_FAILURE"
       },
-      "volumes": [{ "mountPath": "/var/lib/postgresql/data" }],
+      "volumes": [
+        {
+          "mountPath": "/var/lib/postgresql/data"
+        }
+      ],
       "variables": {
         "POSTGRES_USER": "postgres",
         "POSTGRES_PASSWORD": "${{secret()}}",

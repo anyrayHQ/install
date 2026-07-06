@@ -49,7 +49,9 @@
         "PORT": "8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{secret()}}",
         "ANYRAY_ADMIN_TOKEN": "${{gateway.ANYRAY_ADMIN_TOKEN}}",
-        "ANYRAY_DATA_DIR": "/data"
+        "ANYRAY_DATA_DIR": "/data",
+        "ANYRAY_SPEND_DB_URL": "${{Postgres.DATABASE_URL}}",
+        "ANYRAY_CONTENT_KEY": "${{gateway.ANYRAY_CONTENT_KEY}}"
       }
     },
     {

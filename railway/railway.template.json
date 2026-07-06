@@ -51,7 +51,9 @@
         "ANYRAY_ADMIN_TOKEN": "${{gateway.ANYRAY_ADMIN_TOKEN}}",
         "ANYRAY_DATA_DIR": "/data",
         "ANYRAY_SPEND_DB_URL": "${{Postgres.DATABASE_URL}}",
-        "ANYRAY_CONTENT_KEY": "${{gateway.ANYRAY_CONTENT_KEY}}"
+        "ANYRAY_CONTENT_KEY": "${{gateway.ANYRAY_CONTENT_KEY}}",
+        "ANYRAY_CONTENT_MODE": "${{gateway.ANYRAY_CONTENT_MODE}}",
+        "ANYRAY_ALLOW_PLAINTEXT": "${{gateway.ANYRAY_ALLOW_PLAINTEXT}}"
       }
     },
     {

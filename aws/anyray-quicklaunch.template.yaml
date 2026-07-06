@@ -451,7 +451,7 @@ Resources:
       FromPort: 8787
       ToPort: 8787
       SourceSecurityGroupId: !Ref TasksSg
-      Description: Service Connect - proxy/optimizer to gateway
+      Description: Cloud Map discovery - proxy/optimizer to gateway
 
   TasksSelfOptimizer:
     Type: AWS::EC2::SecurityGroupIngress
@@ -461,7 +461,7 @@ Resources:
       FromPort: 8088
       ToPort: 8088
       SourceSecurityGroupId: !Ref TasksSg
-      Description: Service Connect - gateway/proxy to optimizer
+      Description: Cloud Map discovery - gateway/proxy to optimizer
 
   RdsSg:
     Type: AWS::EC2::SecurityGroup
@@ -556,6 +556,35 @@ Resources:
     Properties:
       Name: anyray.internal
       Vpc: !Ref VpcId
+
+  # Cloud Map service discovery with REAL Route 53 A records — not ECS Service
+  # Connect. The console proxy is nginx resolving its gateway upstream at
+  # request time via the `resolver` directive, which queries DNS directly and
+  # never reads /etc/hosts; Service Connect publishes its aliases ONLY into
+  # /etc/hosts (the Cloud Map namespace is registered API-only, no DNS
+  # records), so under Service Connect every console request failed its
+  # /__auth subrequest and surfaced as a bare nginx 500. Classic service
+  # discovery creates records every consumer resolves — nginx (runtime DNS)
+  # and the gateway's Node runtime (getaddrinfo) alike.
+  GatewayDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: gateway
+      NamespaceId: !GetAtt Namespace.Id
+      DnsConfig:
+        DnsRecords: [{ Type: A, TTL: 10 }]
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig: { FailureThreshold: 1 }
+
+  OptimizerDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: optimizer
+      NamespaceId: !GetAtt Namespace.Id
+      DnsConfig:
+        DnsRecords: [{ Type: A, TTL: 10 }]
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig: { FailureThreshold: 1 }
 
   ExecutionRole:
     Type: AWS::IAM::Role
@@ -744,7 +773,7 @@ Resources:
           MountPoints:
             - { SourceVolume: data, ContainerPath: /data }
           Environment:
-            - { Name: ANYRAY_OPTIMIZER_URL, Value: 'http://optimizer:8088' }
+            - { Name: ANYRAY_OPTIMIZER_URL, Value: 'http://optimizer.anyray.internal:8088' }
             - { Name: ANYRAY_OPTIMIZER_TIMEOUT_MS, Value: !Ref OptimizerTimeoutMs }
             - { Name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS, Value: !Ref OptimizerVisionTimeoutMs }
             - { Name: ANYRAY_DEFAULT_MODEL, Value: !Ref DefaultModel }
@@ -814,6 +843,12 @@ Resources:
           PortMappings:
             - { Name: proxy, ContainerPort: 80, Protocol: tcp }
           Environment:
+            # nginx resolves this at request time via its `resolver` directive
+            # (raw DNS, /etc/hosts is never consulted), so it MUST be a name
+            # with a real DNS record — the Cloud Map A record registered by
+            # GatewayDiscovery. The image default (`gateway`) only works where
+            # the platform DNS resolves bare service names (Docker Compose).
+            - { Name: ANYRAY_GATEWAY_HOST, Value: gateway.anyray.internal }
             # The baked nginx envsubst template needs updater status/token
             # placeholders set. QuickLaunch does not run the Docker/Watchtower
             # updater, so report it disabled.
@@ -834,7 +869,7 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: proxy
 
-  # ---- Services (Service Connect wires bare hostnames) ------------------------
+  # ---- Services (Cloud Map DNS wires *.anyray.internal hostnames) --------------
   OptimizerService:
     Type: AWS::ECS::Service
     DependsOn: [EfsMountA, EfsMountB]
@@ -848,13 +883,8 @@ Resources:
           AssignPublicIp: ENABLED
           Subnets: [!Ref SubnetA, !Ref SubnetB]
           SecurityGroups: [!Ref TasksSg]
-      ServiceConnectConfiguration:
-        Enabled: true
-        Namespace: !GetAtt Namespace.Arn
-        Services:
-          - PortName: optimizer
-            DiscoveryName: optimizer
-            ClientAliases: [{ Port: 8088, DnsName: optimizer }]
+      ServiceRegistries:
+        - RegistryArn: !GetAtt OptimizerDiscovery.Arn
 
   GatewayService:
     Type: AWS::ECS::Service
@@ -872,13 +902,8 @@ Resources:
           SecurityGroups: [!Ref TasksSg]
       LoadBalancers:
         - { TargetGroupArn: !Ref GatewayTg, ContainerName: gateway, ContainerPort: 8787 }
-      ServiceConnectConfiguration:
-        Enabled: true
-        Namespace: !GetAtt Namespace.Arn
-        Services:
-          - PortName: gateway
-            DiscoveryName: gateway
-            ClientAliases: [{ Port: 8787, DnsName: gateway }]
+      ServiceRegistries:
+        - RegistryArn: !GetAtt GatewayDiscovery.Arn
 
   ProxyService:
     Type: AWS::ECS::Service
@@ -896,9 +921,6 @@ Resources:
           SecurityGroups: [!Ref TasksSg]
       LoadBalancers:
         - { TargetGroupArn: !Ref ProxyTg, ContainerName: proxy, ContainerPort: 80 }
-      ServiceConnectConfiguration:
-        Enabled: true
-        Namespace: !GetAtt Namespace.Arn
 
 Outputs:
   ConsoleURL:

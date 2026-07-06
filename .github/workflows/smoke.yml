@@ -22,6 +22,7 @@ jobs:
           ANYRAY_OPTIMIZER_IMAGE: ghcr.io/anyrayhq/optimizer:latest
           ANYRAY_PROXY_IMAGE: ghcr.io/anyrayhq/proxy:latest
           ANYRAY_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:17
+          ANYRAY_UPDATER_ENABLED: "false"
         run: docker compose up -d --quiet-pull gateway optimizer proxy postgres
       - name: Wait for health
         run: |

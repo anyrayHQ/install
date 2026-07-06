@@ -17,7 +17,9 @@ jobs:
       - name: Generate secrets
         run: ./setup.sh
       - name: Start the stack
-        run: docker compose up -d --quiet-pull
+        env:
+          ANYRAY_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:17
+        run: docker compose up -d --quiet-pull gateway optimizer proxy postgres
       - name: Wait for health
         run: |
           for _ in $(seq 1 30); do

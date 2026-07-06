@@ -6,6 +6,11 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: optimizer
 spec:
+  {{- if gt (int .Values.optimizer.replicas) 1 }}
+  {{- if eq (toString .Values.gateway.contentMode) "off" }}
+  {{- fail "optimizer.replicas > 1 needs gateway.contentMode != off: the durable CCR stash is disabled when content mode is off, so retrieval handles won't resolve across replicas" }}
+  {{- end }}
+  {{- end }}
   replicas: {{ .Values.optimizer.replicas }}
   {{- if .Values.optimizer.persistence.enabled }}
   {{- if gt (int .Values.optimizer.replicas) 1 }}
@@ -42,6 +47,17 @@ spec:
             # optimizer.config.json until the first admin edit writes here.
             - name: ANYRAY_DATA_DIR
               value: /data
+            # Durable CCR stash tier (same Postgres as the gateway): stashed
+            # originals persist as AES-256-GCM ciphertext, so retrieval handles
+            # survive optimizer restarts and resolve from any replica.
+            {{- include "anyray.spendDbEnv" . | nindent 12 }}
+            - name: ANYRAY_CONTENT_KEY
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_CONTENT_KEY" "context" .) | nindent 16 }}
+            - name: ANYRAY_CONTENT_MODE
+              value: {{ .Values.gateway.contentMode | quote }}
+            - name: ANYRAY_ALLOW_PLAINTEXT
+              value: {{ .Values.gateway.allowPlaintext | quote }}
             {{- with .Values.optimizer.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

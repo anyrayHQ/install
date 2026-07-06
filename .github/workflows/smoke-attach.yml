@@ -21,6 +21,8 @@ jobs:
         run: ./setup.sh
       - name: Start the attach stack
         env:
+          ANYRAY_OPTIMIZER_IMAGE: ghcr.io/anyrayhq/optimizer:latest
+          ANYRAY_PROXY_IMAGE: ghcr.io/anyrayhq/proxy:latest
           ANYRAY_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:17
         run: docker compose -f docker-compose.attach.yml up -d --quiet-pull
       - name: Wait for optimizer health

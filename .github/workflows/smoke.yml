@@ -18,6 +18,9 @@ jobs:
         run: ./setup.sh
       - name: Start the stack
         env:
+          ANYRAY_GATEWAY_IMAGE: ghcr.io/anyrayhq/gateway:latest
+          ANYRAY_OPTIMIZER_IMAGE: ghcr.io/anyrayhq/optimizer:latest
+          ANYRAY_PROXY_IMAGE: ghcr.io/anyrayhq/proxy:latest
           ANYRAY_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:17
         run: docker compose up -d --quiet-pull gateway optimizer proxy postgres
       - name: Wait for health

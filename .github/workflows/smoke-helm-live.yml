@@ -1,0 +1,64 @@
+name: Helm chart live smoke (kind)
+
+# Installs the Helm chart on a REAL Kubernetes cluster (kind) and probes the
+# golden paths. `helm template` (validate-artifacts) proves the chart renders;
+# it cannot prove it behaves — the EKS console outage (#54) was invisible to
+# rendering. Two lanes: fresh install of the candidate chart, and the exact
+# customer upgrade path (install the published OCI chart, `helm upgrade` to
+# the candidate). Drives the customer flow end-to-end via `setup.sh --k8s`.
+#
+# No cloud credentials: kind on the runner + anonymous pulls from the public
+# ECR registry, so this also runs safely on fork PRs.
+#
+# Injection-safety note: the only ${{ }} inside run: is matrix.lane, defined
+# in this file — no event-controlled text.
+
+on:
+  pull_request:
+    paths:
+      - helm/**
+      - setup.sh
+      - scripts/smoke-helm.sh
+      - scripts/verify-deploy.sh
+      - .github/workflows/smoke-helm-live.yml
+  schedule:
+    - cron: '17 5 * * 2' # weekly Tuesday 05:17 UTC (AWS lane runs Mondays)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-helm-live-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: kind ${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [fresh, upgrade]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+
+      - name: Live smoke (${{ matrix.lane }})
+        env:
+          LANE: ${{ matrix.lane }}
+        run: ./scripts/smoke-helm.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          kubectl get pods -n anyray-smoke -o wide
+          kubectl get events -n anyray-smoke --sort-by=.lastTimestamp | tail -30
+          for c in proxy gateway optimizer; do
+            echo "== logs: $c"
+            kubectl logs -n anyray-smoke -l "app.kubernetes.io/component=$c" --tail=40
+          done

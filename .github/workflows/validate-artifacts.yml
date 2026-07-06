@@ -1,0 +1,113 @@
+name: Validate install artifacts
+
+# Every install path a customer can pick (compose, attach, Helm via setup.sh
+# --k8s, AWS CloudFormation, Railway, GCP/Azure scripts) must parse, render,
+# and resolve — a template that doesn't is a broken install for the next
+# customer. Runs on every change and daily, because artifacts also rot without
+# commits here (validator rule updates, image defaults, monorepo env-var
+# changes arriving via paired PRs).
+#
+# Helm chart lint + the image-pinning invariant live in helm-chart.yml; this
+# workflow covers everything else plus the setup.sh-generated Helm values.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: setup.sh produces a complete .env (docker path)
+        run: |
+          ./setup.sh --host ci.example.com --connect adt_ci0000000000000000 \
+            --gateway-url http://ci.example.com:8787
+          test -f .env
+      - name: main stack resolves (every required var satisfied)
+        run: docker compose config -q
+      - name: every compose image carries an explicit tag
+        run: |
+          untagged="$(docker compose config --images | grep -Ev ':[^/]+$' || true)"
+          if [ -n "$untagged" ]; then
+            echo "::error::untagged image(s) — pin them: ${untagged}"
+            exit 1
+          fi
+      - name: attach mode resolves
+        run: docker compose -f docker-compose.attach.yml config -q
+
+  k8s-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+          token: ${{ github.token }}
+      - name: setup.sh --k8s secrets + values render against the chart
+        run: |
+          ./setup.sh --k8s --connect adt_ci0000000000000000 \
+            --host anyray.internal --namespace anyray
+          helm template t ./helm -f my-values.yaml > /dev/null
+
+  cloudformation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: cfn-lint the AWS quick-launch template
+        run: |
+          pipx install cfn-lint
+          cfn-lint aws/anyray-quicklaunch.template.yaml
+
+  railway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: template parses and keeps the gateway fail-fast vars
+        # ANYRAY_SPEND_DB_URL + ANYRAY_CONTENT_KEY are boot-exit vars on the
+        # gateway; losing either from the template bricks the one-click.
+        run: |
+          jq -e . railway/railway.template.json > /dev/null
+          jq -e '.services[] | select(.name == "gateway") | .variables
+                 | has("ANYRAY_SPEND_DB_URL") and has("ANYRAY_CONTENT_KEY")' \
+            railway/railway.template.json > /dev/null
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: bash -n + shellcheck (error severity) on every script
+        run: |
+          shopt -s globstar nullglob
+          set -- **/*.sh
+          bash -c 'for f in "$@"; do bash -n "$f" || exit 1; done' _ "$@"
+          shellcheck -S error "$@"
+
+  bump-freshness:
+    # Guards the failure mode where the monorepo prod promotion's install bump
+    # PR fails to merge: publish-chart reads install@main and skips
+    # already-published chart versions, so Helm customers silently freeze on an
+    # old appVersion while every release logs "already published". A bump PR
+    # open longer than a day means that pipeline is broken again.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: no release bump PR may sit open >24h
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          stale="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --search 'Bump install for v in:title' --json number,createdAt \
+            --jq '[.[] | select((now - (.createdAt | fromdateiso8601)) > 86400) | .number] | join(", ")')"
+          if [ -n "$stale" ]; then
+            echo "::error::release bump PR(s) #${stale} open >24h — deploy-prod auto-merge is broken; Helm customers are freezing on an old chart"
+            exit 1
+          fi

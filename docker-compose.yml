@@ -227,7 +227,7 @@ services:
   # the Docker socket.
   docker-socket-proxy:
     logging: *default-logging
-    image: "${ANYRAY_DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy}"
+    image: "${ANYRAY_DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:v0.4.2}"
     restart: always
     environment:
       CONTAINERS: 1

@@ -156,7 +156,7 @@ the UPDATE path from the currently published version, and tears it down.**
 | `docker-compose.yml` | `validate-artifacts` | `smoke.yml` ✓ |
 | `docker-compose.attach.yml` | `validate-artifacts` | `smoke-attach.yml` ✓ |
 | `aws/anyray-quicklaunch.template.yaml` | `validate-artifacts` (cfn-lint) | `smoke-aws-live.yml` ✓ (fresh + customer-upgrade lanes, weekly + on PR) |
-| `helm/` | `validate-artifacts` (render) | ✗ TODO — kind-based lane (#126) |
+| `helm/` | `validate-artifacts` (render) | `smoke-helm-live.yml` ✓ (fresh + customer-upgrade lanes on kind, weekly + on PR) |
 | `railway/railway.template.json` | `validate-artifacts` (jq) | ✗ TODO (#127) |
 | `gcp/` GCE one-click | — | ✗ TODO (#128) |
 

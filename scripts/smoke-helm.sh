@@ -76,75 +76,53 @@ install_chart() {
 }
 
 probe() {
-  local round="$1" token proxy_svc code body
+  local round="$1" token proxy_svc code
   token="$(kubectl get secret -n "$NS" anyray-secrets \
     -o jsonpath='{.data.ANYRAY_ADMIN_TOKEN}' | base64 -d)"
   proxy_svc="$(kubectl get svc -n "$NS" \
     -l app.kubernetes.io/component=proxy -o jsonpath='{.items[0].metadata.name}')"
 
-  # helm --wait returns as soon as the (loosely-gated) deployments count
-  # ready, often while images are still pulling — wait until the Services
-  # have READY endpoints (label-agnostic), best-effort: the probe loop
-  # below stays authoritative.
-  wait_endpoints() {
-    local svc="$1" i
-    for i in $(seq 1 96); do
-      [ -n "$(kubectl get endpoints -n "$NS" "$svc" \
-            -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)" ] && return 0
-      sleep 5
-    done
-    echo "::warning::service ${svc} has no ready endpoints after 8m"
-  }
-  wait_endpoints "$proxy_svc"
-  wait_endpoints gateway
+  # Probes run IN-CLUSTER via a long-lived curl pod hitting the Services over
+  # cluster DNS — the same path real traffic takes, and none of the
+  # port-forward fragility (a forward dies with its pod and its stderr is
+  # invisible in CI).
+  if ! kubectl get pod -n "$NS" smoke-prober >/dev/null 2>&1; then
+    kubectl run smoke-prober -n "$NS" --image=curlimages/curl:8.10.1 \
+      --restart=Never --command -- sleep 3600
+  fi
+  kubectl wait --namespace "$NS" --for=condition=ready pod/smoke-prober --timeout=120s
 
-  # Port-forwards for the probe round (the chart's Ingress needs a controller
-  # kind doesn't run; the seams under test — proxy→gateway DNS, auth gate —
-  # sit behind the Services, which port-forward exercises). kubectl
-  # port-forward exits whenever its pod restarts (gateway boots against
-  # postgres, images still pulling), so each forward runs in a respawn loop.
-  ( while true; do
-      kubectl port-forward --namespace "$NS" "svc/${proxy_svc}" 13000:80 \
-        >/dev/null 2>&1
-      sleep 1
-    done ) &
-  PF_PIDS+=($!)
-  ( while true; do
-      kubectl port-forward --namespace "$NS" svc/gateway 18787:8787 \
-        >/dev/null 2>&1
-      sleep 1
-    done ) &
-  PF_PIDS+=($!)
-  sleep 3
+  pcurl() { kubectl exec -n "$NS" smoke-prober -- curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@"; }
 
   echo "→ [${round}] probing console via ${proxy_svc}"
   local i code=""
   for i in $(seq 1 120); do
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-      http://127.0.0.1:13000/console/ || true)"
+    code="$(pcurl "http://${proxy_svc}/console/" || true)"
     [ "$code" = 200 ] && break
     sleep 5
   done
   if [ "$code" != 200 ]; then
     echo "::error::[${round}] unauthenticated /console/ returned ${code} (expected 200 sign-in page)."
-    [ "$code" = 500 ] && echo "::error::Bare 500 = the proxy failed its /__auth subrequest — it cannot resolve/reach the gateway Service (the #54 FQDN class). kubectl logs -n ${NS} -l app.kubernetes.io/component=proxy"
+    [ "$code" = 500 ] && echo "::error::Bare 500 = the proxy failed its /__auth subrequest — it cannot resolve/reach the gateway Service (the #54 FQDN class)."
     return 1
   fi
-  body="$(curl -s --max-time 10 http://127.0.0.1:13000/console/)"
-  printf '%s' "$body" | grep -qi 'sign in' || {
+  kubectl exec -n "$NS" smoke-prober -- curl -s --max-time 10 \
+    "http://${proxy_svc}/console/" | grep -qi 'sign in' || {
     echo "::error::[${round}] /console/ is 200 but not the sign-in page."; return 1; }
 
-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-    -H "Cookie: anyray_key=${token}" http://127.0.0.1:13000/console/)"
+  code="$(pcurl -H "Cookie: anyray_key=${token}" "http://${proxy_svc}/console/")"
   [ "$code" = 200 ] || { echo "::error::[${round}] authenticated /console/ → ${code}"; return 1; }
 
-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-    -H "Cookie: anyray_key=${token}" http://127.0.0.1:13000/admin/health)"
+  code="$(pcurl -H "Cookie: anyray_key=${token}" "http://${proxy_svc}/admin/health")"
   [ "$code" = 200 ] || { echo "::error::[${round}] /admin/health via proxy → ${code}"; return 1; }
 
-  "${HERE}/verify-deploy.sh" http://127.0.0.1:18787 "$token"
+  # Deep health straight against the gateway Service (in-cluster stand-in for
+  # scripts/verify-deploy.sh, which needs a host-reachable URL).
+  kubectl exec -n "$NS" smoke-prober -- curl -s --max-time 15 \
+    -H "Authorization: Bearer ${token}" http://gateway:8787/admin/health \
+    | grep -q '"ok":true' || {
+    echo "::error::[${round}] gateway /admin/health not ok"; return 1; }
 
-  stop_forwards
   echo "✓ [${round}] console + gateway healthy"
 }
 

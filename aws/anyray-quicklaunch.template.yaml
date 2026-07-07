@@ -958,7 +958,7 @@ Outputs:
       - !Ref ConsolePublicUrl
       - !If [HasCert, !Sub 'https://${Alb.DNSName}:3000', !Sub 'http://${Alb.DNSName}:3000']
   GatewayURL:
-    Description: Gateway API base URL — point local tools at it with `anyray-connect --gateway <url>`.
+    Description: Gateway API base URL - point local tools at it with `anyray-connect --gateway <url>`.
     Value: !If
       - HasGatewayUrl
       - !Ref GatewayPublicUrl

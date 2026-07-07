@@ -1,6 +1,6 @@
 apiVersion: v2
 name: anyray
-description: Self-hosted AI-spend optimizer — gateway, optimizer, console, and Postgres trace/spend store.
+description: Self-hosted AI-spend optimizer - gateway, optimizer, console, and Postgres trace/spend store.
 type: application
 version: 0.4.33
 # The Anyray image tag this chart version ships. Images default to this pinned

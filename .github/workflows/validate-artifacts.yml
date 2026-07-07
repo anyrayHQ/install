@@ -78,6 +78,28 @@ jobs:
                  | has("ANYRAY_SPEND_DB_URL") and has("ANYRAY_CONTENT_KEY")' \
             railway/railway.template.json > /dev/null
 
+  gateway-env-coverage:
+    # Every deploy-critical gateway env var (ci/critical-gateway-env.txt) must be
+    # wired into EVERY template — compose, CloudFormation, Railway, Helm. A var
+    # the gateway fail-fasts on (or the admin console needs), silently dropped
+    # from one template, bricks that install path on the next image bump. This
+    # generalises the per-template railway check above across all four templates,
+    # and — running daily — catches template drift before a customer hits it (and
+    # a monorepo paired PR that wired a new var into some templates but not all).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+          token: ${{ github.token }}
+      - name: render Helm values (gateway env comes from the rendered chart)
+        run: |
+          ./setup.sh --k8s --connect adt_ci0000000000000000 \
+            --host anyray.internal --namespace anyray
+      - name: every critical gateway env var is wired into every template
+        run: ci/check-gateway-env-coverage.sh
+
   shell:
     runs-on: ubuntu-latest
     steps:

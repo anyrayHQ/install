@@ -72,8 +72,14 @@ jobs:
         id: vpc
         run: |
           set -euo pipefail
-          vpc="$(aws ec2 describe-vpcs --filters Name=tag:Name,Values=anyray-cfn-smoke \
-                 --query 'Vpcs[0].VpcId' --output text)"
+          # Prefer the VPC that owns the tagged subnets — a past parallel-lane race
+          # left duplicate-tagged VPCs, and a bare Vpcs[0] pick mismatches the subnets.
+          vpc="$(aws ec2 describe-subnets --filters Name=tag:Name,Values=anyray-cfn-smoke-a \
+                 --query 'Subnets[0].VpcId' --output text)"
+          if [ "$vpc" = "None" ]; then
+            vpc="$(aws ec2 describe-vpcs --filters Name=tag:Name,Values=anyray-cfn-smoke \
+                   --query 'Vpcs[0].VpcId' --output text)"
+          fi
           if [ "$vpc" = "None" ]; then
             vpc="$(aws ec2 create-vpc --cidr-block 10.99.0.0/16 \
               --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=anyray-cfn-smoke}]' \
@@ -87,21 +93,24 @@ jobs:
             rt="$(aws ec2 describe-route-tables --filters Name=vpc-id,Values="$vpc" \
                   --query 'RouteTables[0].RouteTableId' --output text)"
             aws ec2 create-route --route-table-id "$rt" --destination-cidr-block 0.0.0.0/0 --gateway-id "$igw"
+          fi
+          a="$(aws ec2 describe-subnets --filters Name=tag:Name,Values=anyray-cfn-smoke-a Name=vpc-id,Values="$vpc" \
+               --query 'Subnets[0].SubnetId' --output text)"
+          if [ "$a" = "None" ]; then
             a="$(aws ec2 create-subnet --vpc-id "$vpc" --cidr-block 10.99.0.0/20 \
               --availability-zone "${AWS_REGION}a" \
               --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=anyray-cfn-smoke-a}]' \
               --query 'Subnet.SubnetId' --output text)"
+            aws ec2 modify-subnet-attribute --subnet-id "$a" --map-public-ip-on-launch
+          fi
+          b="$(aws ec2 describe-subnets --filters Name=tag:Name,Values=anyray-cfn-smoke-b Name=vpc-id,Values="$vpc" \
+               --query 'Subnets[0].SubnetId' --output text)"
+          if [ "$b" = "None" ]; then
             b="$(aws ec2 create-subnet --vpc-id "$vpc" --cidr-block 10.99.16.0/20 \
               --availability-zone "${AWS_REGION}b" \
               --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=anyray-cfn-smoke-b}]' \
               --query 'Subnet.SubnetId' --output text)"
-            aws ec2 modify-subnet-attribute --subnet-id "$a" --map-public-ip-on-launch
             aws ec2 modify-subnet-attribute --subnet-id "$b" --map-public-ip-on-launch
-          else
-            a="$(aws ec2 describe-subnets --filters Name=tag:Name,Values=anyray-cfn-smoke-a \
-                 --query 'Subnets[0].SubnetId' --output text)"
-            b="$(aws ec2 describe-subnets --filters Name=tag:Name,Values=anyray-cfn-smoke-b \
-                 --query 'Subnets[0].SubnetId' --output text)"
           fi
           { echo "vpc=$vpc"; echo "subnet_a=$a"; echo "subnet_b=$b"; } >> "$GITHUB_OUTPUT"
 

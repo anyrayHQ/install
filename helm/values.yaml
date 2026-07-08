@@ -133,6 +133,8 @@ gateway:
   rateLimitRpm: ""
   rateLimitIpRpm: ""
   rateLimitUnauthRpm: ""
+  # Days: prunes spend rows (empty = keep forever); also the trace window (default 90d). Gateway + optimizer.
+  spendRetentionDays: ""
   maxConcurrentRequests: ""
   authFailLimit: ""
   maxBodyBytes: ""

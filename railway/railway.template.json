@@ -13,7 +13,7 @@
     {
       "name": "gateway",
       "source": {
-        "image": "public.ecr.aws/h4e6s7a8/gateway:latest"
+        "image": "public.ecr.aws/h4e6s7a8/gateway:v1.10.83"
       },
       "deploy": {
         "healthcheckPath": "/",
@@ -51,7 +51,7 @@
     {
       "name": "optimizer",
       "source": {
-        "image": "public.ecr.aws/h4e6s7a8/optimizer:latest"
+        "image": "public.ecr.aws/h4e6s7a8/optimizer:v1.10.83"
       },
       "deploy": {
         "healthcheckPath": "/health",
@@ -76,7 +76,7 @@
     {
       "name": "proxy",
       "source": {
-        "image": "public.ecr.aws/h4e6s7a8/proxy:latest"
+        "image": "public.ecr.aws/h4e6s7a8/proxy:v1.10.83"
       },
       "deploy": {
         "healthcheckPath": "/anyray-login",

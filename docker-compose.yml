@@ -69,6 +69,8 @@ services:
       # with the bound identity authoritative — secure-by-default, no toggle.
       # Optional hardening / features — set in .env to enable.
       ANYRAY_HSTS: ${ANYRAY_HSTS:-}
+      # Prunes spend rows older than N days (unset = keep forever); also the trace window (default 90d).
+      ANYRAY_SPEND_RETENTION_DAYS: ${ANYRAY_SPEND_RETENTION_DAYS:-}
       ANYRAY_RATE_LIMIT_RPM: ${ANYRAY_RATE_LIMIT_RPM:-}
       ANYRAY_RATE_LIMIT_IP_RPM: ${ANYRAY_RATE_LIMIT_IP_RPM:-}
       ANYRAY_RATE_LIMIT_UNAUTH_RPM: ${ANYRAY_RATE_LIMIT_UNAUTH_RPM:-}
@@ -133,6 +135,8 @@ services:
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:-}
       ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
+      # Must match the gateway's value or the optimizer's trace sweep reverts to the 90-day default.
+      ANYRAY_SPEND_RETENTION_DAYS: ${ANYRAY_SPEND_RETENTION_DAYS:-}
     volumes:
       - anyray_optimizer_data:/data
     healthcheck:

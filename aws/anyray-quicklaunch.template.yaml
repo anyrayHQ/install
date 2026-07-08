@@ -562,7 +562,8 @@ Resources:
   Namespace:
     Type: AWS::ServiceDiscovery::PrivateDnsNamespace
     Properties:
-      Name: anyray.internal
+      # Stack-scoped: one VPC can't hold two hosted zones with the same domain.
+      Name: !Sub '${AWS::StackName}.anyray.internal'
       Vpc: !Ref VpcId
 
   # Cloud Map service discovery with REAL Route 53 A records — not ECS Service
@@ -790,7 +791,7 @@ Resources:
           MountPoints:
             - { SourceVolume: data, ContainerPath: /data }
           Environment:
-            - { Name: ANYRAY_OPTIMIZER_URL, Value: 'http://optimizer-dns.anyray.internal:8088' }
+            - { Name: ANYRAY_OPTIMIZER_URL, Value: !Sub 'http://optimizer-dns.${AWS::StackName}.anyray.internal:8088' }
             - { Name: ANYRAY_OPTIMIZER_TIMEOUT_MS, Value: !Ref OptimizerTimeoutMs }
             - { Name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS, Value: !Ref OptimizerVisionTimeoutMs }
             - { Name: ANYRAY_DEFAULT_MODEL, Value: !Ref DefaultModel }
@@ -866,7 +867,7 @@ Resources:
             # with a real DNS record — the Cloud Map A record registered by
             # GatewayDiscovery. The image default (`gateway`) only works where
             # the platform DNS resolves bare service names (Docker Compose).
-            - { Name: ANYRAY_GATEWAY_HOST, Value: gateway-dns.anyray.internal }
+            - { Name: ANYRAY_GATEWAY_HOST, Value: !Sub 'gateway-dns.${AWS::StackName}.anyray.internal' }
             # The baked nginx envsubst template needs updater status/token
             # placeholders set. QuickLaunch does not run the Docker/Watchtower
             # updater, so report it disabled.

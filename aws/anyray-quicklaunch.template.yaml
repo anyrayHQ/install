@@ -25,7 +25,7 @@ Metadata:
       - Label: { default: Anyray Cloud (metering) }
         Parameters: [DeploymentToken, SeatExclude, MeteringIntervalMs, EntitlementGraceMs]
       - Label: { default: Content privacy }
-        Parameters: [ContentMode, AllowPlaintext]
+        Parameters: [ContentMode, AllowPlaintext, SpendRetentionDays]
       - Label: { default: Gateway hardening }
         Parameters:
           [
@@ -140,6 +140,14 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: Emit HSTS headers (set true only when served over HTTPS).
+  SpendRetentionDays:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: >-
+      Retention window in days. Prunes spend rows older than this (empty =
+      keep forever) and overrides the trace-store window (traces default to
+      90 days when empty).
   RateLimitRpm:
     Type: String
     Default: ''
@@ -554,7 +562,8 @@ Resources:
   Namespace:
     Type: AWS::ServiceDiscovery::PrivateDnsNamespace
     Properties:
-      Name: anyray.internal
+      # Stack-scoped: one VPC can't hold two hosted zones with the same domain.
+      Name: !Sub '${AWS::StackName}.anyray.internal'
       Vpc: !Ref VpcId
 
   # Cloud Map service discovery with REAL Route 53 A records — not ECS Service
@@ -734,6 +743,8 @@ Resources:
             - { Name: ANYRAY_DATA_DIR, Value: /data }
             - { Name: ANYRAY_CONTENT_MODE, Value: !Ref ContentMode }
             - { Name: ANYRAY_ALLOW_PLAINTEXT, Value: !Ref AllowPlaintext }
+            # Same trace-retention sweep as the gateway — must see the same override.
+            - { Name: ANYRAY_SPEND_RETENTION_DAYS, Value: !Ref SpendRetentionDays }
           Secrets:
             - { Name: ANYRAY_OPTIMIZER_TOKEN, ValueFrom: !GetAtt AppSecrets.OptimizerTokenArn }
             - { Name: ANYRAY_ADMIN_TOKEN, ValueFrom: !GetAtt AppSecrets.AdminTokenArn }
@@ -780,7 +791,7 @@ Resources:
           MountPoints:
             - { SourceVolume: data, ContainerPath: /data }
           Environment:
-            - { Name: ANYRAY_OPTIMIZER_URL, Value: 'http://optimizer-dns.anyray.internal:8088' }
+            - { Name: ANYRAY_OPTIMIZER_URL, Value: !Sub 'http://optimizer-dns.${AWS::StackName}.anyray.internal:8088' }
             - { Name: ANYRAY_OPTIMIZER_TIMEOUT_MS, Value: !Ref OptimizerTimeoutMs }
             - { Name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS, Value: !Ref OptimizerVisionTimeoutMs }
             - { Name: ANYRAY_DEFAULT_MODEL, Value: !Ref DefaultModel }
@@ -792,6 +803,7 @@ Resources:
             - { Name: ANYRAY_RATE_LIMIT_RPM, Value: !Ref RateLimitRpm }
             - { Name: ANYRAY_RATE_LIMIT_IP_RPM, Value: !Ref RateLimitIpRpm }
             - { Name: ANYRAY_RATE_LIMIT_UNAUTH_RPM, Value: !Ref RateLimitUnauthRpm }
+            - { Name: ANYRAY_SPEND_RETENTION_DAYS, Value: !Ref SpendRetentionDays }
             - { Name: ANYRAY_MAX_CONCURRENT_REQUESTS, Value: !Ref MaxConcurrentRequests }
             - { Name: ANYRAY_AUTH_FAIL_LIMIT, Value: !Ref AuthFailLimit }
             - { Name: ANYRAY_MAX_BODY_BYTES, Value: !Ref MaxBodyBytes }
@@ -855,7 +867,7 @@ Resources:
             # with a real DNS record — the Cloud Map A record registered by
             # GatewayDiscovery. The image default (`gateway`) only works where
             # the platform DNS resolves bare service names (Docker Compose).
-            - { Name: ANYRAY_GATEWAY_HOST, Value: gateway-dns.anyray.internal }
+            - { Name: ANYRAY_GATEWAY_HOST, Value: !Sub 'gateway-dns.${AWS::StackName}.anyray.internal' }
             # The baked nginx envsubst template needs updater status/token
             # placeholders set. QuickLaunch does not run the Docker/Watchtower
             # updater, so report it disabled.

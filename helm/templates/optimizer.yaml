@@ -64,6 +64,11 @@ spec:
               value: {{ .Values.gateway.contentMode | quote }}
             - name: ANYRAY_ALLOW_PLAINTEXT
               value: {{ .Values.gateway.allowPlaintext | quote }}
+            {{- with .Values.gateway.spendRetentionDays }}
+            # Same trace-retention sweep as the gateway — must see the same override.
+            - name: ANYRAY_SPEND_RETENTION_DAYS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.optimizer.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -53,6 +53,8 @@ services:
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:-}
       ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
+      # BYO: the optimizer is the only trace pruner here — without this the window is stuck at 90d.
+      ANYRAY_SPEND_RETENTION_DAYS: ${ANYRAY_SPEND_RETENTION_DAYS:-}
     volumes:
       - anyray_attach_optimizer_data:/data
     healthcheck:

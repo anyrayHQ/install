@@ -45,7 +45,8 @@
         "ANYRAY_CONSOLE_PUBLIC_URL": "https://${{proxy.RAILWAY_PUBLIC_DOMAIN}}",
         "ANYRAY_HSTS": "true",
         "ANYRAY_TRUST_PROXY": "true",
-        "ANYRAY_SEAT_EXCLUDE": ""
+        "ANYRAY_SEAT_EXCLUDE": "",
+        "ANYRAY_SPEND_RETENTION_DAYS": ""
       }
     },
     {
@@ -70,7 +71,8 @@
         "ANYRAY_SPEND_DB_URL": "${{Postgres.DATABASE_URL}}",
         "ANYRAY_CONTENT_KEY": "${{gateway.ANYRAY_CONTENT_KEY}}",
         "ANYRAY_CONTENT_MODE": "${{gateway.ANYRAY_CONTENT_MODE}}",
-        "ANYRAY_ALLOW_PLAINTEXT": "${{gateway.ANYRAY_ALLOW_PLAINTEXT}}"
+        "ANYRAY_ALLOW_PLAINTEXT": "${{gateway.ANYRAY_ALLOW_PLAINTEXT}}",
+        "ANYRAY_SPEND_RETENTION_DAYS": "${{gateway.ANYRAY_SPEND_RETENTION_DAYS}}"
       }
     },
     {

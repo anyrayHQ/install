@@ -25,7 +25,7 @@ Metadata:
       - Label: { default: Anyray Cloud (metering) }
         Parameters: [DeploymentToken, SeatExclude, MeteringIntervalMs, EntitlementGraceMs]
       - Label: { default: Content privacy }
-        Parameters: [ContentMode, AllowPlaintext]
+        Parameters: [ContentMode, AllowPlaintext, SpendRetentionDays]
       - Label: { default: Gateway hardening }
         Parameters:
           [
@@ -140,6 +140,14 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: Emit HSTS headers (set true only when served over HTTPS).
+  SpendRetentionDays:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9]+$'
+    Description: >-
+      Retention window in days. Prunes spend rows older than this (empty =
+      keep forever) and overrides the trace-store window (traces default to
+      90 days when empty).
   RateLimitRpm:
     Type: String
     Default: ''
@@ -734,6 +742,8 @@ Resources:
             - { Name: ANYRAY_DATA_DIR, Value: /data }
             - { Name: ANYRAY_CONTENT_MODE, Value: !Ref ContentMode }
             - { Name: ANYRAY_ALLOW_PLAINTEXT, Value: !Ref AllowPlaintext }
+            # Same trace-retention sweep as the gateway — must see the same override.
+            - { Name: ANYRAY_SPEND_RETENTION_DAYS, Value: !Ref SpendRetentionDays }
           Secrets:
             - { Name: ANYRAY_OPTIMIZER_TOKEN, ValueFrom: !GetAtt AppSecrets.OptimizerTokenArn }
             - { Name: ANYRAY_ADMIN_TOKEN, ValueFrom: !GetAtt AppSecrets.AdminTokenArn }
@@ -792,6 +802,7 @@ Resources:
             - { Name: ANYRAY_RATE_LIMIT_RPM, Value: !Ref RateLimitRpm }
             - { Name: ANYRAY_RATE_LIMIT_IP_RPM, Value: !Ref RateLimitIpRpm }
             - { Name: ANYRAY_RATE_LIMIT_UNAUTH_RPM, Value: !Ref RateLimitUnauthRpm }
+            - { Name: ANYRAY_SPEND_RETENTION_DAYS, Value: !Ref SpendRetentionDays }
             - { Name: ANYRAY_MAX_CONCURRENT_REQUESTS, Value: !Ref MaxConcurrentRequests }
             - { Name: ANYRAY_AUTH_FAIL_LIMIT, Value: !Ref AuthFailLimit }
             - { Name: ANYRAY_MAX_BODY_BYTES, Value: !Ref MaxBodyBytes }

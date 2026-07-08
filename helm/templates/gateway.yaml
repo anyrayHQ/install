@@ -146,6 +146,10 @@ spec:
             - name: ANYRAY_RATE_LIMIT_UNAUTH_RPM
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.gateway.spendRetentionDays }}
+            - name: ANYRAY_SPEND_RETENTION_DAYS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.gateway.maxConcurrentRequests }}
             - name: ANYRAY_MAX_CONCURRENT_REQUESTS
               value: {{ . | quote }}

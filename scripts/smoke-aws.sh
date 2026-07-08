@@ -44,6 +44,14 @@ PARAMS=(
 )
 
 cleanup() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # The stack is about to be deleted — surface WHY it failed while we still can.
+    echo "→ failed stack events for ${STACK} (exit ${rc}):"
+    aws cloudformation describe-stack-events --stack-name "$STACK" \
+      --query "StackEvents[?contains(ResourceStatus,'FAILED')].[LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
+      --output table 2>/dev/null || true
+  fi
   [ "${KEEP:-0}" = 1 ] && { echo "KEEP=1 — leaving stack ${STACK}"; return 0; }
   echo "→ teardown ${STACK}"
   aws cloudformation delete-stack --stack-name "$STACK" || true

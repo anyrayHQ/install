@@ -1,0 +1,61 @@
+{{- if .Values.httpRoute.enabled }}
+{{- if not .Values.httpRoute.parentRefs }}
+{{- fail "httpRoute.enabled=true requires httpRoute.parentRefs (the Gateway to attach to)" }}
+{{- end }}
+{{- $hostnames := .Values.httpRoute.hostnames }}
+{{- if not $hostnames }}
+{{- if not .Values.host }}
+{{- fail "httpRoute.enabled=true requires host or httpRoute.hostnames" }}
+{{- end }}
+{{- $hostnames = list .Values.host }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "anyray.fullname" . }}
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+  {{- with .Values.httpRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml .Values.httpRoute.parentRefs | nindent 4 }}
+  hostnames:
+    {{- range $hostnames }}
+    - {{ . | quote }}
+    {{- end }}
+  # Same split as the Ingress: /v1 + /connect -> gateway, / + /admin -> console
+  # proxy. Gateway API resolves matches by longest path prefix, so the catch-all
+  # "/" never shadows the more-specific routes regardless of rule order.
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        - name: gateway
+          port: 8787
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /connect
+      backendRefs:
+        - name: gateway
+          port: 8787
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /admin
+      backendRefs:
+        - name: {{ include "anyray.fullname" . }}-proxy
+          port: 3000
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ include "anyray.fullname" . }}-proxy
+          port: 3000
+{{- end }}

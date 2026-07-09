@@ -17,7 +17,7 @@ x-logging: &default-logging
 services:
   gateway:
     logging: *default-logging
-    image: "${ANYRAY_GATEWAY_IMAGE:-public.ecr.aws/h4e6s7a8/gateway:${ANYRAY_IMAGE_TAG:-v1.10.85}}"
+    image: "${ANYRAY_GATEWAY_IMAGE:-public.ecr.aws/h4e6s7a8/gateway:${ANYRAY_IMAGE_TAG:-v1.10.87}}"
     # Re-pull the pinned release tag on every `up`; never run a cached older image.
     pull_policy: always
     restart: always
@@ -114,7 +114,7 @@ services:
 
   optimizer:
     logging: *default-logging
-    image: "${ANYRAY_OPTIMIZER_IMAGE:-public.ecr.aws/h4e6s7a8/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.85}}"
+    image: "${ANYRAY_OPTIMIZER_IMAGE:-public.ecr.aws/h4e6s7a8/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.87}}"
     pull_policy: always
     restart: always
     labels:
@@ -148,7 +148,7 @@ services:
 
   proxy:
     logging: *default-logging
-    image: "${ANYRAY_PROXY_IMAGE:-public.ecr.aws/h4e6s7a8/proxy:${ANYRAY_IMAGE_TAG:-v1.10.85}}"
+    image: "${ANYRAY_PROXY_IMAGE:-public.ecr.aws/h4e6s7a8/proxy:${ANYRAY_IMAGE_TAG:-v1.10.87}}"
     pull_policy: always
     restart: always
     labels:

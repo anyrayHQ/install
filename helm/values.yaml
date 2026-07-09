@@ -17,6 +17,16 @@ host: ""
 # cluster.local).
 clusterDomain: cluster.local
 
+# Air-gapped / private-registry installs: set imageRegistry to your internal
+# registry host to repoint EVERY image (gateway/optimizer/proxy/postgres) at it in
+# one shot, e.g. "my.registry:5000" → my.registry:5000/anyray/gateway. The image
+# path after the host is preserved, so mirror with a straight
+#   crane cp public.ecr.aws/anyray/gateway:<tag> my.registry:5000/anyray/gateway:<tag>
+# (per-image overrides under images.* still win). Empty = pull from public.ecr.aws.
+# See docs: Air-gapped / private-registry install.
+global:
+  imageRegistry: ""
+
 image:
   # Empty → images pin to the chart's appVersion (the release this chart ships),
   # so production deploys are reproducible and auditable. Set to "latest" (or any

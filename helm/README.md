@@ -21,13 +21,13 @@ The chart is published as an OCI artifact to the same public registry as the
 images — no git clone, no `setup.sh`:
 
 ```bash
-helm install anyray oci://public.ecr.aws/h4e6s7a8/anyray \
+helm install anyray oci://public.ecr.aws/anyray/anyray \
   --version <x.y.z> \
   --namespace "$ANYRAY_NAMESPACE" \
   -f my-values.yaml
 ```
 
-Browse released versions with `helm show chart oci://public.ecr.aws/h4e6s7a8/anyray`.
+Browse released versions with `helm show chart oci://public.ecr.aws/anyray/anyray`.
 Pulls are anonymous — nothing to authenticate.
 
 ### ArgoCD
@@ -43,7 +43,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: public.ecr.aws/h4e6s7a8   # registry, no chart name
+    repoURL: public.ecr.aws/anyray   # registry, no chart name
     chart: anyray
     targetRevision: 0.4.17             # a released chart version
     helm:

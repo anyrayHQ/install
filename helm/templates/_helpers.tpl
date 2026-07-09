@@ -67,6 +67,14 @@ the else branch is a defensive fallback.
 {{- $image := index .context.Values.images .component | default dict -}}
 {{- $repository := required (printf "images.%s.repository is required" .component) $image.repository -}}
 {{- $tag := $image.tag | default .context.Values.image.tag | default .context.Chart.AppVersion -}}
+{{- $globalRegistry := (.context.Values.global | default dict).imageRegistry | default "" -}}
+{{- if $globalRegistry -}}
+{{- /* Air-gapped / private-registry mirror: swap the registry host of every image
+       so one value repoints all of them (e.g. public.ecr.aws/anyray/gateway ->
+       my.registry:5000/anyray/gateway). The image path after the host is preserved
+       so a straight `crane cp` mirror works. */ -}}
+{{- $repository = printf "%s/%s" $globalRegistry (regexReplaceAll "^[^/]+/" $repository "") -}}
+{{- end -}}
 {{- if $tag -}}
 {{- printf "%s:%s" $repository $tag -}}
 {{- else -}}

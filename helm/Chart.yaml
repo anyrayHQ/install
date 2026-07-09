@@ -18,3 +18,11 @@ sources:
 maintainers:
   - name: Anyray
     url: https://docs.anyray.ai
+annotations:
+  # Artifact Hub listing metadata (https://artifacthub.io). The repo is registered
+  # once on artifacthub.io against https://charts.anyray.ai; these enrich the card.
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://docs.anyray.ai
+    - name: Air-gapped / private-registry install
+      url: https://docs.anyray.ai/get-started/install/air-gapped

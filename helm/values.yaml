@@ -31,13 +31,13 @@ image:
 # which in turn inherits the chart appVersion.
 images:
   gateway:
-    repository: public.ecr.aws/h4e6s7a8/gateway
+    repository: public.ecr.aws/anyray/gateway
     tag: ""
   optimizer:
-    repository: public.ecr.aws/h4e6s7a8/optimizer
+    repository: public.ecr.aws/anyray/optimizer
     tag: ""
   proxy:
-    repository: public.ecr.aws/h4e6s7a8/proxy
+    repository: public.ecr.aws/anyray/proxy
     tag: ""
   postgres:
     repository: docker.io/postgres

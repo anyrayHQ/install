@@ -9,9 +9,7 @@ name: AWS quicklaunch live smoke
 #
 # Auth mirrors publish-quicklaunch.yml: GitHub OIDC → a dedicated role in the
 # staging account (PowerUser + IAM scoped to cfn-smoke-* roles). The role ARN
-# lives in the AWS_CFN_SMOKE_ROLE_ARN repo variable; its trust policy accepts
-# main + pull_request refs of this repo only, so fork PRs (which get no OIDC
-# token anyway) cannot assume it and their runs skip.
+# lives in the AWS_CFN_SMOKE_ROLE_ARN repo variable.
 #
 # Cost per run: ~30-40 min of db.t4g.micro RDS + 2 ALBs + 6 Fargate tasks —
 # cents. Everything is torn down in `always()` steps; a janitor also reaps any
@@ -21,14 +19,9 @@ name: AWS quicklaunch live smoke
 # (defined in this file) and github.run_id (numeric) — no event-controlled text.
 
 on:
-  pull_request:
-    paths:
-      - aws/anyray-quicklaunch.template.yaml
-      - scripts/smoke-aws.sh
-      - scripts/verify-deploy.sh
-      - .github/workflows/smoke-aws-live.yml
-  schedule:
-    - cron: '17 5 * * 1' # weekly Monday 05:17 UTC — catches platform drift
+  # Manual-only. The pull_request + weekly-schedule triggers were removed to
+  # stop recurring AWS spend (each run stands up real ECS/RDS/ALB stacks). Run
+  # it by hand from the Actions tab before shipping a change to the template.
   workflow_dispatch:
 
 permissions:

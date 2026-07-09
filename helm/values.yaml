@@ -129,7 +129,18 @@ gateway:
   # secure-by-default with no toggle — the former requireClientKeys /
   # requireVerifiedDev values were removed.
   hsts: ""
-  trustProxy: ""
+  # Trust the ingress/proxy X-Forwarded-For for client-IP attribution. ON by
+  # default because this chart always fronts the gateway with the in-cluster
+  # ingress/proxy, so the gateway's socket peer is that hop — NOT the developer.
+  # Left off, every user collapses to one IP, so a handful of failed auths (e.g.
+  # one stale client key) trips the always-on auth-failure guard and locks the
+  # WHOLE cluster with "too many failed authentication attempts". The gateway
+  # reads the leftmost XFF hop, which a standard ingress-nginx
+  # (use-forwarded-headers=false, the default) sets to the real client and does
+  # not let callers spoof. Set "false" ONLY if you expose the gateway Service
+  # directly (NodePort / LoadBalancer with no proxy in front), where a client
+  # could forge X-Forwarded-For.
+  trustProxy: "true"
   rateLimitRpm: ""
   rateLimitIpRpm: ""
   rateLimitUnauthRpm: ""

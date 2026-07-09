@@ -277,3 +277,21 @@ ingress:
   # - secretName: anyray-tls
   #   hosts:
   #     - anyray.example.com
+
+# Gateway API (gateway.networking.k8s.io) — the modern successor to Ingress.
+# An alternative to `ingress` above: enable ONE of them. Generates an HTTPRoute
+# with the SAME routing (/ and /admin -> console proxy; /v1 and /connect ->
+# gateway), attached to a Gateway you already run (platform-managed) via
+# parentRefs — the chart does not create the Gateway itself. Requires the
+# Gateway API CRDs (gateway.networking.k8s.io/v1) installed in the cluster.
+httpRoute:
+  enabled: false
+  # The Gateway(s) this route attaches to. REQUIRED when enabled.
+  parentRefs: []
+  #  - name: my-gateway
+  #    namespace: gateway-system   # omit if the Gateway is in this namespace
+  #    sectionName: https          # a specific listener on the Gateway (optional)
+  # Hostnames the route matches. Leave empty to use the top-level `host`.
+  hostnames: []
+  #  - anyray.example.com
+  annotations: {}

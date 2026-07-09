@@ -28,7 +28,7 @@ import {
 // cycle that plain object refs would create.
 
 const TAG = "v1.10.84";
-const ecr = (name: string) => image(`public.ecr.aws/h4e6s7a8/${name}:${TAG}`);
+const ecr = (name: string) => image(`public.ecr.aws/anyray/${name}:${TAG}`);
 
 export default defineRailway(() => {
   const db = postgres("Postgres");

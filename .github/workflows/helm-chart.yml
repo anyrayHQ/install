@@ -47,13 +47,13 @@ jobs:
           render="$(helm template t helm --set host=anyray.example.com)"
           fail=0
           for c in gateway optimizer proxy; do
-            if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/h4e6s7a8/${c}:${APP_VERSION}"; then
+            if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:${APP_VERSION}"; then
               echo "::error::default render does not pin ${c} to appVersion ${APP_VERSION}:"
               printf '%s\n' "$render" | grep -E "image:.*/${c}:" || true
               fail=1
             fi
           done
-          if printf '%s\n' "$render" | grep -Eq 'h4e6s7a8/(gateway|optimizer|proxy):latest'; then
+          if printf '%s\n' "$render" | grep -Eq 'anyray/(gateway|optimizer|proxy):latest'; then
             echo "::error::default render uses a moving :latest tag — production images must be pinned"
             fail=1
           fi
@@ -63,5 +63,5 @@ jobs:
         run: |
           set -euo pipefail
           render="$(helm template t helm --set host=anyray.example.com --set image.tag=latest)"
-          printf '%s\n' "$render" | grep -q "public.ecr.aws/h4e6s7a8/gateway:latest" \
+          printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/gateway:latest" \
             || { echo "::error::image.tag override no longer pins :latest — the testing opt-in is broken"; exit 1; }

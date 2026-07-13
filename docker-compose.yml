@@ -17,13 +17,18 @@ x-logging: &default-logging
 services:
   gateway:
     logging: *default-logging
-    image: "${ANYRAY_GATEWAY_IMAGE:-public.ecr.aws/anyray/gateway:${ANYRAY_IMAGE_TAG:-v1.10.108}}"
-    # Re-pull the pinned release tag on every `up`; never run a cached older image.
-    pull_policy: always
+    # Default tag is the moving `stable` release channel: soft updates (image-only
+    # releases — see the updater below) are pulled and applied by the always-on
+    # updater under the gateway's control. Pin ANYRAY_IMAGE_TAG=vX.Y.Z in .env to
+    # hold a version (that is also the rollback lever).
+    image: "${ANYRAY_GATEWAY_IMAGE:-public.ecr.aws/anyray/gateway:${ANYRAY_IMAGE_TAG:-stable}}"
+    # `missing`, not `always`: on a moving channel tag, a plain `up -d` (a reboot,
+    # a config change) must never silently advance the version — only the
+    # policy-gated updater below or an explicit `docker compose pull` does.
+    pull_policy: missing
     restart: always
-    # Watched by the opt-in updater (the `updater` service below, --profile
-    # updater) — never the datastores or anything else on the host. No-op unless
-    # the updater profile is started.
+    # Watched by the always-on `updater` service below — never the datastores or
+    # anything else on the host.
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     depends_on:
@@ -56,6 +61,11 @@ services:
       ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
       ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
+      # Auto-apply of SOFT updates: the gateway triggers the updater below itself
+      # (default on; console toggle under Settings → Updates). The token must
+      # match the updater's — same admin-token default, so only set this if you
+      # overrode it there.
+      ANYRAY_UPDATER_TOKEN: ${ANYRAY_UPDATER_TOKEN:-}
       ANYRAY_PROVIDER_KEY_OPENAI: ${ANYRAY_PROVIDER_KEY_OPENAI:-}
       ANYRAY_PROVIDER_KEY_ANTHROPIC: ${ANYRAY_PROVIDER_KEY_ANTHROPIC:-}
       ANYRAY_PROVIDER_KEY_AZURE_OPENAI: ${ANYRAY_PROVIDER_KEY_AZURE_OPENAI:-}
@@ -114,8 +124,8 @@ services:
 
   optimizer:
     logging: *default-logging
-    image: "${ANYRAY_OPTIMIZER_IMAGE:-public.ecr.aws/anyray/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.108}}"
-    pull_policy: always
+    image: "${ANYRAY_OPTIMIZER_IMAGE:-public.ecr.aws/anyray/optimizer:${ANYRAY_IMAGE_TAG:-stable}}"
+    pull_policy: missing
     restart: always
     labels:
       com.centurylinklabs.watchtower.enable: "true"
@@ -148,8 +158,8 @@ services:
 
   proxy:
     logging: *default-logging
-    image: "${ANYRAY_PROXY_IMAGE:-public.ecr.aws/anyray/proxy:${ANYRAY_IMAGE_TAG:-v1.10.108}}"
-    pull_policy: always
+    image: "${ANYRAY_PROXY_IMAGE:-public.ecr.aws/anyray/proxy:${ANYRAY_IMAGE_TAG:-stable}}"
+    pull_policy: missing
     restart: always
     labels:
       com.centurylinklabs.watchtower.enable: "true"
@@ -213,20 +223,27 @@ services:
     volumes:
       - anyray_postgres_data:/var/lib/postgresql/data
 
-  # ── Updater: one-click update for the Anyray images ─────────────────────────
+  # ── Updater: one-click + automatic SOFT updates for the Anyray images ───────
   # Always on — the console's "Update now" button works with no setup, and there
-  # is no toggle to disable it. The token the trigger needs derives from
-  # ANYRAY_ADMIN_TOKEN (override with ANYRAY_UPDATER_TOKEN).
+  # is no toggle to disable the service itself. The token the trigger needs
+  # derives from ANYRAY_ADMIN_TOKEN (override with ANYRAY_UPDATER_TOKEN — on the
+  # gateway too, which presents it when auto-applying).
   # Bundles Watchtower to pull newer images and recreate the Anyray app
-  # containers (gateway/optimizer/proxy) when the operator clicks the console's
-  # "Update now" button (Watchtower HTTP API). Updates apply only on that click —
-  # there is no unattended polling.
+  # containers (gateway/optimizer/proxy). Two triggers, both via the HTTP API —
+  # Watchtower itself never polls:
+  #   · the operator clicking the console's "Update now" button, and
+  #   · the gateway's automatic apply of SOFT updates — image-only releases whose
+  #     local preflight passes with nothing flagged breaking. Default on; console
+  #     toggle under Settings → Updates. HARD updates (a new required env var, a
+  #     breaking release) are never applied unattended — the console banner walks
+  #     the operator through them (typically: re-run ./setup.sh, which backfills
+  #     new settings, then update).
   #
-  # Uses the moving latest channel by default so there is a newer digest to roll
+  # Uses the moving stable channel by default so there is a newer digest to roll
   # forward to. Override ANYRAY_IMAGE_TAG=vX.Y.Z when you want pinned/manual
-  # updates. Watchtower only touches containers labelled
-  # com.centurylinklabs.watchtower.enable=true (the three app services above),
-  # never the datastores or anything else on the host.
+  # updates (that pin is also the rollback lever). Watchtower only touches
+  # containers labelled com.centurylinklabs.watchtower.enable=true (the three app
+  # services above), never the datastores or anything else on the host.
   #
   # SECURITY: Watchtower never gets the raw Docker socket — it talks to the
   # docker-socket-proxy below, which exposes only the minimal Docker API needed

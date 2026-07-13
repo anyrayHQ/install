@@ -302,11 +302,15 @@ if [ "$K8S" -eq 0 ]; then
   if [ "$NEW_ENV" -eq 1 ]; then
     cat >> .env <<'EOF'
 
-# Updater — the console's one-click "Update now" button, always on (no toggle to
-# disable it). The stack uses the moving latest channel so there is a newer build
-# to pull, and the trigger is gated by ANYRAY_ADMIN_TOKEN automatically (no token
-# to set). Updates apply only on that click — there is no unattended polling.
-# Docs: docs.anyray.ai -> Configure -> Updates, and Security -> the Docker socket.
+# Updates — the stack tracks the moving `stable` channel. SOFT updates
+# (image-only releases; the gateway verifies nothing else changes) apply
+# automatically by default — turn that off in the console (Settings → Updates).
+# HARD updates (a new required setting, a breaking release) always wait for an
+# operator: re-run ./setup.sh (it backfills new settings), then update. Pin a
+# version instead with ANYRAY_IMAGE_TAG=vX.Y.Z (also the rollback lever). The
+# updater trigger is gated by ANYRAY_ADMIN_TOKEN automatically (no token to set).
+# Docs: docs.anyray.ai -> Configure -> Updates, and Security -> Updates are locked down.
+# ANYRAY_IMAGE_TAG=
 # ANYRAY_UPDATER_TOKEN=
 EOF
     echo "✓ Secrets generated → .env"

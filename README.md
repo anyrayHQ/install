@@ -115,9 +115,21 @@ before sending traffic.
 
 ## Upgrade
 
+**Soft updates apply themselves.** The stack tracks the moving `stable` channel, and
+the gateway auto-applies **soft** updates — image-only releases whose local preflight
+confirms nothing else has to change — by default (turn off in the console under
+**Settings → Updates**). **Hard** updates (a new required `.env` setting, a release
+flagged breaking) are never applied unattended; the console banner names what's
+missing. For those, or to converge manually:
+
 ```bash
-git pull && docker compose pull && docker compose up -d
+git pull && ./setup.sh && docker compose pull && docker compose up -d
 ```
+
+(`setup.sh` backfills any new settings and never touches your existing secrets; on a
+soft-only lag, `docker compose pull && docker compose up -d` alone is enough.) To hold
+or roll back a version, set `ANYRAY_IMAGE_TAG=vX.Y.Z` in `.env` and re-run
+`docker compose up -d`.
 
 New optimizer default profiles ship in the image but seed config only on first run,
 so an existing deployment keeps its saved config. To adopt new defaults, update the

@@ -77,7 +77,12 @@ Parameters:
   ImageTag:
     Type: String
     Default: latest
-    Description: Anyray image tag to deploy. latest is the moving release channel; use vX.Y.Z to pin.
+    Description: >-
+      Anyray image tag to deploy. latest is the moving release channel
+      (published in lockstep with the stable channel the Compose stack tracks;
+      the two currently point at the same release); use vX.Y.Z to pin. Note
+      ECS re-pulls this tag when a task recycles, so a moving tag can advance
+      the version outside a stack update — pin to prevent that.
   DefaultModel:
     Type: String
     Default: 'anthropic/claude-sonnet-4-5'

@@ -200,13 +200,18 @@ optimizer:
     enabled: true
     size: 1Gi
     storageClass: ""
+  # 1 vCPU / 2 GB guaranteed. The optimizer runs onnxruntime (MiniLM re-rank,
+  # OCR) synchronously on the Node event loop; at fractional vCPU a single
+  # inference pegs CPU to 100%, blocking the loop long enough to fail the
+  # readiness probe and churn the pod. A full-core request keeps each inference
+  # block short so the gateway's optimize call lands before it times out.
   resources:
     requests:
-      cpu: "250m"
-      memory: "512Mi"
-    limits:
       cpu: "1000m"
-      memory: "1Gi"
+      memory: "2Gi"
+    limits:
+      cpu: "1500m"
+      memory: "2Gi"
   extraEnv: []
 
 # Proxy (nginx reverse proxy / console)

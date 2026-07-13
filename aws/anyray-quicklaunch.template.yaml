@@ -720,8 +720,14 @@ Resources:
       Family: !Sub '${AWS::StackName}-optimizer'
       RequiresCompatibilities: [FARGATE]
       NetworkMode: awsvpc
-      Cpu: '256'
-      Memory: '512'
+      # 1 vCPU / 2 GB. The optimizer runs onnxruntime (MiniLM re-rank, OCR)
+      # synchronously on the Node event loop; at fractional vCPU a single
+      # inference pegs CPU to 100%, blocking the loop long enough to miss the
+      # health probe and trigger recycle churn (exit 137). A full vCPU shortens
+      # each inference block and keeps the gateway's optimize call landing before
+      # it times out. Cpu 1024 requires Memory >= 2048 (Fargate valid combos).
+      Cpu: '1024'
+      Memory: '2048'
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       Volumes:

@@ -1,0 +1,34 @@
+name: Helm chart drift
+
+# Alarms when the PUBLISHED Helm channel (charts.anyray.ai) has fallen behind the
+# chart pinned in helm/Chart.yaml. The chart is published to charts.anyray.ai +
+# the OCI registry by the MONOREPO (publish-chart.yml / deploy-prod), reading THIS
+# repo's Chart.yaml; if that publish lags, `helm repo add` users and the Artifact
+# Hub card silently get a stale release (shipped: the channel stuck on 0.4.51 /
+# v1.10.107 while the repo pinned 0.4.52 / v1.10.108). This makes that drift a red
+# run within a day of it happening instead of a customer discovering it.
+#
+# It reads only the public index.yaml + the repo file (no secrets), and it does
+# NOT publish — the fix lives in the monorepo, so on failure it prints the exact
+# workflow to dispatch. It is a monitor, not a merge gate: no pull_request trigger,
+# so it never false-alarms in the window between a Chart.yaml bump landing and the
+# monorepo publish running. Sibling of template-drift.yml (the Railway equivalent).
+on:
+  schedule:
+    - cron: '37 6 * * *' # daily 06:37 UTC — catch drift within a day of a release
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-chart-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Published Helm channel matches helm/Chart.yaml
+        run: bash helm/check-chart-drift.sh

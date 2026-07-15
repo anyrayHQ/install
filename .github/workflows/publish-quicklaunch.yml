@@ -49,6 +49,15 @@ jobs:
         run: |
           python3 -m pip install --quiet cfn-lint
           cfn-lint "$TEMPLATE"
+          image_tag="$(awk '
+            /^  ImageTag:$/ { in_image_tag = 1; next }
+            in_image_tag && /^    Default:/ { print $2; exit }
+            in_image_tag && /^  [A-Za-z][A-Za-z0-9]*:/ { exit }
+          ' "$TEMPLATE")"
+          if [[ ! "$image_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Refusing to publish a mutable or malformed ImageTag.Default: ${image_tag:-missing}"
+            exit 1
+          fi
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4

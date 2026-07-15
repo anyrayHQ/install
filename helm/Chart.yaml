@@ -7,7 +7,7 @@ version: 0.4.59
 # tag (see values.yaml image.tag), so a given chart version always deploys the
 # same, auditable build. Bumped in lockstep with each release by the monorepo
 # prod promotion; override image.tag to test a different/moving tag.
-appVersion: "v1.10.119"
+appVersion: "v1.10.120"
 keywords:
   - anyray
   - ai-gateway
@@ -19,10 +19,11 @@ maintainers:
   - name: Anyray
     url: https://docs.anyray.ai
 annotations:
+  # Install-contract capability. Unlike appVersion, release automation never
+  # stamps this value; the chart revision owns its rollout semantics.
+  anyray.ai/persistent-transcript-policy-v1: "true"
   # Artifact Hub listing metadata (https://artifacthub.io). The repo is registered
   # once on artifacthub.io against https://charts.anyray.ai; these enrich the card.
   artifacthub.io/links: |
     - name: Documentation
       url: https://docs.anyray.ai
-    - name: Air-gapped / private-registry install
-      url: https://docs.anyray.ai/get-started/install/air-gapped

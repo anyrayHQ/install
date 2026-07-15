@@ -119,6 +119,37 @@ before sending traffic.
 git pull && docker compose pull && docker compose up -d
 ```
 
+Use the full command for releases reported as a hard/template update; do not
+pull and restart only the application images. The current Compose template
+waits for the compatible optimizer to become healthy before it starts the
+gateway and activates the persistent-transcript safety policy. That ordering
+cannot be supplied by an older Compose file or by an image-only updater.
+
+Legacy installs that explicitly track `latest` or `stable` continue receiving
+compatible binaries, but the new policy remains dormant because those templates
+do not supply its activation instant. Refreshing to a capability-aware template
+is what activates the contract; after that, use `policy-stable` for compatible
+soft updates (or keep an immutable `vX.Y.Z` pin). Existing explicit overrides
+are preserved until the operator changes them during that template refresh.
+
+Helm, Railway, and CloudFormation roll gateway and optimizer workloads
+independently. Their first upgrade with a capability-aware artifact revision
+therefore requires one explicit shared activation instant far enough in the
+future (Helm enforces at least 30 minutes on first use) to finish and, if needed,
+roll back both workloads. Preserve that exact timestamp on later upgrades.
+Offline GitOps users acknowledge the verified first rollout explicitly as
+described in the Helm README. Older artifact revisions remain legacy and do not
+gain this requirement merely because an image tag changes. The platform READMEs
+and CloudFormation parameter description contain the target-specific steps; do
+not substitute Compose's already-past default on those orchestrators.
+
+The AWS Quick Launch template pins `ImageTag` to an immutable release. Older
+published template revisions permit an empty
+`PersistentTranscriptPolicyActivateAt`; the capability-aware template requires
+the shared timestamp regardless of `ImageTag`. When upgrading an older stack
+that stored `ImageTag=latest`, replace that parameter with the candidate
+template's pinned default instead of preserving `latest`.
+
 New optimizer default profiles ship in the image but seed config only on first run,
 so an existing deployment keeps its saved config. To adopt new defaults, update the
 optimizer config from the console — your `.env` and secrets are untouched.

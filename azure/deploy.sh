@@ -22,7 +22,7 @@
 #   ALLOWED_CIDR      CIDR allowed to reach the console/gateway LBs. REQUIRED.
 #                     Scope to your office/VPN range — never 0.0.0.0/0.
 #   DEPLOYMENT_TOKEN  Anyray Cloud deployment token (adt_...). REQUIRED for metering.
-#   IMAGE_TAG         Anyray image tag (default: latest)
+#   IMAGE_TAG         Chart appVersion or policy-stable (default: chart pin)
 #   DEFAULT_MODEL     anyray-default routing target (default: anthropic/claude-sonnet-4-5)
 #
 # Content stays encrypted at rest (ANYRAY_CONTENT_MODE=encrypted); only metadata
@@ -42,7 +42,7 @@ CLUSTER="${CLUSTER:-anyray}"
 NAMESPACE="${NAMESPACE:-anyray}"
 NODE_VM_SIZE="${NODE_VM_SIZE:-Standard_D2s_v5}"
 NODE_COUNT="${NODE_COUNT:-2}"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
+IMAGE_TAG="${IMAGE_TAG:-v1.10.120}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}"
 ALLOWED_CIDR="${ALLOWED_CIDR:-}"
 DEPLOYMENT_TOKEN="${DEPLOYMENT_TOKEN:-}"
@@ -62,6 +62,8 @@ prompt DEPLOYMENT_TOKEN "Anyray deployment token (adt_...): "
 # ---- Validate ---------------------------------------------------------------
 die() { echo "✗ $*" >&2; exit 1; }
 
+"$REPO_ROOT/scripts/validate-one-click-image-tag.sh" \
+  "$IMAGE_TAG" "$REPO_ROOT/helm/Chart.yaml"
 [ -n "$ALLOWED_CIDR" ] || die "ALLOWED_CIDR is required — scope it to your office/VPN range."
 [ "$ALLOWED_CIDR" != "0.0.0.0/0" ] || die "ALLOWED_CIDR must not be 0.0.0.0/0 — the console and gateway carry spend data and admin access."
 echo "$ALLOWED_CIDR" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' \
@@ -148,6 +150,14 @@ echo "→ Installing the Anyray Helm chart…"
 helm upgrade --install anyray "$REPO_ROOT/helm" \
   -f "$REPO_ROOT/my-values.yaml" -f "$OVERLAY" \
   --namespace "$NAMESPACE" --wait --timeout 10m
+
+if [ "$IMAGE_TAG" = policy-stable ]; then
+  echo "→ Resolving the latest policy-stable image digest…"
+  kubectl rollout restart deployment -n "$NAMESPACE" \
+    -l app.kubernetes.io/instance=anyray
+  kubectl rollout status deployment -n "$NAMESPACE" \
+    -l app.kubernetes.io/instance=anyray --timeout=10m
+fi
 
 # ---- 5. Wait for the LoadBalancer IPs --------------------------------------
 wait_for_lb() { # wait_for_lb <service> -> echoes external IP

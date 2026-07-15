@@ -24,7 +24,8 @@
 #
 # Required env: TEMPLATE, LANE, VPC_ID, SUBNET_A, SUBNET_B.
 # Optional: STACK (name), PUBLISHED_URL, ALLOWED_CIDR (defaults to caller IP/32),
-#           KEEP=1 to skip teardown (debugging).
+#           POLICY_ACTIVATE_AT (defaults two hours ahead), KEEP=1 to skip
+#           teardown (debugging).
 set -euo pipefail
 
 TEMPLATE="${TEMPLATE:?path to candidate template}"
@@ -35,13 +36,46 @@ PUBLISHED_URL="${PUBLISHED_URL:-https://anyray-quicklaunch.s3.us-east-1.amazonaw
 ALLOWED_CIDR="${ALLOWED_CIDR:-$(curl -fsS --max-time 10 https://checkip.amazonaws.com)/32}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-PARAMS=(
+future_policy_activation_at() {
+  local value=""
+  value="$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || \
+    value="$(date -u -v+2H '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || true
+  [ -n "$value" ] || {
+    echo "could not calculate a future policy activation instant with date" >&2
+    return 1
+  }
+  printf '%s' "$value"
+}
+
+template_image_tag() {
+  awk '
+    /^  ImageTag:$/ { in_image_tag = 1; next }
+    in_image_tag && /^    Default:/ { print $2; exit }
+    in_image_tag && /^  [A-Za-z][A-Za-z0-9]*:/ { exit }
+  ' "$@"
+}
+
+template_has_transcript_policy_capability() {
+  grep -q '^[[:space:]]\{4\}persistentTranscriptPolicyV1:[[:space:]]*true[[:space:]]*$' "$1"
+}
+
+POLICY_ACTIVATE_AT="${POLICY_ACTIVATE_AT:-$(future_policy_activation_at)}"
+CANDIDATE_IMAGE_TAG="$(template_image_tag "$TEMPLATE")"
+if [[ ! "$CANDIDATE_IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "candidate CloudFormation ImageTag.Default is not immutable: ${CANDIDATE_IMAGE_TAG:-missing}" >&2
+  exit 2
+fi
+BASE_PARAMS=(
   "ParameterKey=VpcId,ParameterValue=${VPC_ID}"
   "ParameterKey=SubnetA,ParameterValue=${SUBNET_A}"
   "ParameterKey=SubnetB,ParameterValue=${SUBNET_B}"
   "ParameterKey=AllowedCidr,ParameterValue=${ALLOWED_CIDR}"
   "ParameterKey=DeploymentToken,ParameterValue=adt_cismoke0000000000"
 )
+CANDIDATE_PARAMS=("${BASE_PARAMS[@]}")
+if template_has_transcript_policy_capability "$TEMPLATE"; then
+  CANDIDATE_PARAMS+=("ParameterKey=PersistentTranscriptPolicyActivateAt,ParameterValue=${POLICY_ACTIVATE_AT}")
+fi
 
 cleanup() {
   local rc=$?
@@ -76,8 +110,8 @@ probe() {
 
   # The console proxy is healthy from boot, but the gateway behind the /__auth
   # gate waits on RDS + migrations; poll the login page until the stack settles.
-  local code="" i
-  for i in $(seq 1 60); do
+  local code=""
+  for _ in $(seq 1 60); do
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${console}/console/" || true)"
     [ "$code" = 200 ] && break
     sleep 10
@@ -109,22 +143,47 @@ case "$LANE" in
     aws cloudformation create-stack --stack-name "$STACK" \
       --template-body "file://${TEMPLATE}" \
       --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
-      --parameters "${PARAMS[@]}" >/dev/null
+      --parameters "${CANDIDATE_PARAMS[@]}" >/dev/null
     aws cloudformation wait stack-create-complete --stack-name "$STACK"
     probe fresh
     ;;
   update)
     echo "→ create ${STACK} from PUBLISHED template"
+    published_params=("${BASE_PARAMS[@]}")
+    published_template="$(curl -fsS --max-time 30 "$PUBLISHED_URL")"
+    if grep -q '^[[:space:]]\{4\}persistentTranscriptPolicyV1:[[:space:]]*true[[:space:]]*$' \
+      <<<"$published_template"; then
+      published_params+=("ParameterKey=PersistentTranscriptPolicyActivateAt,ParameterValue=${POLICY_ACTIVATE_AT}")
+    fi
     aws cloudformation create-stack --stack-name "$STACK" \
       --template-url "$PUBLISHED_URL" \
       --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
-      --parameters "${PARAMS[@]}" >/dev/null
+      --parameters "${published_params[@]}" >/dev/null
     aws cloudformation wait stack-create-complete --stack-name "$STACK"
     probe published
 
     echo "→ update ${STACK} to candidate (the customer upgrade path)"
+    # The backticks are JMESPath boolean literals, not shell interpolation.
+    # shellcheck disable=SC2016
     upd_params="$(aws cloudformation describe-stacks --stack-name "$STACK" \
       --query 'Stacks[0].Parameters[].{ParameterKey:ParameterKey,UsePreviousValue:`true`}' --output json)"
+    # Existing stacks commonly have ImageTag=latest stored from the old
+    # template. Replace it with the candidate's immutable pin instead of asking
+    # CloudFormation to preserve a value the staged template now rejects.
+    upd_params="$(jq --arg image "$CANDIDATE_IMAGE_TAG" '
+      if any(.ParameterKey == "ImageTag") then
+        map(if .ParameterKey == "ImageTag" then {ParameterKey: "ImageTag", ParameterValue: $image} else . end)
+      else . + [{ParameterKey: "ImageTag", ParameterValue: $image}]
+      end
+    ' <<<"$upd_params")"
+    if template_has_transcript_policy_capability "$TEMPLATE"; then
+      upd_params="$(jq --arg value "$POLICY_ACTIVATE_AT" '
+        if any(.ParameterKey == "PersistentTranscriptPolicyActivateAt") then
+          map(if .ParameterKey == "PersistentTranscriptPolicyActivateAt" then {ParameterKey: "PersistentTranscriptPolicyActivateAt", ParameterValue: $value} else . end)
+        else . + [{ParameterKey: "PersistentTranscriptPolicyActivateAt", ParameterValue: $value}]
+        end
+      ' <<<"$upd_params")"
+    fi
     set +e
     upd_err="$(aws cloudformation update-stack --stack-name "$STACK" \
       --template-body "file://${TEMPLATE}" \

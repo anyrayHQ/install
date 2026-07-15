@@ -258,6 +258,15 @@ images:
     tag: "17"
 ```
 
+**Running NetworkPolicies?** The chart ships none, but if your cluster enforces
+default-deny, allow — in addition to the obvious proxy→gateway→optimizer lanes —
+**optimizer → Postgres on 5432**. The gateway auto-provisions the optimizer's
+durable context stash against the same database at boot (no values change
+involved), so this lane is easy to miss. Blocking it is non-fatal: the optimizer
+declines the persist within its budget and falls back to in-memory (stashed
+context then won't survive a pod restart). The symptom is
+`Context stash persist failed: ETIMEDOUT` in the optimizer logs.
+
 ## Gateway runtime knobs
 
 `/v1/*` is always restricted to verified developers (a minted client key) —
@@ -327,6 +336,13 @@ postgres:
       name: anyray-external-postgres
       key: DATABASE_URL
 ```
+
+If the managed database sits behind a firewall or security-group allowlist,
+permit **both the gateway and the optimizer pods** (in practice: the cluster's
+egress source, e.g. the node or NAT addresses). The gateway hands the optimizer
+this database for its durable context stash at boot, so an allowlist written for
+the gateway alone silently degrades the optimizer to in-memory stash
+(`Context stash persist failed: ETIMEDOUT` in its logs).
 
 ## v1 limitations to be aware of
 

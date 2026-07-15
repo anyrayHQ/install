@@ -21,7 +21,7 @@ x-logging: &default-logging
 services:
   optimizer:
     logging: *default-logging
-    image: "${ANYRAY_OPTIMIZER_IMAGE:-public.ecr.aws/anyray/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.116}}"
+    image: "${ANYRAY_OPTIMIZER_IMAGE:-public.ecr.aws/anyray/optimizer:${ANYRAY_IMAGE_TAG:-v1.10.118}}"
     # Re-pull the pinned release tag on every `up`; never run a cached older image.
     pull_policy: always
     restart: always
@@ -66,7 +66,7 @@ services:
 
   proxy:
     logging: *default-logging
-    image: "${ANYRAY_PROXY_IMAGE:-public.ecr.aws/anyray/proxy:${ANYRAY_IMAGE_TAG:-v1.10.116}}"
+    image: "${ANYRAY_PROXY_IMAGE:-public.ecr.aws/anyray/proxy:${ANYRAY_IMAGE_TAG:-v1.10.118}}"
     pull_policy: always
     restart: always
     # optimizer healthy first: nginx auth_request hits optimizer:8088/admin/auth

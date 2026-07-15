@@ -3,8 +3,8 @@
 #
 # `railway config apply` provisions the services and wires every internal reference,
 # but two things IaC can't express declaratively are seeded here (idempotently):
-#   1. generated secrets, plus the policy activation instant once the IaC image
-#      pin supports it (preserve()d in railway.ts)
+#   1. generated secrets, plus the policy activation instant when this install
+#      revision declares the capability (preserve()d in railway.ts)
 #   2. public domains for gateway (:8787) and proxy (:80) + the URLs that reference them
 #
 # Run AFTER `railway config apply`, with the target project/environment linked
@@ -14,8 +14,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=railway/policy-version.sh
-source "$here/policy-version.sh"
+# shellcheck source=railway/policy-capability.sh
+source "$here/policy-capability.sh"
 
 iac_tag="$(sed -nE 's/^const TAG = "(v[0-9]+\.[0-9]+\.[0-9]+)";.*/\1/p' "$here/../.railway/railway.ts")"
 anyray_valid_release_tag "$iac_tag" || {
@@ -73,10 +73,10 @@ set_if_empty gateway ANYRAY_ADMIN_TOKEN "$(hex 24)"
 set_if_empty gateway ANYRAY_CONTENT_KEY "$(hex 32)"      # 32-byte AES-256-GCM key
 set_if_empty gateway ANYRAY_OPTIMIZER_TOKEN "$(hex 24)"
 set_if_empty gateway ANYRAY_PSEUDONYM_SALT "$(hex 16)"
-if anyray_policy_enabled_for_tag "$iac_tag"; then
+if anyray_install_has_capability; then
   set_activation_if_empty "$(future_policy_activation_at)"
 else
-  echo "  skip gateway.ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT ($iac_tag predates $ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_MIN_TAG)"
+  echo "  skip gateway.ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT (install capability is absent)"
 fi
 set_if_empty proxy   ANYRAY_UPDATER_TOKEN "$(hex 16)"
 

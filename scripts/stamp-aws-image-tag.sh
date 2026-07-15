@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Stamp only Parameters.ImageTag.Default in the AWS Quick Launch template.
-# A scoped edit is required: the same template deliberately retains an encoded
-# pre-policy compatibility cutoff that must never advance with the image pin.
+# Capability metadata, rollout rules, and health semantics belong to the
+# template revision and must remain byte-stable across nightly image bumps.
 set -euo pipefail
 
 version="${1:?usage: stamp-aws-image-tag.sh vX.Y.Z [template]}"

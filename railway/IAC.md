@@ -43,10 +43,11 @@ Three things Railway IaC can't express declaratively, so the bootstrap seeds the
    `preserve()`d in `railway.ts`, so `apply` never overwrites them.
 2. **Public domains** — the generated URLs for the gateway (`:8787`) and console (`:80`),
    and the `ANYRAY_*_PUBLIC_URL` vars that reference them.
-3. **Coordinated activation** — once the pinned image is `v1.10.117` or newer,
-   one future `ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT`, preserved after
-   it is set so later applies never move the activation boundary. The bootstrap
-   deliberately leaves this unset for earlier image pins.
+3. **Coordinated activation** — when this install revision declares the
+   `persistentTranscriptPolicyV1` capability, one future
+   `ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT`, preserved after it is set
+   so later applies never move the activation boundary. Older repository
+   revisions without the capability marker deliberately leave this unset.
 
 ## Connect metering (Billing app)
 
@@ -63,11 +64,12 @@ railway/railway-iac-bootstrap.sh adt_your_deployment_token
 release (bumped in CI), so a pull + apply rolls the stack forward. Secrets, domains, and
 an existing activation instant are preserved.
 
-On a tag before `v1.10.117`, bootstrap does not calculate or store an activation
-instant. When release automation later stamps `.railway/railway.ts` to
-`v1.10.117` or newer, pull and run `railway config apply` first; this stages the
-compatible gateway and optimizer with the policy still inactive. Then rerun
-`railway/railway-iac-bootstrap.sh`. It creates a fresh instant one hour from that
-run and redeploys the gateway, without replacing an existing value. Confirm both
-services are healthy before that instant; roll back before it if either is not.
-Later applies must keep the same timestamp, even after it is in the past.
+When moving from an older repository revision to one that declares the install
+capability, pull and run `railway config apply` first; this stages the matching
+gateway and optimizer with the policy still inactive. Then rerun
+`railway/railway-iac-bootstrap.sh`. It reads the persistent repository marker,
+creates a fresh instant one hour from that run, and redeploys the gateway without
+replacing an existing value. Confirm both services are healthy before that
+instant; roll back before it if either is not. Later applies must keep the same
+timestamp, even after it is in the past. Image tags remain immutable deployment
+pins; they do not toggle this install behavior.

@@ -14,6 +14,10 @@ Description: >-
   only metadata is logged.
 
 Metadata:
+  AnyrayCapabilities:
+    # This template revision owns the install contract. ImageTag is stamped
+    # independently and never enables or disables rollout semantics.
+    persistentTranscriptPolicyV1: true
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label: { default: Networking }
@@ -221,10 +225,11 @@ Parameters:
     ConstraintDescription: Must be empty or a timezone-qualified ISO-8601 instant such as 2026-07-15T12:00:00.000Z.
     Description: >-
       Coordinated activation instant for the persistent-transcript safety
-      policy. Leave empty only while this template is pinned to the pre-policy
-      v1.10.116 image. A policy-compatible image requires one shared future
-      instant far enough out for every task to become healthy and leave time to
-      roll back. Preserve that exact value on later updates.
+      policy. This capability-aware template requires one shared future instant
+      far enough out for every task to become healthy and leave time to roll
+      back. Preserve that exact value on later updates. To retain legacy
+      behavior, keep using the older template revision instead of changing only
+      ImageTag.
   DbInstanceClass:
     Type: String
     Default: db.t4g.micro
@@ -237,21 +242,13 @@ Parameters:
 
 Rules:
   PersistentTranscriptPolicyActivationRequired:
-    # The escaped digits decode to the immutable v1.10.116 legacy cutoff while
-    # preventing the release bot's exact vX.Y.Z stamp from advancing this
-    # exemption along with ImageTag.Default.
-    RuleCondition:
-      Fn::Not:
-        - Fn::Equals:
-            - !Ref ImageTag
-            - "v1.10.\u0031\u0031\u0036"
     Assertions:
       - Assert:
           Fn::Not:
             - Fn::Equals: [!Ref PersistentTranscriptPolicyActivateAt, '']
         AssertDescription: >-
-          PersistentTranscriptPolicyActivateAt is required when ImageTag is
-          v1.10.117 or newer; choose one shared future instant and preserve it.
+          This template requires PersistentTranscriptPolicyActivateAt; choose
+          one shared future instant and preserve it on later updates.
   AllowedCidrMustNotBePublic:
     Assertions:
       - Assert:
@@ -265,9 +262,6 @@ Conditions:
   HasCert: !Not [!Equals [!Ref CertificateArn, '']]
   HasGatewayUrl: !Not [!Equals [!Ref GatewayPublicUrl, '']]
   HasConsoleUrl: !Not [!Equals [!Ref ConsolePublicUrl, '']]
-  # Keep this cutoff source-encoded for the same reason as the Rule above: the
-  # release bot must stamp ImageTag.Default without advancing legacy behavior.
-  PersistentTranscriptPolicyV1Enabled: !Not [!Equals [!Ref ImageTag, "v1.10.\u0031\u0031\u0036"]]
 
 Resources:
   # ---- Secret generation (no setup.sh) --------------------------------------
@@ -795,10 +789,7 @@ Resources:
             - { Name: ANYRAY_SPEND_DB_URL, ValueFrom: !GetAtt DbUrlSecret.DbUrlArn }
             - { Name: ANYRAY_CONTENT_KEY, ValueFrom: !GetAtt AppSecrets.ContentKeyArn }
           HealthCheck:
-            Command: !If
-              - PersistentTranscriptPolicyV1Enabled
-              - [CMD-SHELL, 'node -e "fetch(''http://localhost:8088/health'').then(async r=>{if(!r.ok)throw 0;const j=await r.json();process.exit(j?.features?.persistentTranscriptPolicyV1===true?0:1)}).catch(()=>process.exit(1))"']
-              - [CMD-SHELL, 'node -e "fetch(''http://localhost:8088/health'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"']
+            Command: [CMD-SHELL, 'node -e "fetch(''http://localhost:8088/health'').then(async r=>{if(!r.ok)throw 0;const j=await r.json();process.exit(j?.features?.persistentTranscriptPolicyV1===true?0:1)}).catch(()=>process.exit(1))"']
             Interval: 10
             Timeout: 5
             Retries: 10

@@ -127,25 +127,16 @@ b64enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
 
 get_env() { sed -n "s/^$1=//p" .env 2>/dev/null | head -n1; }
 
-# The coordinated policy first ships in v1.10.117. Read the chart's pinned
-# default so setup starts generating the gate in the same release that needs it,
-# without making a pre-policy chart unusable before compatible images exist.
-chart_default_supports_transcript_policy() {
-  local tag major minor patch
-  tag="$(sed -nE 's/^appVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' helm/Chart.yaml | head -n 1)"
-  [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || {
-    echo "✗ helm/Chart.yaml appVersion must be a pinned vX.Y.Z tag (got '${tag:-missing}')" >&2
+# The chart revision, not its nightly-stamped appVersion, owns install
+# capabilities. Missing means an older chart; any other value fails closed.
+chart_declares_transcript_policy_capability() {
+  local capability
+  capability="$(sed -nE 's#^[[:space:]]+anyray\.ai/persistent-transcript-policy-v1:[[:space:]]*"?([^"#[:space:]]+)"?.*#\1#p' helm/Chart.yaml | head -n 1)"
+  [ -z "$capability" ] && return 1
+  [ "$capability" = true ] || {
+    echo "✗ helm/Chart.yaml capability anyray.ai/persistent-transcript-policy-v1 must be true" >&2
     return 2
   }
-  major="${BASH_REMATCH[1]}"
-  minor="${BASH_REMATCH[2]}"
-  patch="${BASH_REMATCH[3]}"
-  major=$((10#$major))
-  minor=$((10#$minor))
-  patch=$((10#$patch))
-  (( major > 1 ||
-     (major == 1 && minor > 10) ||
-     (major == 1 && minor == 10 && patch >= 117) ))
 }
 
 # One hour leaves room for independent gateway + optimizer rollouts and a
@@ -184,7 +175,7 @@ add_secret() {
 # deployment token + pseudonym salt live in anyray-secrets.yaml.
 write_values_stub() {
   local policy_activation_at="" policy_capability_status
-  if chart_default_supports_transcript_policy; then
+  if chart_declares_transcript_policy_capability; then
     policy_activation_at="$(future_policy_activation_at)"
   else
     policy_capability_status=$?
@@ -205,7 +196,7 @@ write_values_stub() {
     echo "# (recommended for production — every deploy is a fixed, auditable build)."
     echo "# To test the newest build instead, uncomment and pair with pullPolicy: Always:"
     echo "# image:"
-    echo "#   tag: latest"
+    echo "#   tag: policy-stable"
     echo "#   pullPolicy: Always"
     if [ -n "$CONNECT_TOKEN" ]; then
       echo ""
@@ -226,12 +217,12 @@ write_values_stub() {
   } > my-values.yaml
 }
 
-# Once the chart default supports the policy, backfill its coordinated rollout
-# gate into an older values file exactly once. Existing nonblank values are never
+# When the chart declares the capability, backfill its coordinated rollout gate
+# into an older values file exactly once. Existing nonblank values are never
 # changed: after activation, later upgrades must keep the same instant.
 ensure_policy_activation() {
   local file="$1" policy_activation_at current_value tmp policy_capability_status
-  if chart_default_supports_transcript_policy; then
+  if chart_declares_transcript_policy_capability; then
     :
   else
     policy_capability_status=$?
@@ -404,7 +395,8 @@ if [ "$K8S" -eq 0 ]; then
     cat >> .env <<'EOF'
 
 # Updater — the console's one-click "Update now" button, always on (no toggle to
-# disable it). The stack uses the moving latest channel so there is a newer build
+# disable it). After the first coordinated cutover, release automation moves the
+# capable template to policy-stable so there is a compatible newer build
 # to pull, and the trigger is gated by ANYRAY_ADMIN_TOKEN automatically (no token
 # to set). Updates apply only on that click — there is no unattended polling.
 # Docs: docs.anyray.ai -> Configure -> Updates, and Security -> the Docker socket.

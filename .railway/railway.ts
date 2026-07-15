@@ -17,9 +17,9 @@ import {
 //
 // Two things IaC cannot express declaratively — both handled once, post-apply,
 // by railway/railway-iac-bootstrap.sh:
-//   1. generated secrets plus, once TAG reaches v1.10.117, the coordinated
-//      policy activation instant — seeded once, then preserve()d here so apply
-//      never clobbers them.
+//   1. generated secrets plus, when the repository declares the install
+//      capability, the coordinated policy activation instant — seeded once,
+//      then preserve()d here so apply never clobbers them.
 //   2. generated public domains (gateway :8787, proxy :80) + the URLs that
 //      reference them — created after apply, so ANYRAY_*_PUBLIC_URL are preserve()d.
 //

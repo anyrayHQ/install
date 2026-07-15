@@ -55,10 +55,8 @@ template_image_tag() {
   ' "$@"
 }
 
-policy_activation_required() {
-  # v1.10.116 is the last image that predates the policy contract. Any other
-  # immutable release pin must supply the coordinated activation instant.
-  [ "$1" != 'v1.10.116' ]
+template_has_transcript_policy_capability() {
+  grep -q '^[[:space:]]\{4\}persistentTranscriptPolicyV1:[[:space:]]*true[[:space:]]*$' "$1"
 }
 
 POLICY_ACTIVATE_AT="${POLICY_ACTIVATE_AT:-$(future_policy_activation_at)}"
@@ -75,7 +73,7 @@ BASE_PARAMS=(
   "ParameterKey=DeploymentToken,ParameterValue=adt_cismoke0000000000"
 )
 CANDIDATE_PARAMS=("${BASE_PARAMS[@]}")
-if policy_activation_required "$CANDIDATE_IMAGE_TAG"; then
+if template_has_transcript_policy_capability "$TEMPLATE"; then
   CANDIDATE_PARAMS+=("ParameterKey=PersistentTranscriptPolicyActivateAt,ParameterValue=${POLICY_ACTIVATE_AT}")
 fi
 
@@ -153,9 +151,8 @@ case "$LANE" in
     echo "→ create ${STACK} from PUBLISHED template"
     published_params=("${BASE_PARAMS[@]}")
     published_template="$(curl -fsS --max-time 30 "$PUBLISHED_URL")"
-    published_image_tag="$(template_image_tag <<<"$published_template")"
-    if grep -q '^  PersistentTranscriptPolicyActivateAt:' <<<"$published_template" \
-      && policy_activation_required "$published_image_tag"; then
+    if grep -q '^[[:space:]]\{4\}persistentTranscriptPolicyV1:[[:space:]]*true[[:space:]]*$' \
+      <<<"$published_template"; then
       published_params+=("ParameterKey=PersistentTranscriptPolicyActivateAt,ParameterValue=${POLICY_ACTIVATE_AT}")
     fi
     aws cloudformation create-stack --stack-name "$STACK" \
@@ -179,7 +176,7 @@ case "$LANE" in
       else . + [{ParameterKey: "ImageTag", ParameterValue: $image}]
       end
     ' <<<"$upd_params")"
-    if policy_activation_required "$CANDIDATE_IMAGE_TAG"; then
+    if template_has_transcript_policy_capability "$TEMPLATE"; then
       upd_params="$(jq --arg value "$POLICY_ACTIVATE_AT" '
         if any(.ParameterKey == "PersistentTranscriptPolicyActivateAt") then
           map(if .ParameterKey == "PersistentTranscriptPolicyActivateAt" then {ParameterKey: "PersistentTranscriptPolicyActivateAt", ParameterValue: $value} else . end)

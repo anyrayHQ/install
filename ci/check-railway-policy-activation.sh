@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 
-# Exercise the Railway release boundary without deploying anything. The source
-# keeps the activation variable wired at every version; customer-facing prompts
-# and bootstrap side effects begin only when all Railway image pins reach the
-# first compatible release.
+# Exercise the Railway capability boundary without deploying anything. Image
+# versions remain pinned and equal, but they never select install semantics.
+# The repository capability marker alone controls prompts/bootstrap behavior.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=railway/policy-version.sh
-source "$root/railway/policy-version.sh"
+# shellcheck source=railway/policy-capability.sh
+source "$root/railway/policy-capability.sh"
 
 die() {
   echo "error: $*" >&2
@@ -46,15 +45,20 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 make_case() {
-  local name="$1" tag="$2" case_dir
+  local name="$1" tag="$2" capability="$3" case_dir
   case_dir="$tmp/$name"
-  mkdir -p "$case_dir/railway" "$case_dir/.railway" "$case_dir/bin"
+  mkdir -p "$case_dir/railway" "$case_dir/.railway" \
+    "$case_dir/compatibility" "$case_dir/bin"
   cp "$root/railway/build-publish.sh" \
-     "$root/railway/policy-version.sh" \
+     "$root/railway/policy-capability.sh" \
      "$root/railway/railway-iac-bootstrap.sh" \
      "$root/railway/railway.template.json" \
      "$case_dir/railway/"
   cp "$root/.railway/railway.ts" "$case_dir/.railway/railway.ts"
+  if [ "$capability" = enabled ]; then
+    cp "$root/compatibility/persistentTranscriptPolicyV1" \
+      "$case_dir/compatibility/persistentTranscriptPolicyV1"
+  fi
 
   jq --arg tag "$tag" '
     .services |= map(
@@ -92,11 +96,13 @@ make_case() {
   printf '%s' "$case_dir"
 }
 
-pre_dir="$(make_case pre-policy v1.10.116)"
+shared_test_tag=v9.8.7
+
+pre_dir="$(make_case legacy-artifact "$shared_test_tag" legacy)"
 "$pre_dir/railway/build-publish.sh" >/dev/null
 if grep -q '^ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT=' \
   "$pre_dir/railway/.publish/gateway.vars"; then
-  die "pre-policy one-click template exposes the activation prompt"
+  die "legacy artifact exposes the activation prompt"
 fi
 : > "$pre_dir/railway.log"
 : > "$pre_dir/date.log"
@@ -104,42 +110,42 @@ PATH="$pre_dir/bin:$PATH" RAILWAY_TEST_LOG="$pre_dir/railway.log" \
   DATE_TEST_LOG="$pre_dir/date.log" \
   "$pre_dir/railway/railway-iac-bootstrap.sh" >/dev/null
 if grep -q 'ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT' "$pre_dir/railway.log"; then
-  die "pre-policy IaC bootstrap writes the activation timestamp"
+  die "legacy artifact bootstrap writes the activation timestamp"
 fi
-[ ! -s "$pre_dir/date.log" ] || die "pre-policy IaC bootstrap generated an unused timestamp"
+[ ! -s "$pre_dir/date.log" ] || die "legacy artifact bootstrap generated an unused timestamp"
 
-policy_dir="$(make_case policy v1.10.117)"
-"$policy_dir/railway/build-publish.sh" >/dev/null
+capability_dir="$(make_case capability-artifact "$shared_test_tag" enabled)"
+"$capability_dir/railway/build-publish.sh" >/dev/null
 grep -qx 'ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT=' \
-  "$policy_dir/railway/.publish/gateway.vars"
-: > "$policy_dir/railway.log"
-: > "$policy_dir/date.log"
-PATH="$policy_dir/bin:$PATH" RAILWAY_TEST_LOG="$policy_dir/railway.log" \
-  DATE_TEST_LOG="$policy_dir/date.log" \
-  "$policy_dir/railway/railway-iac-bootstrap.sh" >/dev/null
+  "$capability_dir/railway/.publish/gateway.vars"
+: > "$capability_dir/railway.log"
+: > "$capability_dir/date.log"
+PATH="$capability_dir/bin:$PATH" RAILWAY_TEST_LOG="$capability_dir/railway.log" \
+  DATE_TEST_LOG="$capability_dir/date.log" \
+  "$capability_dir/railway/railway-iac-bootstrap.sh" >/dev/null
 grep -q -- '--set ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT=2099-01-01T01:00:00.000Z' \
-  "$policy_dir/railway.log"
-grep -q '+1 hour' "$policy_dir/date.log"
+  "$capability_dir/railway.log"
+grep -q '+1 hour' "$capability_dir/date.log"
 
-: > "$policy_dir/railway.log"
-PATH="$policy_dir/bin:$PATH" RAILWAY_TEST_LOG="$policy_dir/railway.log" \
-  DATE_TEST_LOG="$policy_dir/date.log" \
+: > "$capability_dir/railway.log"
+PATH="$capability_dir/bin:$PATH" RAILWAY_TEST_LOG="$capability_dir/railway.log" \
+  DATE_TEST_LOG="$capability_dir/date.log" \
   RAILWAY_EXISTING_ACTIVATION="2098-12-31T23:00:00.000Z" \
-  "$policy_dir/railway/railway-iac-bootstrap.sh" >/dev/null
+  "$capability_dir/railway/railway-iac-bootstrap.sh" >/dev/null
 if grep -q -- '--set ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT=' \
-  "$policy_dir/railway.log"; then
+  "$capability_dir/railway.log"; then
   die "policy IaC bootstrap replaced an existing activation timestamp"
 fi
 
-mismatch_dir="$(make_case mismatch v1.10.117)"
-jq '(.services[] | select(.name == "optimizer") | .source.image) |= sub(":v1.10.117$"; ":v1.10.118")' \
+mismatch_dir="$(make_case mismatch "$shared_test_tag" enabled)"
+jq '(.services[] | select(.name == "optimizer") | .source.image) |= sub(":v9.8.7$"; ":v9.8.8")' \
   "$mismatch_dir/railway/railway.template.json" > "$mismatch_dir/template.next"
 mv "$mismatch_dir/template.next" "$mismatch_dir/railway/railway.template.json"
 if "$mismatch_dir/railway/build-publish.sh" >/dev/null 2>&1; then
   die "one-click publish accepted mismatched Railway image pins"
 fi
 
-grep -q 'if anyray_policy_enabled_for_tag "$template_tag"' \
+grep -q 'if anyray_install_has_capability' \
   "$root/railway/publish-template.sh"
 
-echo "OK: Railway activation starts at $ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_MIN_TAG and all pins match $gateway_tag."
+echo "OK: Railway activation follows $ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_CAPABILITY and all pins match $gateway_tag."

@@ -233,9 +233,11 @@ services:
   # "Update now" button (Watchtower HTTP API). Updates apply only on that click —
   # there is no unattended polling.
   #
-  # Uses the moving latest channel by default so there is a newer digest to roll
-  # forward to. Override ANYRAY_IMAGE_TAG=vX.Y.Z when you want pinned/manual
-  # updates. Watchtower only touches containers labelled
+  # Capability-aware templates follow policy-stable after the coordinated
+  # cutover, so Watchtower can pull only compatible releases. The first staged
+  # migration revision may temporarily pin one immutable vX.Y.Z. Override
+  # ANYRAY_IMAGE_TAG=vX.Y.Z when you want pinned/manual updates. Watchtower only
+  # touches containers labelled
   # com.centurylinklabs.watchtower.enable=true (the three app services above),
   # never the datastores or anything else on the host.
   #

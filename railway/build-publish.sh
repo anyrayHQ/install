@@ -38,8 +38,8 @@ tpl="$here/railway.template.json"
 out="$here/.publish"
 runbook="$out/RUNBOOK.md"
 
-# shellcheck source=railway/policy-version.sh
-source "$here/policy-version.sh"
+# shellcheck source=railway/policy-capability.sh
+source "$here/policy-capability.sh"
 
 command -v jq >/dev/null || { echo "error: jq is required" >&2; exit 1; }
 [ -f "$tpl" ] || { echo "error: $tpl not found" >&2; exit 1; }
@@ -61,7 +61,7 @@ if [ -z "$gateway_tag" ] || [ "$optimizer_tag" != "$gateway_tag" ] || \
 fi
 
 policy_prompt=false
-if anyray_policy_enabled_for_tag "$gateway_tag"; then
+if anyray_install_has_capability; then
   policy_prompt=true
 fi
 
@@ -83,9 +83,8 @@ desc_warn=""
 # one-click "No config required" UX. The empty optional knobs (rate limits,
 # verified-dev gate, upstream) behave identically unset or "" at the gateway,
 # so they're omitted from the published template rather than prompted for. The
-# transcript-policy activation instant becomes the one required prompt only
-# once the pinned gateway and optimizer support it. Before v1.10.117 it stays
-# in the source contract but is omitted from the generated customer template.
+# transcript-policy activation instant becomes the one required prompt in an
+# install revision that declares the capability. Older revisions omit it.
 #
 # CAVEAT (do not set proxy ANYRAY_UPDATER_TOKEN back to ""): the proxy's nginx
 # template injects ${ANYRAY_UPDATER_TOKEN} via envsubst, which only substitutes
@@ -137,11 +136,12 @@ lint="$(jq -r '
   echo "> in a Railway template an empty value becomes a required user prompt,"
   echo "> which would break the one-click \"No config required\" experience."
   if [ "$policy_prompt" = true ]; then
-    echo "> The policy activation instant is the sole required prompt for $gateway_tag;"
+    echo "> The policy activation instant is the sole required prompt in this capability-aware revision;"
+    echo "> its matching images are pinned to $gateway_tag."
     echo "> set one safely-future ISO value and preserve it on later updates."
   else
-    echo "> The policy prompt is omitted because $gateway_tag predates"
-    echo "> $ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_MIN_TAG. Release automation will enable it with the compatible image pin."
+    echo "> The policy prompt is omitted because this install revision does not"
+    echo "> declare $ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_CAPABILITY."
   fi
   echo
   for svc in $services; do

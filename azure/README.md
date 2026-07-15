@@ -56,7 +56,7 @@ export DEPLOYMENT_TOKEN="adt_..."        # from app.anyray.ai → Deployments
 | `NAMESPACE` | no | `anyray` | Kubernetes namespace. |
 | `NODE_VM_SIZE` | no | `Standard_D2s_v5` | Node pool VM size. |
 | `NODE_COUNT` | no | `2` | Node pool size. |
-| `IMAGE_TAG` | no | `latest` | Anyray image tag; pin `vX.Y.Z` for a reproducible deploy. |
+| `IMAGE_TAG` | no | template default | One-click accepts only the chart's coordinated release pin or `policy-stable`. |
 | `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-4-5` | Target for the `anyray-default` model alias. |
 
 ## What you get
@@ -82,15 +82,26 @@ console, add a provider key, and enroll developers — see the
 
 ## Upgrade
 
-Re-run `./azure/deploy.sh` (it is `helm upgrade --install`), or pin a tag and run
-the chart directly:
+Re-run `./azure/deploy.sh` (it is `helm upgrade --install`). The one-click path
+rejects any other immutable tag before provisioning; to select one, verify both
+runtime capability labels and run the chart directly:
 
-The first policy-compatible rerun backfills one
+When the template follows `policy-stable`, the deploy script explicitly
+restarts and waits for the app Deployments so Kubernetes resolves the promoted
+digest with `imagePullPolicy: Always`.
+
+The first rerun with a capability-aware chart backfills one
 `persistentTranscriptPolicyActivateAt` value an hour in the future into
 `my-values.yaml`; later reruns preserve it. Confirm gateway and optimizer finish
 rolling before that instant, and roll back before it if either is unhealthy.
 
 ```bash
 helm upgrade anyray ./helm -f my-values.yaml \
-  --namespace "$NAMESPACE" --reuse-values --set image.tag=vX.Y.Z
+  --namespace "$NAMESPACE" --reuse-values \
+  --set image.tag=vX.Y.Z \
+  --set persistentTranscriptPolicyImageCapabilityConfirmed=true
 ```
+
+Use the confirmation only after both pinned gateway and optimizer image configs
+have been verified to carry
+`ai.anyray.capability.persistent-transcript-policy-v1=true`.

@@ -36,7 +36,7 @@
 #                             tokens 401 on template deploys, the CLI OAuth token
 #                             can create projects but cannot deploy templates.
 #   POLICY_ACTIVATE_AT        optional future ISO instant (generated when unset),
-#                             used only for images at v1.10.117 or newer.
+#                             used by capability-aware install revisions.
 #   RAILWAY_WORKSPACE_ID      workspace to create the throwaway project in
 #                             (default: Othentic).
 #   ANYRAY_PROVIDER_KEY_ANTHROPIC  optional -- set to exercise a real chat
@@ -53,8 +53,8 @@ api="https://backboard.railway.com/graphql/v2"
 template_code="anyray"
 default_workspace="eef73845-ee51-42b4-87b1-2873cd0d36fb" # Othentic
 
-# shellcheck source=railway/policy-version.sh
-source "$here/policy-version.sh"
+# shellcheck source=railway/policy-capability.sh
+source "$here/policy-capability.sh"
 
 mode="${1:-prep}"
 
@@ -145,7 +145,7 @@ run_test() {
 
   echo "==> deploying published template '$template_code'"
   local -a deploy_args=(-t "$template_code")
-  if anyray_policy_enabled_for_tag "$template_tag"; then
+  if anyray_install_has_capability; then
     local policy_activate_at="${POLICY_ACTIVATE_AT:-$(future_policy_activation_at)}"
     deploy_args+=(-v "gateway.ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT=$policy_activate_at")
   fi

@@ -23,7 +23,8 @@ fi
 # Per-template gateway env, as text we grep the var name against.
 compose_block="$(sed -n '/^  gateway:/,/^  [a-z][a-z_-]*:/p' docker-compose.yml)"
 # Check the Railway source contract, not .publish/gateway.vars: the publish
-# generator intentionally omits the empty activation prompt for pre-policy pins.
+# generator intentionally omits the empty activation prompt in legacy artifact
+# revisions that do not declare the install capability.
 railway_vars="$(jq -r '.services[] | select(.name == "gateway") | .variables | keys[]' railway/railway.template.json)"
 railway_iac_block="$(awk '/const gateway = service\("gateway"/{g=1;print;next} g && /const optimizer = service\("optimizer"/{exit} g{print}' .railway/railway.ts)"
 # The CloudFormation GatewayTask resource block (2-space-indented resource key).

@@ -68,7 +68,7 @@ fi
 
 # ---- 4. First-time provisioning: clone + secrets + connect -----------------
 DEPLOYMENT_TOKEN="$(md instance/attributes/anyray-deployment-token)"
-IMAGE_TAG="$(md instance/attributes/anyray-image-tag v1.10.119)"
+IMAGE_TAG="$(md instance/attributes/anyray-image-tag v1.10.120)"
 DEFAULT_MODEL="$(md instance/attributes/anyray-default-model anthropic/claude-sonnet-4-5)"
 EXTERNAL_IP="$(md instance/network-interfaces/0/access-configs/0/external-ip)"
 echo "→ external IP: ${EXTERNAL_IP}   image tag: ${IMAGE_TAG}"

@@ -17,21 +17,45 @@ host: ""
 # cluster.local).
 clusterDomain: cluster.local
 
-# Air-gapped / private-registry installs: set imageRegistry to your internal
+# Coordinated activation instant for the append-only transcript safety policy.
+# Required by chart revisions declaring the persistent-transcript-policy-v1
+# capability, because the gateway and optimizer Deployments roll independently.
+# Image tags do not toggle install semantics. Set one future ISO-8601 UTC
+# timestamp for the first capable rollout and keep that exact value on later
+# upgrades. setup.sh reads the chart capability and generates a safely-future
+# value.
+# See helm/README.md "Coordinated transcript-policy upgrade" before changing it.
+persistentTranscriptPolicyActivateAt: ""
+
+# Online Helm upgrades read the live gateway Deployment and accept its exact
+# activation value even after that instant passes. Offline GitOps renderers
+# cannot perform that lookup. Leave this false for the first capable sync; only
+# set true after verifying both initial capable Deployments are healthy, while
+# preserving persistentTranscriptPolicyActivateAt exactly.
+persistentTranscriptPolicyInitialRolloutVerified: false
+
+# Leave false when using the chart's appVersion or policy-stable. Set true only
+# for an equal, immutable custom gateway/optimizer tag or custom registry after
+# verifying both images declare
+# ai.anyray.capability.persistent-transcript-policy-v1=true.
+persistentTranscriptPolicyImageCapabilityConfirmed: false
+
+# Private-registry mirrors: set imageRegistry to your internal
 # registry host to repoint EVERY image (gateway/optimizer/proxy/postgres) at it in
 # one shot, e.g. "my.registry:5000" → my.registry:5000/anyray/gateway. The image
 # path after the host is preserved, so mirror with a straight
 #   crane cp public.ecr.aws/anyray/gateway:<tag> my.registry:5000/anyray/gateway:<tag>
 # (per-image overrides under images.* still win). Empty = pull from public.ecr.aws.
-# See docs: Air-gapped / private-registry install.
+# This changes image distribution only; the Billing app connection is mandatory.
 global:
   imageRegistry: ""
 
 image:
   # Empty → images pin to the chart's appVersion (the release this chart ships),
-  # so production deploys are reproducible and auditable. Set to "latest" (or any
-  # moving channel) for testing when you want the newest build on every pull —
-  # pair that with pullPolicy: Always so a moving tag is never served stale.
+  # so production deploys are reproducible and auditable. Set to "policy-stable"
+  # for the compatible moving channel; it forces pullPolicy: Always. A custom
+  # immutable gateway/optimizer tag also needs the explicit capability
+  # confirmation above. Legacy latest/stable channels are rejected.
   tag: ""
   # Pinned, immutable tags don't need re-pulling; a cached layer is the same build.
   pullPolicy: IfNotPresent

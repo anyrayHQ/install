@@ -53,7 +53,7 @@ export DEPLOYMENT_TOKEN="adt_..."        # from app.anyray.ai → Deployments
 | `INSTANCE` | no | `anyray` | VM name (reused if it already exists). |
 | `MACHINE_TYPE` | no | `e2-standard-2` | VM size (2 vCPU / 8 GB). |
 | `DISK_SIZE` | no | `20GB` | Persistent data-disk size. |
-| `IMAGE_TAG` | no | `latest` | Anyray image tag; pin `vX.Y.Z` for a reproducible deploy. |
+| `IMAGE_TAG` | no | template default | Starts on the coordinated release pin; refreshed templates may follow `policy-stable`. |
 | `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-4-5` | Target for the `anyray-default` model alias. |
 | `NETWORK` | no | `default` | VPC network for the VM + firewall rules. |
 
@@ -94,13 +94,29 @@ sudo docker compose logs -f gateway
 
 ## Upgrade
 
-The default `IMAGE_TAG=latest` follows the moving release channel. The console's
-one-click **Update now** button pulls the latest images. To converge manually, or
-to pin a tag:
+The migration template starts on one coordinated immutable release. After that
+release is healthy, refreshed templates default to the capability-compatible
+`policy-stable` channel. The console's one-click **Update now** button pulls the
+latest compatible images. To converge manually, or to select a compatible
+immutable tag:
 
 ```bash
 gcloud compute ssh anyray --zone us-central1-a --tunnel-through-iap
 cd /opt/anyray
-# (optional) pin a tag: edit ANYRAY_IMAGE_TAG=vX.Y.Z in .env
-sudo docker compose pull && sudo docker compose up -d
+sudo git pull --ff-only
+sudo ./gcp/gce/upgrade.sh
+# Optional capability-verified override: sudo ./gcp/gce/upgrade.sh vX.Y.Z
 ```
+
+The `git pull` is required for this hard update: it reconciles the optimizer
+capability health gate and gateway activation wiring before any capable image is
+started. `upgrade.sh` also replaces the image pin that first-time GCE setup wrote
+to `.env`; leaving the old pin would override the refreshed template. A reboot
+intentionally resumes the checked-out template without updating it.
+
+Before changing `.env` or any running container, `upgrade.sh` resolves and pulls
+the effective gateway and optimizer images and requires both to declare
+`ai.anyray.capability.persistent-transcript-policy-v1=true`. A legacy immutable
+tag, an unlabeled `policy-stable` promotion, or an incompatible custom image
+override therefore leaves the current install untouched. The subsequent
+reconcile uses those locally verified images without re-pulling a moving tag.

@@ -46,7 +46,7 @@ export DEPLOYMENT_TOKEN="adt_..."        # ← from app.anyray.ai
 # export ZONE="us-central1-a"
 # export INSTANCE="anyray"
 # export MACHINE_TYPE="e2-standard-2"    # 2 vCPU / 8 GB
-# export IMAGE_TAG="latest"              # or pin vX.Y.Z
+# export IMAGE_TAG="vX.Y.Z"              # optional immutable override
 
 ./gcp/gce/deploy.sh
 ```

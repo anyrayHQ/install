@@ -20,7 +20,13 @@ chart_dir="$(cd "$(dirname "$0")/../helm" && pwd)"
 
 # host= is required by the chart but irrelevant to the image set.
 refs="$(
-  helm template anyray "$chart_dir" --set host=airgap.invalid "$@" \
+  # Rendering a BOM does not deploy or activate the policy. Supply a stable,
+  # syntactically valid instant so capability-aware chart revisions still render;
+  # caller arguments remain last and can override it when needed.
+  helm template anyray "$chart_dir" --set host=airgap.invalid \
+    --set-string persistentTranscriptPolicyActivateAt=1970-01-01T00:00:00.000Z \
+    --set persistentTranscriptPolicyInitialRolloutVerified=true \
+    "$@" \
     | grep -oE 'image:[[:space:]]*"?[^[:space:]"]+' \
     | sed -E 's/^image:[[:space:]]*"?//' \
     | sort -u

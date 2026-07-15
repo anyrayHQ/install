@@ -42,7 +42,7 @@ export DEPLOYMENT_TOKEN="adt_..."        # ← from app.anyray.ai
 # export REGION="us-central1"
 # export CLUSTER="anyray"
 # export NAMESPACE="anyray"
-# export IMAGE_TAG="latest"              # or pin vX.Y.Z
+# export IMAGE_TAG="policy-stable"       # optional compatible moving channel
 
 ./gcp/deploy.sh
 ```

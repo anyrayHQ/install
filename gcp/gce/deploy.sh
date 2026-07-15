@@ -25,7 +25,7 @@
 #   ALLOWED_CIDR      CIDR allowed to reach the console/gateway. REQUIRED.
 #                     Scope to your office/VPN range — never 0.0.0.0/0.
 #   DEPLOYMENT_TOKEN  Anyray Cloud deployment token (adt_...). REQUIRED for metering.
-#   IMAGE_TAG         Anyray image tag (default: latest)
+#   IMAGE_TAG         Anyray image tag (default: coordinated release pin)
 #   DEFAULT_MODEL     anyray-default routing target (default: anthropic/claude-sonnet-4-5)
 #   NETWORK           VPC network (default: default)
 #
@@ -43,7 +43,7 @@ ZONE="${ZONE:-us-central1-a}"
 INSTANCE="${INSTANCE:-anyray}"
 MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-2}"
 DISK_SIZE="${DISK_SIZE:-20GB}"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
+IMAGE_TAG="${IMAGE_TAG:-v1.10.120}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}"
 NETWORK="${NETWORK:-default}"
 ALLOWED_CIDR="${ALLOWED_CIDR:-}"

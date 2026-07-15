@@ -80,9 +80,9 @@ Parameters:
       multiple with commas.
   ImageTag:
     Type: String
-    Default: v1.10.118
+    Default: v1.10.119
     AllowedPattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
-    ConstraintDescription: Must be an immutable Anyray release tag such as v1.10.118.
+    ConstraintDescription: Must be an immutable Anyray release tag such as v1.10.119.
     Description: >-
       Immutable Anyray release tag deployed by all three services. This default
       is stamped by the release workflow; mutable latest/stable channels are not

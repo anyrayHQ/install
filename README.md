@@ -119,6 +119,28 @@ before sending traffic.
 git pull && docker compose pull && docker compose up -d
 ```
 
+Use the full command for releases reported as a hard/template update; do not
+pull and restart only the application images. The current Compose template
+waits for the compatible optimizer to become healthy before it starts the
+gateway and activates the persistent-transcript safety policy. That ordering
+cannot be supplied by an older Compose file or by an image-only updater.
+
+Helm, Railway, and CloudFormation roll gateway and optimizer workloads
+independently. Their first policy-compatible upgrade therefore requires one
+explicit shared activation instant far enough in the future to finish and, if
+needed, roll back both workloads. Preserve that exact timestamp on later
+upgrades. The platform READMEs and CloudFormation parameter description contain
+the target-specific steps; do not substitute Compose's already-past default on
+those orchestrators.
+
+The AWS Quick Launch template pins `ImageTag` to an immutable release. Its
+pre-policy `v1.10.116` stage permits an empty
+`PersistentTranscriptPolicyActivateAt`; once the release workflow stamps the
+template to `v1.10.117` or newer, CloudFormation requires the shared timestamp.
+When upgrading an older stack that stored `ImageTag=latest`, replace that
+parameter with the candidate template's pinned default instead of preserving
+`latest`.
+
 New optimizer default profiles ship in the image but seed config only on first run,
 so an existing deployment keeps its saved config. To adopt new defaults, update the
 optimizer config from the console — your `.env` and secrets are untouched.

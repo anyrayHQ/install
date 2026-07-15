@@ -6,6 +6,40 @@ Expand the name of the chart.
 {{- end }}
 
 {{/*
+Resolve and validate the coordinated persistent-transcript policy instant.
+
+The policy first ships in v1.10.117. Legacy image pairs can omit the instant;
+policy-capable gateway or optimizer tags require it because the Deployments roll
+independently, even at one replica. Unknown/moving tags are treated as capable.
+Once set, the value remains explicit on later upgrades and is intentionally
+valid whether the configured instant is future or past.
+*/}}
+{{- define "anyray.persistentTranscriptPolicyActivateAt" -}}
+{{- $policyRequired := false -}}
+{{- range $component := list "gateway" "optimizer" -}}
+{{- $image := index $.Values.images $component | default dict -}}
+{{- $tag := $image.tag | default $.Values.image.tag | default $.Chart.AppVersion | toString -}}
+{{- if not (regexMatch `^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$` $tag) -}}
+{{- $policyRequired = true -}}
+{{- else if semverCompare ">=1.10.117-0" $tag -}}
+{{- $policyRequired = true -}}
+{{- end -}}
+{{- end -}}
+{{- $configured := .Values.persistentTranscriptPolicyActivateAt | default "" | toString | trim -}}
+{{- if and $policyRequired (not $configured) -}}
+{{- fail "persistentTranscriptPolicyActivateAt is required for gateway/optimizer image tags v1.10.117 or newer: set one shared future ISO-8601 instant before the first compatible rollout, then preserve it on later upgrades" -}}
+{{- end -}}
+{{- $activateAt := $configured -}}
+{{- if and $activateAt (not (regexMatch `^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[0-1])T([0-1][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?(Z|[+-](0[0-9]|1[0-4]):[0-5][0-9])$` $activateAt)) -}}
+{{- fail "persistentTranscriptPolicyActivateAt must be a valid timezone-qualified ISO-8601 instant such as 2026-07-15T12:00:00.000Z" -}}
+{{- end -}}
+{{- if $activateAt -}}
+{{- $_ := mustToDate "2006-01-02T15:04:05Z07:00" $activateAt -}}
+{{- end -}}
+{{- $activateAt -}}
+{{- end }}
+
+{{/*
 Create a default fully qualified app name.
 */}}
 {{- define "anyray.fullname" -}}

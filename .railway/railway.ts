@@ -17,9 +17,9 @@ import {
 //
 // Two things IaC cannot express declaratively — both handled once, post-apply,
 // by railway/railway-iac-bootstrap.sh:
-//   1. generated secrets (ANYRAY_ADMIN_TOKEN, ANYRAY_CONTENT_KEY,
-//      ANYRAY_OPTIMIZER_TOKEN, ANYRAY_PSEUDONYM_SALT, ANYRAY_UPDATER_TOKEN) —
-//      seeded once, then preserve()d here so apply never clobbers them.
+//   1. generated secrets plus, once TAG reaches v1.10.117, the coordinated
+//      policy activation instant — seeded once, then preserve()d here so apply
+//      never clobbers them.
 //   2. generated public domains (gateway :8787, proxy :80) + the URLs that
 //      reference them — created after apply, so ANYRAY_*_PUBLIC_URL are preserve()d.
 //
@@ -27,7 +27,7 @@ import {
 // so they are literals below — which also breaks the gateway<->optimizer reference
 // cycle that plain object refs would create.
 
-const TAG = "v1.10.84";
+const TAG = "v1.10.116";
 const ecr = (name: string) => image(`public.ecr.aws/anyray/${name}:${TAG}`);
 
 export default defineRailway(() => {
@@ -44,6 +44,7 @@ export default defineRailway(() => {
       ANYRAY_OPTIMIZER_URL: "http://optimizer.railway.internal:8088",
       ANYRAY_OPTIMIZER_TOKEN: preserve(), // canonical; optimizer references gateway.env.*
       ANYRAY_OPTIMIZER_TIMEOUT_MS: "800",
+      ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT: preserve(),
       ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS: "10000",
       ANYRAY_DEFAULT_MODEL: "anthropic/claude-sonnet-4-5",
       ANYRAY_CONTENT_KEY: preserve(),

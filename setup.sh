@@ -127,6 +127,41 @@ b64enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
 
 get_env() { sed -n "s/^$1=//p" .env 2>/dev/null | head -n1; }
 
+# The coordinated policy first ships in v1.10.117. Read the chart's pinned
+# default so setup starts generating the gate in the same release that needs it,
+# without making a pre-policy chart unusable before compatible images exist.
+chart_default_supports_transcript_policy() {
+  local tag major minor patch
+  tag="$(sed -nE 's/^appVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' helm/Chart.yaml | head -n 1)"
+  [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || {
+    echo "✗ helm/Chart.yaml appVersion must be a pinned vX.Y.Z tag (got '${tag:-missing}')" >&2
+    return 2
+  }
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  patch="${BASH_REMATCH[3]}"
+  major=$((10#$major))
+  minor=$((10#$minor))
+  patch=$((10#$patch))
+  (( major > 1 ||
+     (major == 1 && minor > 10) ||
+     (major == 1 && minor == 10 && patch >= 117) ))
+}
+
+# One hour leaves room for independent gateway + optimizer rollouts and a
+# rollback before the cache-affecting transcript policy activates. GNU and BSD
+# date use different relative-time flags, so support both install hosts.
+future_policy_activation_at() {
+  local value=""
+  value="$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || \
+    value="$(date -u -v+1H '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || true
+  [ -n "$value" ] || {
+    echo "✗ could not calculate a future policy activation instant with date" >&2
+    return 1
+  }
+  printf '%s' "$value"
+}
+
 # Append KEY=VALUE only when absent — backfills new vars without rotating existing secrets.
 add_if_missing() {
   if grep -q "^$1=" .env 2>/dev/null; then return 0; fi
@@ -148,12 +183,23 @@ add_secret() {
 # Helm values stub (no secrets). With --connect, also turns metering on; the
 # deployment token + pseudonym salt live in anyray-secrets.yaml.
 write_values_stub() {
+  local policy_activation_at="" policy_capability_status
+  if chart_default_supports_transcript_policy; then
+    policy_activation_at="$(future_policy_activation_at)"
+  else
+    policy_capability_status=$?
+    [ "$policy_capability_status" -eq 1 ] || return "$policy_capability_status"
+  fi
   {
     echo "# Anyray Helm values — safe to commit (no secrets here)."
     if [ -n "$NAMESPACE" ]; then
       echo "# Namespace: ${NAMESPACE} (set with kubectl -n / helm --namespace; not a Helm value)."
     fi
     echo "host: \"${HOST}\""
+    if [ -n "$policy_activation_at" ]; then
+      echo "# Shared rollout gate: generated one hour ahead; preserve this exact value on upgrades."
+      echo "persistentTranscriptPolicyActivateAt: \"${policy_activation_at}\""
+    fi
     echo ""
     echo "# Image tag is pinned to this chart version's appVersion by default"
     echo "# (recommended for production — every deploy is a fixed, auditable build)."
@@ -178,6 +224,61 @@ write_values_stub() {
       esac
     fi
   } > my-values.yaml
+}
+
+# Once the chart default supports the policy, backfill its coordinated rollout
+# gate into an older values file exactly once. Existing nonblank values are never
+# changed: after activation, later upgrades must keep the same instant.
+ensure_policy_activation() {
+  local file="$1" policy_activation_at current_value tmp policy_capability_status
+  if chart_default_supports_transcript_policy; then
+    :
+  else
+    policy_capability_status=$?
+    [ "$policy_capability_status" -eq 1 ] && return 0
+    return "$policy_capability_status"
+  fi
+  current_value="$(awk '
+    /^[[:space:]]*persistentTranscriptPolicyActivateAt[[:space:]]*:/ {
+      value = $0
+      sub(/^[^:]*:[[:space:]]*/, "", value)
+      sub(/[[:space:]]*#.*/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      if (value == "\"\"" || value == "\047\047") value = ""
+      print value
+      exit
+    }
+  ' "$file")"
+  [ -n "$current_value" ] && return 0
+
+  policy_activation_at="$(future_policy_activation_at)"
+
+  if grep -q '^[[:space:]]*persistentTranscriptPolicyActivateAt[[:space:]]*:' "$file"; then
+    tmp="$(mktemp "${file}.XXXXXX")"
+    if ! awk -v activation="$policy_activation_at" '
+      BEGIN { replaced = 0 }
+      !replaced && /^[[:space:]]*persistentTranscriptPolicyActivateAt[[:space:]]*:/ {
+        print "persistentTranscriptPolicyActivateAt: \"" activation "\""
+        replaced = 1
+        next
+      }
+      { print }
+      END { if (!replaced) exit 1 }
+    ' "$file" > "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+    mv "$tmp" "$file"
+    echo "✓ ${file} — replaced a blank policy activation with a future instant"
+    return 0
+  fi
+
+  {
+    echo ""
+    echo "# Shared rollout gate: generated one hour ahead; preserve this exact value on upgrades."
+    echo "persistentTranscriptPolicyActivateAt: \"${policy_activation_at}\""
+  } >> "$file"
+  echo "✓ ${file} — added a future persistent-transcript policy activation instant"
 }
 
 # Ensure gateway.metering.enabled: true in an existing Helm values file while
@@ -550,6 +651,7 @@ if [ -f anyray-secrets.yaml ]; then
 
     if [ -f my-values.yaml ]; then
       enable_metering my-values.yaml
+      ensure_policy_activation my-values.yaml
       echo "✓ my-values.yaml already existed — ensured gateway.metering.enabled: true"
     else
       write_values_stub
@@ -562,6 +664,7 @@ if [ -f anyray-secrets.yaml ]; then
     echo ""
     echo "  Then:      this deployment appears as Connected at ${CONTROL_PLANE} within a minute"
   else
+    [ -f my-values.yaml ] && ensure_policy_activation my-values.yaml
     if [ -z "$NAMESPACE" ]; then
       echo "✓ anyray-secrets.yaml already exists — leaving it untouched (delete it to regenerate)"
     fi
@@ -607,6 +710,7 @@ echo "✓ Secrets generated → anyray-secrets.yaml"
 [ -n "$CONNECT_TOKEN" ] && echo "  ✓ Anyray Cloud connect vars folded in (deployment token + pseudonym salt)"
 
 if [ -f my-values.yaml ]; then
+  ensure_policy_activation my-values.yaml
   if [ -n "$CONNECT_TOKEN" ]; then
     enable_metering my-values.yaml
     echo "✓ my-values.yaml already existed — ensured gateway.metering.enabled: true"

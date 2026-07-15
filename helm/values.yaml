@@ -17,6 +17,15 @@ host: ""
 # cluster.local).
 clusterDomain: cluster.local
 
+# Coordinated activation instant for the append-only transcript safety policy.
+# Required when the effective gateway or optimizer image tag is v1.10.117 or
+# newer (including image.tag / images.*.tag overrides), because those Deployments
+# roll independently. Set one future ISO-8601 UTC timestamp for the first
+# compatible rollout and keep that exact value on later upgrades. setup.sh starts
+# generating a safely-future value when this chart's appVersion becomes capable.
+# See helm/README.md "Coordinated transcript-policy upgrade" before changing it.
+persistentTranscriptPolicyActivateAt: ""
+
 # Air-gapped / private-registry installs: set imageRegistry to your internal
 # registry host to repoint EVERY image (gateway/optimizer/proxy/postgres) at it in
 # one shot, e.g. "my.registry:5000" → my.registry:5000/anyray/gateway. The image

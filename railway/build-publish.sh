@@ -38,9 +38,32 @@ tpl="$here/railway.template.json"
 out="$here/.publish"
 runbook="$out/RUNBOOK.md"
 
+# shellcheck source=railway/policy-version.sh
+source "$here/policy-version.sh"
+
 command -v jq >/dev/null || { echo "error: jq is required" >&2; exit 1; }
 [ -f "$tpl" ] || { echo "error: $tpl not found" >&2; exit 1; }
 jq -e . "$tpl" >/dev/null || { echo "error: $tpl is not valid JSON" >&2; exit 1; }
+
+image_for() {
+  jq -r --arg name "$1" '.services[] | select(.name == $name) | .source.image // empty' "$tpl"
+}
+
+gateway_tag="$(anyray_tag_from_image "$(image_for gateway)")"
+optimizer_tag="$(anyray_tag_from_image "$(image_for optimizer)")"
+proxy_tag="$(anyray_tag_from_image "$(image_for proxy)")"
+iac_tag="$(sed -nE 's/^const TAG = "(v[0-9]+\.[0-9]+\.[0-9]+)";.*/\1/p' "$here/../.railway/railway.ts")"
+
+if [ -z "$gateway_tag" ] || [ "$optimizer_tag" != "$gateway_tag" ] || \
+   [ "$proxy_tag" != "$gateway_tag" ] || [ "$iac_tag" != "$gateway_tag" ]; then
+  echo "error: Railway image pins must match (JSON gateway=$gateway_tag optimizer=$optimizer_tag proxy=$proxy_tag; IaC=$iac_tag)" >&2
+  exit 1
+fi
+
+policy_prompt=false
+if anyray_policy_enabled_for_tag "$gateway_tag"; then
+  policy_prompt=true
+fi
 
 mkdir -p "$out"
 rm -f "$out"/*.vars "$runbook"
@@ -55,11 +78,14 @@ desc_warn=""
 [ "$desc_len" -gt 75 ] && desc_warn=" (WARNING: $desc_len chars > 75 -- Railway truncates; shorten it)"
 
 # --- per-service Raw Editor blocks ------------------------------------------
-# Skip empty-valued vars: in a Railway *template* an empty value renders as
+# Skip optional empty-valued vars: in a Railway *template* an empty value renders as
 # "Empty value to be filled by the user" (a required prompt), which breaks the
 # one-click "No config required" UX. The empty optional knobs (rate limits,
 # verified-dev gate, upstream) behave identically unset or "" at the gateway,
-# so they're omitted from the published template rather than prompted for.
+# so they're omitted from the published template rather than prompted for. The
+# transcript-policy activation instant becomes the one required prompt only
+# once the pinned gateway and optimizer support it. Before v1.10.117 it stays
+# in the source contract but is omitted from the generated customer template.
 #
 # CAVEAT (do not set proxy ANYRAY_UPDATER_TOKEN back to ""): the proxy's nginx
 # template injects ${ANYRAY_UPDATER_TOKEN} via envsubst, which only substitutes
@@ -69,9 +95,11 @@ desc_warn=""
 # image that bakes an empty ANYRAY_UPDATER_TOKEN default ships to :stable
 # (monorepo: observability/ui/Dockerfile), this template var is no longer needed.
 for svc in $services; do
-  jq -r --arg n "$svc" '
+  jq -r --arg n "$svc" --argjson policy_prompt "$policy_prompt" '
     .services[] | select(.name == $n) | .variables // {}
-    | to_entries[] | select(.value != "") | "\(.key)=\(.value)"
+    | to_entries[]
+    | select(.value != "" or ($policy_prompt and .key == "ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT"))
+    | "\(.key)=\(.value)"
   ' "$tpl" > "$out/$svc.vars"
 done
 
@@ -108,6 +136,13 @@ lint="$(jq -r '
   echo "> Empty-valued optional knobs are intentionally omitted from each block:"
   echo "> in a Railway template an empty value becomes a required user prompt,"
   echo "> which would break the one-click \"No config required\" experience."
+  if [ "$policy_prompt" = true ]; then
+    echo "> The policy activation instant is the sole required prompt for $gateway_tag;"
+    echo "> set one safely-future ISO value and preserve it on later updates."
+  else
+    echo "> The policy prompt is omitted because $gateway_tag predates"
+    echo "> $ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_MIN_TAG. Release automation will enable it with the compatible image pin."
+  fi
   echo
   for svc in $services; do
     image="$(jq -r --arg n "$svc" '.services[]|select(.name==$n)|.source.image // "(no image / source build)"' "$tpl")"

@@ -32,6 +32,15 @@ jobs:
           test -f .env
       - name: main stack resolves (every required var satisfied)
         run: docker compose config -q
+      - name: transcript policy waits for optimizer health and activates
+        run: |
+          set -euo pipefail
+          config="$(docker compose config --format json)"
+          jq -e '.services.gateway.depends_on.optimizer.condition == "service_healthy"' <<<"$config" > /dev/null
+          jq -e '.services.optimizer.healthcheck.test
+                 | any(contains("persistentTranscriptPolicyV1"))' <<<"$config" > /dev/null
+          jq -e '.services.gateway.environment.ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT
+                 == "1970-01-01T00:00:00.000Z"' <<<"$config" > /dev/null
       - name: every compose image carries an explicit tag
         run: |
           untagged="$(docker compose config --images | grep -Ev ':[^/]+$' || true)"
@@ -52,9 +61,62 @@ jobs:
           token: ${{ github.token }}
       - name: setup.sh --k8s secrets + values render against the chart
         run: |
+          set -euo pipefail
+          # Exercise both sides explicitly so this remains valid after the
+          # release automation advances the source chart's appVersion.
+          sed -i 's/^appVersion:.*/appVersion: "v1.10.116"/' helm/Chart.yaml
           ./setup.sh --k8s --connect adt_ci0000000000000000 \
             --host anyray.internal --namespace anyray
+          if grep -q '^persistentTranscriptPolicyActivateAt:' my-values.yaml; then
+            echo "::error::legacy chart appVersion unexpectedly generated a policy activation"
+            exit 1
+          fi
           helm template t ./helm -f my-values.yaml > /dev/null
+
+          # Legacy appVersions preserve a missing or blank value.
+          printf '\npersistentTranscriptPolicyActivateAt: ""\n' >> my-values.yaml
+          ./setup.sh --k8s --connect adt_ci0000000000000000 \
+            --host anyray.internal --namespace anyray
+          grep -qx 'persistentTranscriptPolicyActivateAt: ""' my-values.yaml
+
+          rm my-values.yaml
+          sed -i 's/^appVersion:.*/appVersion: "not-a-version"/' helm/Chart.yaml
+          if ./setup.sh --k8s --connect adt_ci0000000000000000 \
+            --host anyray.internal --namespace anyray \
+            > "$RUNNER_TEMP/malformed.out" 2> "$RUNNER_TEMP/malformed.err"; then
+            echo "::error::setup accepted a malformed chart appVersion"
+            exit 1
+          fi
+          grep -q 'appVersion must be a pinned vX.Y.Z tag' "$RUNNER_TEMP/malformed.err"
+
+          # The same setup script begins backfilling when the chart default first
+          # becomes policy-capable, and keeps the exact nonblank value thereafter.
+          sed -i 's/^appVersion:.*/appVersion: "v1.10.117"/' helm/Chart.yaml
+          ./setup.sh --k8s --connect adt_ci0000000000000000 \
+            --host anyray.internal --namespace anyray
+          grep -Eq '^persistentTranscriptPolicyActivateAt: "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z"$' my-values.yaml
+          helm template t ./helm -f my-values.yaml > /dev/null
+
+          sed -i 's/^persistentTranscriptPolicyActivateAt:.*/persistentTranscriptPolicyActivateAt: ""/' my-values.yaml
+          ./setup.sh --k8s --connect adt_ci0000000000000000 \
+            --host anyray.internal --namespace anyray
+          grep -Eq '^persistentTranscriptPolicyActivateAt: "[^"]+"$' my-values.yaml
+
+          # Render-only tooling must also survive the policy-capable appVersion.
+          tool_bin="$(mktemp -d)"
+          ln -s "$(command -v helm)" "$tool_bin/helm"
+          image_bom="$(PATH="$tool_bin:/usr/bin:/bin" scripts/gen-image-bom.sh)"
+          grep -q 'public.ecr.aws/anyray/gateway:v1.10.117' <<<"$image_bom"
+
+          sed -i 's/^persistentTranscriptPolicyActivateAt:.*/persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z"/' my-values.yaml
+          ./setup.sh --k8s --connect adt_ci0000000000000000 \
+            --host anyray.internal --namespace anyray
+          grep -qx 'persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z"' my-values.yaml
+
+          sed -i '/^persistentTranscriptPolicyActivateAt:/d' my-values.yaml
+          ./setup.sh --k8s --connect adt_ci0000000000000000 \
+            --host anyray.internal --namespace anyray
+          grep -Eq '^persistentTranscriptPolicyActivateAt: "[^"]+"$' my-values.yaml
 
   cloudformation:
     runs-on: ubuntu-latest
@@ -64,26 +126,91 @@ jobs:
         run: |
           pipx install cfn-lint
           cfn-lint aws/anyray-quicklaunch.template.yaml
+      - name: CloudFormation stages the policy behind an immutable image pin
+        run: |
+          set -euo pipefail
+          template=aws/anyray-quicklaunch.template.yaml
+          image_parameter="$(awk '/^  ImageTag:/{p=1;print;next} p && /^  [A-Za-z][A-Za-z0-9]*:/{exit} p{print}' "$template")"
+          activation_parameter="$(awk '/^  PersistentTranscriptPolicyActivateAt:/{p=1;print;next} p && /^  [A-Za-z][A-Za-z0-9]*:/{exit} p{print}' "$template")"
+
+          current_tag="$(awk '$1 == "Default:" { print $2; exit }' <<<"$image_parameter")"
+          if [[ ! "$current_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::CloudFormation ImageTag.Default is not immutable: ${current_tag:-missing}"
+            exit 1
+          fi
+          grep -Fq "AllowedPattern: '^v[0-9]+\\.[0-9]+\\.[0-9]+$'" <<<"$image_parameter"
+          if grep -Eq 'Default:[[:space:]]+(latest|stable)' <<<"$image_parameter"; then
+            echo "::error::CloudFormation must never default to a mutable image channel"
+            exit 1
+          fi
+          grep -qx "    Default: ''" <<<"$activation_parameter"
+          grep -Fq "AllowedPattern: '^$|^" <<<"$activation_parameter"
+
+          # The two nested NOT/Equals checks mean: v1.10.116 skips the nonblank
+          # assertion, while every other immutable tag applies it. Keep this
+          # structural check explicit because cfn-lint validates Rule syntax but
+          # does not evaluate Rules against supplied parameter combinations.
+          rule_before="$RUNNER_TEMP/cfn-policy-rule-before"
+          condition_before="$RUNNER_TEMP/cfn-policy-condition-before"
+          awk '/^  PersistentTranscriptPolicyActivationRequired:/{p=1} p && /^  AllowedCidrMustNotBePublic:/{exit} p{print}' "$template" > "$rule_before"
+          awk '/^  PersistentTranscriptPolicyV1Enabled:/{print; exit}' "$template" > "$condition_before"
+          test "$(grep -Fc 'Fn::Not:' "$rule_before")" -eq 2
+          test "$(grep -Fc -- '- !Ref ImageTag' "$rule_before")" -eq 1
+          test "$(grep -Fc -- '!Ref PersistentTranscriptPolicyActivateAt' "$rule_before")" -eq 1
+          test "$(grep -Fc '"v1.10.\u0031\u0031\u0036"' "$rule_before")" -eq 1
+          test "$(grep -Fc '"v1.10.\u0031\u0031\u0036"' "$condition_before")" -eq 1
+          grep -Fq 'PersistentTranscriptPolicyV1Enabled: !Not' "$condition_before"
+          grep -Fq -- '- PersistentTranscriptPolicyV1Enabled' "$template"
+          grep -Fq 'j?.features?.persistentTranscriptPolicyV1===true' "$template"
+
+          # The release stamp may update ImageTag.Default only. Simulate both
+          # the legacy lane and a guaranteed-different future release; neither
+          # may alter the encoded v1.10.116 exemption.
+          legacy="$RUNNER_TEMP/anyray-quicklaunch-legacy.template.yaml"
+          staged="$RUNNER_TEMP/anyray-quicklaunch-staged.template.yaml"
+          rule_after="$RUNNER_TEMP/cfn-policy-rule-after"
+          condition_after="$RUNNER_TEMP/cfn-policy-condition-after"
+          cp "$template" "$legacy"
+          cp "$template" "$staged"
+          scripts/stamp-aws-image-tag.sh v1.10.116 "$legacy"
+          simulated_tag=v999.999.999
+          [ "$current_tag" != "$simulated_tag" ] || simulated_tag=v999.999.998
+          scripts/stamp-aws-image-tag.sh "$simulated_tag" "$staged"
+          awk '/^  PersistentTranscriptPolicyActivationRequired:/{p=1} p && /^  AllowedCidrMustNotBePublic:/{exit} p{print}' "$staged" > "$rule_after"
+          awk '/^  PersistentTranscriptPolicyV1Enabled:/{print; exit}' "$staged" > "$condition_after"
+          cmp -s "$rule_before" "$rule_after"
+          cmp -s "$condition_before" "$condition_after"
+          legacy_image_parameter="$(awk '/^  ImageTag:/{p=1;print;next} p && /^  [A-Za-z][A-Za-z0-9]*:/{exit} p{print}' "$legacy")"
+          staged_image_parameter="$(awk '/^  ImageTag:/{p=1;print;next} p && /^  [A-Za-z][A-Za-z0-9]*:/{exit} p{print}' "$staged")"
+          grep -qx '    Default: v1.10.116' <<<"$legacy_image_parameter"
+          grep -qx "    Default: $simulated_tag" <<<"$staged_image_parameter"
+          cfn-lint "$legacy"
+          cfn-lint "$staged"
+
+          if scripts/stamp-aws-image-tag.sh latest "$staged"; then
+            echo "::error::CloudFormation release stamp accepted a mutable tag"
+            exit 1
+          fi
 
   railway:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: template parses and keeps the gateway fail-fast vars
-        # ANYRAY_SPEND_DB_URL + ANYRAY_CONTENT_KEY are boot-exit vars on the
-        # gateway; losing either from the template bricks the one-click.
-        run: |
-          jq -e . railway/railway.template.json > /dev/null
-          jq -e '.services[] | select(.name == "gateway") | .variables
-                 | has("ANYRAY_SPEND_DB_URL") and has("ANYRAY_CONTENT_KEY")' \
-            railway/railway.template.json > /dev/null
+      - name: activation starts only at the policy-compatible image pin
+        # This also verifies that the JSON gateway/optimizer/proxy and IaC pins
+        # stay equal when release automation stamps them.
+        run: ci/check-railway-policy-activation.sh
+
+      - name: policy-compatible release marker is present
+        run: test -s compatibility/persistentTranscriptPolicyV1
 
   gateway-env-coverage:
     # Every deploy-critical gateway env var (ci/critical-gateway-env.txt) must be
-    # wired into EVERY template — compose, CloudFormation, Railway, Helm. A var
+    # wired into EVERY template — compose, CloudFormation, both Railway paths,
+    # and Helm. A var
     # the gateway fail-fasts on (or the admin console needs), silently dropped
     # from one template, bricks that install path on the next image bump. This
-    # generalises the per-template railway check above across all four templates,
+    # generalises the per-template railway check above across all install paths,
     # and — running daily — catches template drift before a customer hits it (and
     # a monorepo paired PR that wired a new var into some templates but not all).
     runs-on: ubuntu-latest

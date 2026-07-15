@@ -20,6 +20,11 @@ in-process — there is no separate observability backend to run.
 The chart is published as an OCI artifact to the same public registry as the
 images — no git clone, no `setup.sh`:
 
+When installing policy-capable images (`v1.10.117` or newer), set
+`persistentTranscriptPolicyActivateAt` in `my-values.yaml` to one shared future
+ISO-8601 instant before the rollout, then preserve that exact value. See the
+coordinated upgrade section below. Legacy images can omit the value.
+
 ```bash
 helm install anyray oci://public.ecr.aws/anyray/anyray \
   --version <x.y.z> \
@@ -49,6 +54,7 @@ spec:
     helm:
       valuesObject:
         host: anyray.example.com
+        persistentTranscriptPolicyActivateAt: "2026-07-15T12:00:00.000Z" # replace with a safely-future instant
         gateway:
           publicUrl: https://anyray.example.com
           consolePublicUrl: https://anyray.example.com
@@ -111,6 +117,36 @@ assumes `default`.
 git pull
 helm upgrade anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 ```
+
+### Coordinated transcript-policy upgrade
+
+Kubernetes rolls the gateway and optimizer Deployments independently, including
+at one replica. When either effective image tag is `v1.10.117` or newer, the
+chart therefore requires an explicit `persistentTranscriptPolicyActivateAt`
+value for every topology. This includes `image.tag` and component-specific tag
+overrides; moving or non-semver tags are treated as policy-capable because the
+chart cannot prove they are legacy. Effective gateway and optimizer tags older
+than `v1.10.117` can still render without the value.
+
+Starting with a policy-capable chart `appVersion`, `setup.sh` generates a value
+one hour in the future for a new `my-values.yaml` and backfills a missing or
+blank value on re-run. It preserves any existing nonblank value exactly. GitOps
+installs must set and retain the value themselves. For the first compatible
+rollout:
+
+1. Choose one ISO-8601 UTC instant far enough in the future for every gateway
+   and optimizer pod to roll out, become Ready, and leave time to roll back.
+2. Put that exact value in the values file used by every release, for example
+   `persistentTranscriptPolicyActivateAt: "2026-07-15T12:00:00.000Z"`
+   (replace the example with a future instant for your rollout).
+3. Run `helm upgrade`, then verify both Deployments complete before that instant.
+   Roll back before activation if either workload is not healthy.
+4. Preserve the same value on every later upgrade, even after it is in the past.
+
+Do not use different timestamps between Helm releases or activate while an old
+gateway or optimizer pod can still receive traffic. The gate changes provider
+cache prefixes, so an uncoordinated mixed-version rollout can increase prompt
+cache writes and session spend.
 
 ## Connect to Anyray Portal (metering)
 
@@ -293,9 +329,12 @@ proxy:
 
 Gateway and optimizer HPAs are also available, but the bundled data PVCs are
 `ReadWriteOnce`, so autoscaling those components requires disabling their bundled
-persistence and providing an external/shared state plan for production:
+persistence and providing an external/shared state plan for production. Keep the
+coordinated activation instant from the upgrade section in the values when
+running policy-capable images:
 
 ```yaml
+persistentTranscriptPolicyActivateAt: "2026-07-15T12:00:00.000Z"
 gateway:
   persistence:
     enabled: false

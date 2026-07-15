@@ -1,0 +1,6 @@
+This install revision wires the coordinated persistent-transcript policy
+activation into every full-gateway customer template.
+
+The monorepo production deploy checks this marker before publishing a release
+that requires the policy-aware install artifacts. Do not backport this marker
+without the Compose, Helm, Railway, and CloudFormation activation settings.

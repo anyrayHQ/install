@@ -20,6 +20,8 @@ on:
 jobs:
   chart:
     runs-on: ubuntu-latest
+    env:
+      POLICY_ACTIVATE_AT: '2099-01-01T00:00:00.000Z'
     steps:
       - uses: actions/checkout@v6
       - uses: azure/setup-helm@v4
@@ -28,7 +30,74 @@ jobs:
           token: ${{ github.token }}
 
       - name: Lint
-        run: helm lint helm --set host=anyray.example.com
+        run: >-
+          helm lint helm --set host=anyray.example.com
+          --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT"
+
+      - name: Transcript policy activation follows the effective image tags
+        run: |
+          set -euo pipefail
+          legacy_render="$(helm template t helm --set host=anyray.example.com \
+            --set-string image.tag=v1.10.116)"
+          printf '%s\n' "$legacy_render" | grep -A1 \
+            'name: ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT' \
+            | grep -q 'value: ""'
+
+          expect_activation_required() {
+            if helm template t helm --set host=anyray.example.com "$@" \
+              >"$RUNNER_TEMP/missing.out" 2>"$RUNNER_TEMP/missing.err"; then
+              echo "::error::policy-capable image rendered without persistentTranscriptPolicyActivateAt"
+              exit 1
+            fi
+            grep -q 'persistentTranscriptPolicyActivateAt is required' "$RUNNER_TEMP/missing.err"
+          }
+
+          expect_activation_required --set-string image.tag=v1.10.117
+          expect_activation_required --set-string images.gateway.tag=v1.10.117
+          expect_activation_required --set-string images.optimizer.tag=v1.10.117
+          # A moving/unknown tag cannot prove it is legacy, so require the gate.
+          expect_activation_required --set-string image.tag=latest
+
+          default_render="$(helm template t helm --set host=anyray.example.com \
+            --set-string image.tag=v1.10.117 \
+            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT")"
+          printf '%s\n' "$default_render" | grep -A1 \
+            'name: ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT' \
+            | grep -q "value: \"$POLICY_ACTIVATE_AT\""
+
+          expect_activation_required --set-string image.tag=v1.10.117 \
+            --set gateway.persistence.enabled=false --set gateway.replicas=2
+          expect_activation_required --set-string image.tag=v1.10.117 \
+            --set optimizer.persistence.enabled=false --set optimizer.replicas=2
+          expect_activation_required --set-string image.tag=v1.10.117 \
+            --set gateway.persistence.enabled=false --set gateway.autoscaling.enabled=true
+          expect_activation_required --set-string image.tag=v1.10.117 \
+            --set optimizer.persistence.enabled=false --set optimizer.autoscaling.enabled=true
+
+          helm template t helm --set host=anyray.example.com \
+            --set-string image.tag=v1.10.117 \
+            --set gateway.persistence.enabled=false --set gateway.replicas=2 \
+            --set optimizer.persistence.enabled=false --set optimizer.replicas=2 \
+            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT" \
+            > "$RUNNER_TEMP/scaled.out"
+          grep -A1 'name: ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT' "$RUNNER_TEMP/scaled.out" \
+            | grep -q "value: \"$POLICY_ACTIVATE_AT\""
+
+          helm template t helm --set host=anyray.example.com \
+            --set-string image.tag=v1.10.117 \
+            --set gateway.persistence.enabled=false --set gateway.autoscaling.enabled=true \
+            --set optimizer.persistence.enabled=false --set optimizer.autoscaling.enabled=true \
+            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT" \
+            > "$RUNNER_TEMP/autoscaled.out"
+
+          if helm template t helm --set host=anyray.example.com \
+            --set-string image.tag=v1.10.117 \
+            --set-string persistentTranscriptPolicyActivateAt=2099-01-01T00:00:00.000 \
+            >"$RUNNER_TEMP/invalid.out" 2>"$RUNNER_TEMP/invalid.err"; then
+            echo "::error::invalid persistentTranscriptPolicyActivateAt rendered"
+            exit 1
+          fi
+          grep -q 'must be a valid timezone-qualified ISO-8601 instant' "$RUNNER_TEMP/invalid.err"
 
       - name: appVersion must be a pinned vX.Y.Z (never a moving tag)
         run: |
@@ -44,7 +113,8 @@ jobs:
       - name: Default render pins every app image to appVersion
         run: |
           set -euo pipefail
-          render="$(helm template t helm --set host=anyray.example.com)"
+          render="$(helm template t helm --set host=anyray.example.com \
+            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT")"
           fail=0
           for c in gateway optimizer proxy; do
             if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:${APP_VERSION}"; then
@@ -62,6 +132,7 @@ jobs:
       - name: image.tag override still rides a moving channel (testing opt-in)
         run: |
           set -euo pipefail
-          render="$(helm template t helm --set host=anyray.example.com --set image.tag=latest)"
+          render="$(helm template t helm --set host=anyray.example.com --set image.tag=latest \
+            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT")"
           printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/gateway:latest" \
             || { echo "::error::image.tag override no longer pins :latest — the testing opt-in is broken"; exit 1; }

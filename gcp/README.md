@@ -77,6 +77,11 @@ the console, add a provider key, and enroll developers — see the
 Re-run `./gcp/deploy.sh` (it is `helm upgrade --install`), or pin a tag and run
 the chart directly:
 
+The first policy-compatible rerun backfills one
+`persistentTranscriptPolicyActivateAt` value an hour in the future into
+`my-values.yaml`; later reruns preserve it. Confirm gateway and optimizer finish
+rolling before that instant, and roll back before it if either is unhealthy.
+
 ```bash
 helm upgrade anyray ./helm -f my-values.yaml \
   --namespace "$NAMESPACE" --reuse-values --set image.tag=vX.Y.Z

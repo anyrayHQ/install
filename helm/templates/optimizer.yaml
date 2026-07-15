@@ -1,3 +1,4 @@
+{{- $_ := include "anyray.persistentTranscriptPolicyActivateAt" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

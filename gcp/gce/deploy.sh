@@ -146,7 +146,7 @@ ssh_vm() { # ssh_vm <remote-command>
 }
 
 if [ "$REUSED" -eq 1 ]; then
-  echo "→ Reconciling the reused VM with the updated Billing identity and installer contract…"
+  echo "→ Updating the existing VM…"
   ssh_vm 'sudo google_metadata_script_runner startup'
 fi
 

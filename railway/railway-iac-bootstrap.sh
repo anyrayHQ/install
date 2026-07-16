@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# One-time bootstrap for the Railway Infrastructure-as-Code install (.railway/railway.ts).
+# Bootstrap for the Railway Infrastructure-as-Code install (.railway/railway.ts).
 #
-# `railway config apply` provisions the services and wires every internal reference,
-# but three things IaC can't express declaratively are completed here:
+# `railway config apply` creates the services. This script adds:
 #   1. generated secrets (preserve()d in railway.ts)
 #   2. the operator's mandatory Billing deployment token
 #   3. public domains for gateway (:8787) and proxy (:80) + the URLs that reference them
 #
-# Run AFTER `railway config apply`, with the target project/environment linked
-# (`railway link`). Safe to re-run: existing generated secrets/domains are left
-# untouched and the supplied deployment token is applied intentionally.
+# Run after `railway config apply` with the project linked (`railway link`).
+# Safe to re-run: generated secrets and domains are kept; a supplied token is set.
 #
 # Usage: railway/railway-iac-bootstrap.sh adt_deployment_token
 set -euo pipefail
@@ -69,8 +67,7 @@ set_if_empty gateway ANYRAY_OPTIMIZER_TOKEN "$(hex 24)"
 set_if_empty gateway ANYRAY_PSEUDONYM_SALT "$(hex 16)"
 set_if_empty proxy   ANYRAY_UPDATER_TOKEN "$(hex 16)"
 
-# Mandatory Billing deployment token (adt_…). A routine re-run may omit the
-# argument only when the linked gateway already has one.
+# A re-run may omit the token only when the gateway already has one.
 if [ -n "$deployment_token" ]; then
   railway variables -s gateway --set "ANYRAY_DEPLOYMENT_TOKEN=$deployment_token" --skip-deploys >/dev/null
   echo "  set gateway.ANYRAY_DEPLOYMENT_TOKEN"

@@ -19,9 +19,9 @@ optimizer + observability console). Docs: https://docs.anyray.ai
    the current kubectl/Helm namespace, confirm that explicitly and omit
    `--namespace`.
 4. Their Anyray Cloud deployment token (starts with `adt_`) — they get it at
-   https://app.anyray.ai (Deployments → Connect a deployment). Full-gateway
-   deployments require this for usage metering. The gateway-less LiteLLM attach
-   mode instead uses the explicit `./setup.sh --attach` lane.
+   https://app.anyray.ai (Deployments → Connect a deployment). Gateway installs
+   require it. Only gateway-less LiteLLM attach mode uses `./setup.sh --attach`
+   without a token.
 
 ## Step 2 — Platform preparation (your job)
 

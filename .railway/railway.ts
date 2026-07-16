@@ -15,11 +15,11 @@ import {
 // vX.Y.Z across every install artifact (including this file) on each release,
 // so `railway config apply` from this repo always provisions the current build.
 //
-// Two things IaC cannot express declaratively — both handled once, post-apply,
-// by railway/railway-iac-bootstrap.sh:
+// railway/railway-iac-bootstrap.sh handles these post-apply steps:
 //   1. generated secrets — seeded once, then preserve()d here so apply never
 //      clobbers them.
-//   2. generated public domains (gateway :8787, proxy :80) + the URLs that
+//   2. the operator's required Billing token.
+//   3. generated public domains (gateway :8787, proxy :80) + the URLs that
 //      reference them — created after apply, so ANYRAY_*_PUBLIC_URL are preserve()d.
 //
 // Private service-to-service hostnames are deterministic (<service>.railway.internal)

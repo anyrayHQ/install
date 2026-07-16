@@ -1,6 +1,7 @@
 .env
 anyray-secrets.yaml
 my-values.yaml
+.deploy-generation
 
 # Python bytecode (the vendored LiteLLM adapter)
 __pycache__/

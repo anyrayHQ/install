@@ -55,22 +55,53 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 systemctl enable --now docker
 
-# ---- 3. Resume path: an existing deployment is on the data disk -------------
-# True on a reboot, or on a fresh VM that reattached a prior data disk. Secrets
-# already match the data on disk, so just bring the stack up — never re-run setup.
+# ---- 3. Deployment settings from instance metadata --------------------------
+DEPLOYMENT_TOKEN="$(md instance/attributes/anyray-deployment-token)"
+IMAGE_TAG="$(md instance/attributes/anyray-image-tag v1.10.120)"
+DEFAULT_MODEL="$(md instance/attributes/anyray-default-model anthropic/claude-sonnet-4-5)"
+DEPLOY_GENERATION="$(md instance/attributes/anyray-deploy-generation legacy)"
+EXTERNAL_IP="$(md instance/network-interfaces/0/access-configs/0/external-ip)"
+if ! printf '%s' "$DEPLOYMENT_TOKEN" | grep -Eq '^adt_[A-Za-z0-9_-]+$'; then
+  echo "  ✗ valid deployment-token metadata is required" >&2
+  exit 1
+fi
+case "$IMAGE_TAG$DEFAULT_MODEL$DEPLOY_GENERATION" in
+  *$'\n'*|*$'\r'*) echo "  ✗ deployment metadata contains an invalid newline" >&2; exit 1 ;;
+esac
+
+set_env() {
+  local key="$1" value="$2" temporary
+  temporary="$(mktemp "$REPO_DIR/.env.XXXXXX")"
+  grep -v "^${key}=" "$REPO_DIR/.env" > "$temporary" || true
+  printf '%s=%s\n' "$key" "$value" >> "$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$REPO_DIR/.env"
+}
+
+# ---- 4. Reuse an existing persistent disk -----------------------------------
+# Explicit deploys update once per generation. Reboots use the installed files.
 if [ -f "$REPO_DIR/.env" ]; then
-  echo "→ Existing deployment found on the data disk — starting it."
+  current_generation="$(cat "$REPO_DIR/.deploy-generation" 2>/dev/null || true)"
+  if [ "$current_generation" != "$DEPLOY_GENERATION" ]; then
+    echo "→ Existing deployment found — applying the requested update."
+    rm -f "$REPO_DIR/.ready"
+    git -C "$REPO_DIR" pull --ff-only
+    ( cd "$REPO_DIR" && ./setup.sh --connect "$DEPLOYMENT_TOKEN" --host "$EXTERNAL_IP" )
+    set_env ANYRAY_IMAGE_TAG "$IMAGE_TAG"
+    set_env ANYRAY_DEFAULT_MODEL "$DEFAULT_MODEL"
+    ( cd "$REPO_DIR" && docker compose pull )
+  else
+    echo "→ Existing deployment found on the data disk — starting it."
+  fi
   ( cd "$REPO_DIR" && docker compose up -d )
+  printf '%s\n' "$DEPLOY_GENERATION" > "$REPO_DIR/.deploy-generation"
+  chmod 600 "$REPO_DIR/.deploy-generation"
   touch "$REPO_DIR/.ready"
   echo "=== anyray startup resumed $(date -u +%FT%TZ) ==="
   exit 0
 fi
 
-# ---- 4. First-time provisioning: clone + secrets + connect -----------------
-DEPLOYMENT_TOKEN="$(md instance/attributes/anyray-deployment-token)"
-IMAGE_TAG="$(md instance/attributes/anyray-image-tag v1.10.120)"
-DEFAULT_MODEL="$(md instance/attributes/anyray-default-model anthropic/claude-sonnet-4-5)"
-EXTERNAL_IP="$(md instance/network-interfaces/0/access-configs/0/external-ip)"
+# ---- 5. First-time provisioning: clone + secrets + connect -----------------
 echo "→ external IP: ${EXTERNAL_IP}   image tag: ${IMAGE_TAG}"
 
 echo "→ Fetching the Anyray install repo…"
@@ -82,12 +113,7 @@ echo "→ Generating secrets and connecting to Anyray Portal…"
 # portal and the console/gateway URLs print correctly. Every real secret (admin
 # token, content key, Postgres password, pseudonym salt) is generated HERE into
 # .env on the persistent disk — it never travels through instance metadata.
-if [ -n "$DEPLOYMENT_TOKEN" ]; then
-  ./setup.sh --connect "$DEPLOYMENT_TOKEN" --host "$EXTERNAL_IP"
-else
-  echo "  ⚠ no deployment token in metadata — running without --connect (metering off)"
-  ./setup.sh --host "$EXTERNAL_IP"
-fi
+./setup.sh --connect "$DEPLOYMENT_TOKEN" --host "$EXTERNAL_IP"
 
 # Pin the image tag + default model for compose's variable substitution. setup.sh
 # doesn't manage these, and it never prunes lines, so appending is safe.
@@ -99,4 +125,6 @@ docker compose pull
 docker compose up -d
 
 touch "$REPO_DIR/.ready"
+printf '%s\n' "$DEPLOY_GENERATION" > "$REPO_DIR/.deploy-generation"
+chmod 600 "$REPO_DIR/.deploy-generation"
 echo "=== anyray startup complete $(date -u +%FT%TZ) ==="

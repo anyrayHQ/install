@@ -48,6 +48,7 @@ DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}"
 NETWORK="${NETWORK:-default}"
 ALLOWED_CIDR="${ALLOWED_CIDR:-}"
 DEPLOYMENT_TOKEN="${DEPLOYMENT_TOKEN:-}"
+DEPLOY_GENERATION="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 TAG=anyray
 IAP_CIDR="35.235.240.0/20"   # Google IAP TCP-forwarding range — the only SSH source
 
@@ -102,8 +103,14 @@ fw anyray-allow-web "tcp:8787,tcp:3000" "$ALLOWED_CIDR" "Anyray console + gatewa
 fw anyray-allow-iap-ssh "tcp:22" "$IAP_CIDR" "SSH to the Anyray VM only via Google IAP TCP forwarding."
 
 # ---- 3. The VM (reused if it already exists — never recreate, keep the data) -
+REUSED=0
 if gcloud compute instances describe "$INSTANCE" --zone "$ZONE" --project "$PROJECT_ID" >/dev/null 2>&1; then
   echo "→ Instance $INSTANCE already exists in $ZONE — reusing it (re-run is idempotent)."
+  REUSED=1
+  gcloud compute instances add-metadata "$INSTANCE" \
+    --project "$PROJECT_ID" --zone "$ZONE" \
+    --metadata "anyray-image-tag=${IMAGE_TAG},anyray-default-model=${DEFAULT_MODEL},anyray-deployment-token=${DEPLOYMENT_TOKEN},anyray-deploy-generation=${DEPLOY_GENERATION}" \
+    --metadata-from-file "startup-script=${HERE}/startup-script.sh" >/dev/null
 else
   # The data disk is never auto-deleted with the VM, so a rebuild keeps provider
   # keys + enrollments. Reattach it if it survived a prior VM; create it the first
@@ -124,7 +131,7 @@ else
     --boot-disk-size 20GB --boot-disk-type pd-balanced \
     "${DISK_FLAG[@]}" \
     --tags "$TAG" \
-    --metadata "anyray-image-tag=${IMAGE_TAG},anyray-default-model=${DEFAULT_MODEL},anyray-deployment-token=${DEPLOYMENT_TOKEN}" \
+    --metadata "anyray-image-tag=${IMAGE_TAG},anyray-default-model=${DEFAULT_MODEL},anyray-deployment-token=${DEPLOYMENT_TOKEN},anyray-deploy-generation=${DEPLOY_GENERATION}" \
     --metadata-from-file "startup-script=${HERE}/startup-script.sh"
 fi
 
@@ -133,15 +140,20 @@ EXTERNAL_IP="$(gcloud compute instances describe "$INSTANCE" --zone "$ZONE" --pr
 GATEWAY_URL="http://${EXTERNAL_IP}:8787"
 CONSOLE_URL="http://${EXTERNAL_IP}:3000"
 
-# ---- 4. Wait for first-boot provisioning, then read back the admin key -------
-# Provisioning (Docker install + image pulls + first boot) runs from the startup
-# script and takes a few minutes. We poll over IAP SSH for the .ready marker.
-echo "→ Waiting for first-boot provisioning (Docker install + image pull, ~3–6 min)…"
 ssh_vm() { # ssh_vm <remote-command>
   gcloud compute ssh "$INSTANCE" --zone "$ZONE" --project "$PROJECT_ID" \
     --tunnel-through-iap --command "$1" -- -o StrictHostKeyChecking=no -o ConnectTimeout=15 2>/dev/null
 }
 
+if [ "$REUSED" -eq 1 ]; then
+  echo "→ Updating the existing VM…"
+  ssh_vm 'sudo google_metadata_script_runner startup'
+fi
+
+# ---- 4. Wait for first-boot provisioning, then read back the admin key -------
+# Provisioning (Docker install + image pulls + first boot) runs from the startup
+# script and takes a few minutes. We poll over IAP SSH for the .ready marker.
+echo "→ Waiting for first-boot provisioning (Docker install + image pull, ~3–6 min)…"
 ADMIN_TOKEN=""
 for i in $(seq 1 40); do
   if ssh_vm 'test -f /opt/anyray/.ready'; then

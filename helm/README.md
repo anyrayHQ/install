@@ -110,8 +110,14 @@ assumes `default`.
 
 ```bash
 git pull
+# Run before the first upgrade from an older Secret. Safe to repeat.
+./setup.sh --k8s --connect adt_XXXX --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
+kubectl apply -n "$ANYRAY_NAMESPACE" -f anyray-secrets.yaml
 helm upgrade anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 ```
+
+Apply the updated Secret before upgrading. The gateway pod will not start
+without `ANYRAY_DEPLOYMENT_TOKEN` and `ANYRAY_PSEUDONYM_SALT`.
 
 When following `policy-stable`, restart the app Deployments after each channel
 promotion so Kubernetes resolves the new digest:
@@ -123,26 +129,19 @@ kubectl rollout status deployment -n "$ANYRAY_NAMESPACE" \
   -l app.kubernetes.io/instance=anyray --timeout=10m
 ```
 
-## Connect to Anyray Portal (metering)
+## Billing
 
-Metering is **on by default** (`gateway.metering.enabled: true`) — every deployment
-connects to Anyray Portal for content-free usage rollups and a signed entitlement lease.
-Generate the manifests with `--connect` so the Secret carries a deployment token:
+Billing is required. The chart always enables content-free usage metering.
+Create or update the Secret with:
 
 ```bash
 ./setup.sh --k8s --connect adt_XXXX --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
 ```
 
-This folds `ANYRAY_DEPLOYMENT_TOKEN` and a locally-generated `ANYRAY_PSEUDONYM_SALT`
-into `anyray-secrets.yaml` and keeps `gateway.metering.enabled: true` in `my-values.yaml`.
-The chart then injects the metering env into the gateway (the token + salt are read from
-the Secret; the control-plane host and the vendor verify key stay pinned in the gateway
-image). If you install with `enabled: true` but no deployment token in the Secret, the
-gateway serves through the first-boot grace window and then blocks `/v1` until a token is
-wired — so always generate the Secret with `--connect`.
-
-The pseudonym salt never leaves your cluster — it pseudonymizes employee identifiers
-before the content-free usage rollup is sent. Tune cadence with
+`setup.sh` adds the deployment token and a local pseudonym salt to
+`anyray-secrets.yaml`. The chart requires both keys. The Billing URL and
+verification key are pinned in the gateway image, and the salt stays in your
+cluster. Tune the reporting interval with
 `gateway.metering.intervalMs` / `gateway.metering.graceMs`.
 
 ## Exposing services
@@ -298,7 +297,8 @@ gateway:
 ```
 
 Use `gateway.extraEnv`, `optimizer.extraEnv`, or `proxy.extraEnv` for advanced
-environment variables not modeled directly.
+environment variables not modeled directly. Billing variables cannot be
+overridden through `gateway.extraEnv`.
 
 ## Scaling
 
@@ -374,7 +374,8 @@ the gateway alone silently degrades the optimizer to in-memory stash
 ## Secrets
 
 All secrets live in a single Kubernetes Secret named `anyray-secrets` (configurable
-via `values.secretName`). Generate it with `./setup.sh --k8s`. Never commit
+via `values.secretName`). Generate it with
+`./setup.sh --k8s --connect <adt_token>`. Never commit
 `anyray-secrets.yaml` — it is in `.gitignore` at the install repo root.
 
 ## Uninstall

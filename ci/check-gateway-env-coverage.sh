@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # Assert every deploy-critical gateway env var (ci/critical-gateway-env.txt)
-# reaches the gateway in EVERY install template. A fail-fast / secret / DB-URL /
-# coordinated-rollout var the gateway needs, silently dropped from one template,
-# bricks or regresses that install path on the next image bump. This also catches
+# reaches the gateway in EVERY install template. A fail-fast / secret / DB-URL
+# var the gateway needs, silently dropped from one template, bricks or
+# regresses that install path on the next image bump. This also catches
 # a monorepo paired PR that wired the var into some templates but not all.
 #
 # Requires: jq, helm, and my-values.yaml (run `./setup.sh --k8s ...` first, as
@@ -23,8 +23,7 @@ fi
 # Per-template gateway env, as text we grep the var name against.
 compose_block="$(sed -n '/^  gateway:/,/^  [a-z][a-z_-]*:/p' docker-compose.yml)"
 # Check the Railway source contract, not .publish/gateway.vars: the publish
-# generator intentionally omits the empty activation prompt in legacy artifact
-# revisions that do not declare the install capability.
+# generator intentionally omits empty-valued knobs.
 railway_vars="$(jq -r '.services[] | select(.name == "gateway") | .variables | keys[]' railway/railway.template.json)"
 railway_iac_block="$(awk '/const gateway = service\("gateway"/{g=1;print;next} g && /const optimizer = service\("optimizer"/{exit} g{print}' .railway/railway.ts)"
 # The CloudFormation GatewayTask resource block (2-space-indented resource key).

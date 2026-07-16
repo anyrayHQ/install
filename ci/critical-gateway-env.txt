@@ -1,7 +1,7 @@
-# Deploy-critical gateway env vars: the gateway fail-fasts, a required feature
-# cannot work, or a coordinated update becomes unsafe without these. If ANY
-# install template drops one, that install path can brick or regress on the next
-# image bump. Every template below must wire each of these onto the gateway:
+# Deploy-critical gateway env vars: the gateway fail-fasts or a required
+# feature cannot work without these. If ANY install template drops one, that
+# install path can brick or regress on the next image bump. Every template
+# below must wire each of these onto the gateway:
 # docker-compose.yml, the AWS CloudFormation GatewayTask, both Railway gateway
 # templates, and the Helm gateway Deployment. Enforced by
 # ci/check-gateway-env-coverage.sh (validate-artifacts).
@@ -14,4 +14,3 @@ ANYRAY_SPEND_DB_URL
 ANYRAY_CONTENT_KEY
 ANYRAY_ADMIN_TOKEN
 ANYRAY_OBSERVABILITY_DB_URL
-ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT

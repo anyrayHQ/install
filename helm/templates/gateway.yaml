@@ -1,4 +1,3 @@
-{{- $persistentTranscriptPolicyActivateAt := include "anyray.persistentTranscriptPolicyActivateAt" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,8 +43,6 @@ spec:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}
             - name: ANYRAY_OPTIMIZER_TIMEOUT_MS
               value: {{ .Values.gateway.optimizerTimeoutMs | quote }}
-            - name: ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT
-              value: {{ $persistentTranscriptPolicyActivateAt | quote }}
             - name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS
               value: {{ .Values.gateway.optimizerVisionTimeoutMs | quote }}
             {{- with .Values.gateway.defaultModel }}

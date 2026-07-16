@@ -1,5 +1,5 @@
 # Anyray Helm chart values.
-# Run setup.sh --k8s to generate anyray-secrets.yaml + a starter my-values.yaml,
+# Run setup.sh --k8s --connect <adt_token> to generate anyray-secrets.yaml + a starter my-values.yaml,
 # then install into your chosen namespace:
 #   kubectl apply -n "$ANYRAY_NAMESPACE" -f anyray-secrets.yaml
 #   helm install anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
@@ -52,7 +52,7 @@ images:
     repository: docker.io/postgres
     tag: "17"
 
-# Name of the Kubernetes Secret created by: ./setup.sh --k8s
+# Name of the Kubernetes Secret created by: ./setup.sh --k8s --connect <adt_token>
 secretName: anyray-secrets
 
 # Common pod/runtime controls. These apply to all workload pods.
@@ -158,14 +158,13 @@ gateway:
   maxConcurrentRequests: ""
   authFailLimit: ""
   maxBodyBytes: ""
-  # Anyray Portal metering. ON by default — every deployment connects for content-free
-  # usage metering. `setup.sh --k8s --connect <token>` folds ANYRAY_DEPLOYMENT_TOKEN +
-  # ANYRAY_PSEUDONYM_SALT into the Secret. The control-plane host and the vendor verify
-  # key are pinned in the gateway image, so they are NOT set here. (With enabled: true
-  # but no deployment token in the Secret, the gateway serves through the first-boot
-  # grace window, then blocks /v1 until a token is wired.)
+  # Anyray Portal metering is mandatory and is always enabled by the chart; there
+  # is intentionally no off toggle. `setup.sh --k8s --connect <token>` folds
+  # ANYRAY_DEPLOYMENT_TOKEN + ANYRAY_PSEUDONYM_SALT into the Secret. The
+  # control-plane host and the vendor verify key are pinned in the gateway image,
+  # so they are NOT set here. The chart requires both Secret keys before the
+  # gateway pod starts.
   metering:
-    enabled: true
     intervalMs: "900000"
     graceMs: "86400000"
     # Globs of x-anyray-metadata user ids to exclude from the billed seat

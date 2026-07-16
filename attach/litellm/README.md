@@ -26,7 +26,7 @@ Drop-in Anyray optimizer integration for that existing LiteLLM proxy gives you:
 1. Generate the Anyray secrets:
 
    ```
-   ./setup.sh --host <anyray-host>
+   ./setup.sh --attach --host <anyray-host>
    ```
 
    `setup.sh` writes `.env`, including `ANYRAY_ADMIN_TOKEN`,

@@ -18,7 +18,9 @@ Postgres and content AES-256-GCM encrypted at rest.
 
 ## Install
 
-Prerequisites: the [Railway CLI](https://docs.railway.com/guides/cli), Node.js, and `openssl`.
+Prerequisites: the [Railway CLI](https://docs.railway.com/guides/cli), Node.js,
+`openssl`, and an Anyray deployment token (`adt_…`) from
+[app.anyray.ai](https://app.anyray.ai) → Deployments.
 
 ```bash
 git clone https://github.com/anyrayHQ/install && cd install
@@ -28,26 +30,29 @@ railway login
 railway init -n anyray            # or: railway link  (to an existing empty project)
 railway config apply              # provisions gateway / optimizer / proxy / Postgres
 
-railway/railway-iac-bootstrap.sh  # seeds generated secrets + public domains
+railway/railway-iac-bootstrap.sh adt_your_deployment_token
+                                  # seeds generated secrets + public domains
 ```
 
 `railway config plan` previews the changes before `apply`.
 
 ## Why the bootstrap step
 
-Two things Railway IaC can't express declaratively, so the bootstrap seeds them once
-(idempotently — safe to re-run):
+Three things Railway IaC can't express declaratively, so the bootstrap completes
+them after apply (safe to re-run):
 
 1. **Generated secrets** — `ANYRAY_ADMIN_TOKEN`, `ANYRAY_CONTENT_KEY`,
    `ANYRAY_OPTIMIZER_TOKEN`, `ANYRAY_PSEUDONYM_SALT`, `ANYRAY_UPDATER_TOKEN`. They're
    `preserve()`d in `railway.ts`, so `apply` never overwrites them.
-2. **Public domains** — the generated URLs for the gateway (`:8787`) and console (`:80`),
+2. **Billing credential** — the required `adt_…` deployment token supplied to
+   the bootstrap.
+3. **Public domains** — the generated URLs for the gateway (`:8787`) and console (`:80`),
    and the `ANYRAY_*_PUBLIC_URL` vars that reference them.
 
 ## Connect metering (Billing app)
 
-Every deployment connects to the Anyray Billing app. Provision a deployment token
-(`adt_…`) at [app.anyray.ai](https://app.anyray.ai) → Deployments, then:
+Every deployment connects to the Anyray Billing app. The required first-bootstrap
+argument provisions the deployment token alongside the generated secrets:
 
 ```bash
 railway/railway-iac-bootstrap.sh adt_your_deployment_token

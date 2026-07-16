@@ -2,19 +2,29 @@
 # One-time bootstrap for the Railway Infrastructure-as-Code install (.railway/railway.ts).
 #
 # `railway config apply` provisions the services and wires every internal reference,
-# but two things IaC can't express declaratively are seeded here (idempotently):
+# but three things IaC can't express declaratively are completed here:
 #   1. generated secrets (preserve()d in railway.ts)
-#   2. public domains for gateway (:8787) and proxy (:80) + the URLs that reference them
+#   2. the operator's mandatory Billing deployment token
+#   3. public domains for gateway (:8787) and proxy (:80) + the URLs that reference them
 #
 # Run AFTER `railway config apply`, with the target project/environment linked
-# (`railway link`). Safe to re-run: existing secrets/domains are left untouched.
+# (`railway link`). Safe to re-run: existing generated secrets/domains are left
+# untouched and the supplied deployment token is applied intentionally.
 #
-# Usage: railway/railway-iac-bootstrap.sh [adt_deployment_token]
+# Usage: railway/railway-iac-bootstrap.sh adt_deployment_token
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=railway/release-tag.sh
 source "$here/release-tag.sh"
+
+deployment_token="${1:-}"
+if [ -n "$deployment_token" ]; then
+  [[ "$deployment_token" =~ ^adt_[A-Za-z0-9_-]+$ ]] || {
+    echo "deployment token must match adt_[A-Za-z0-9_-]+ (get one at https://app.anyray.ai)" >&2
+    exit 1
+  }
+fi
 
 iac_tag="$(sed -nE 's/^const TAG = "(v[0-9]+\.[0-9]+\.[0-9]+)";.*/\1/p' "$here/../.railway/railway.ts")"
 anyray_valid_release_tag "$iac_tag" || {
@@ -30,6 +40,15 @@ hex() { openssl rand -hex "$1"; }
 
 # Read a service's current value for KEY ("" if unset).
 getvar() { railway variables -s "$1" --kv 2>/dev/null | sed -n "s/^$2=//p"; }
+
+if [ -z "$deployment_token" ]; then
+  existing_deployment_token="$(getvar gateway ANYRAY_DEPLOYMENT_TOKEN)"
+  if [[ ! "$existing_deployment_token" =~ ^adt_[A-Za-z0-9_-]+$ ]]; then
+    echo "Usage: railway/railway-iac-bootstrap.sh adt_deployment_token" >&2
+    echo "a valid Billing deployment token is required on the first bootstrap" >&2
+    exit 1
+  fi
+fi
 
 # Set KEY=VALUE on service $1 only if currently empty (idempotent, no redeploy churn).
 set_if_empty() {
@@ -50,10 +69,13 @@ set_if_empty gateway ANYRAY_OPTIMIZER_TOKEN "$(hex 24)"
 set_if_empty gateway ANYRAY_PSEUDONYM_SALT "$(hex 16)"
 set_if_empty proxy   ANYRAY_UPDATER_TOKEN "$(hex 16)"
 
-# Metering deployment token (adt_…): from arg, else leave for the grace window.
-if [ "${1:-}" != "" ]; then
-  railway variables -s gateway --set "ANYRAY_DEPLOYMENT_TOKEN=$1" --skip-deploys >/dev/null
+# Mandatory Billing deployment token (adt_…). A routine re-run may omit the
+# argument only when the linked gateway already has one.
+if [ -n "$deployment_token" ]; then
+  railway variables -s gateway --set "ANYRAY_DEPLOYMENT_TOKEN=$deployment_token" --skip-deploys >/dev/null
   echo "  set gateway.ANYRAY_DEPLOYMENT_TOKEN"
+else
+  echo "  keep gateway.ANYRAY_DEPLOYMENT_TOKEN (already set)"
 fi
 
 echo "== generating public domains =="
@@ -70,4 +92,4 @@ echo "Bootstrap complete."
 echo "  Gateway API : ${gw_host:+https://$gw_host}"
 echo "  Console     : ${px_host:+https://$px_host}"
 echo "  Admin token : \$(railway variables -s gateway --kv | grep ANYRAY_ADMIN_TOKEN)"
-echo "Connect metering later with: railway/railway-iac-bootstrap.sh adt_your_token"
+echo "  Billing     : deployment token configured"

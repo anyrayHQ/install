@@ -1,3 +1,8 @@
+{{- range .Values.gateway.extraEnv }}
+{{- if or (eq .name "ANYRAY_METERING_ENABLED") (eq .name "ANYRAY_DEPLOYMENT_TOKEN") (eq .name "ANYRAY_PSEUDONYM_SALT") }}
+{{- fail (printf "gateway.extraEnv must not override %s: Billing metering is mandatory" .name) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -68,12 +73,10 @@ spec:
             # ANYRAY_*_FILE var only if you need to (the per-file var wins).
             - name: ANYRAY_DATA_DIR
               value: /data
-            {{- if .Values.gateway.metering.enabled }}
-            # Anyray Cloud metering. The deployment token + pseudonym salt come from
-            # the Secret (folded in by setup.sh --connect); the control-plane host and
-            # verify key are pinned in the gateway image, so they are not set here.
-            # optional: true keeps the pod up if a key is missing — the gateway then
-            # logs "metering enabled but not configured" instead of crashlooping.
+            # Anyray Cloud metering is mandatory. The deployment token + pseudonym
+            # salt come from the Secret (folded in by setup.sh --connect); the
+            # control-plane host and verify key are pinned in the gateway image.
+            # Both Secret keys are required before Kubernetes starts the pod.
             - name: ANYRAY_METERING_ENABLED
               value: "true"
             - name: ANYRAY_DEPLOYMENT_TOKEN
@@ -81,18 +84,15 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: ANYRAY_DEPLOYMENT_TOKEN
-                  optional: true
             - name: ANYRAY_PSEUDONYM_SALT
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: ANYRAY_PSEUDONYM_SALT
-                  optional: true
             - name: ANYRAY_METERING_INTERVAL_MS
               value: {{ .Values.gateway.metering.intervalMs | quote }}
             - name: ANYRAY_ENTITLEMENT_GRACE_MS
               value: {{ .Values.gateway.metering.graceMs | quote }}
-            {{- end }}
             {{- with .Values.gateway.metering.seatExclude }}
             - name: ANYRAY_SEAT_EXCLUDE
               value: {{ . | quote }}

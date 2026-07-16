@@ -21,7 +21,7 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Generate secrets
-        run: ./setup.sh
+        run: ./setup.sh --connect adt_ci0000000000000000
       - name: Start the stack
         env:
           ANYRAY_GATEWAY_IMAGE: ghcr.io/anyrayhq/gateway:latest

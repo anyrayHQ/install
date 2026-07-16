@@ -1,5 +1,3 @@
-{{- $_ := include "anyray.persistentTranscriptPolicyActivateAt" . -}}
-{{- $persistentTranscriptPolicyCapable := eq (include "anyray.persistentTranscriptPolicyCapability" .) "true" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -77,17 +75,9 @@ spec:
           ports:
             - containerPort: 8088
           readinessProbe:
-            {{- if $persistentTranscriptPolicyCapable }}
-            exec:
-              command:
-                - node
-                - -e
-                - "fetch('http://127.0.0.1:8088/health').then(async(r)=>{const b=await r.json();process.exit(r.ok&&b?.features?.persistentTranscriptPolicyV1===true?0:1)}).catch(()=>process.exit(1))"
-            {{- else }}
             httpGet:
               path: /health
               port: 8088
-            {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 10

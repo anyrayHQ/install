@@ -1,6 +1,7 @@
 name: anyray
 
-# Anyray from published images. Generate secrets first: ./setup.sh
+# Anyray from published images. Generate secrets first:
+# ./setup.sh --connect <adt_token>
 # Console → http://<host>:3000   |   Gateway API → http://<host>:8787
 # Docs → https://docs.anyray.ai
 #
@@ -52,11 +53,6 @@ services:
       ANYRAY_OPTIMIZER_URL: http://optimizer:8088
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
       ANYRAY_OPTIMIZER_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_TIMEOUT_MS:-800}
-      # This stack runs one optimizer and one dependent gateway. Once the
-      # optimizer is healthy, activate the coordinated persistent-transcript
-      # safety policy immediately. Clustered installs must instead use one
-      # shared future ISO instant after every compatible replica is staged.
-      ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT: ${ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT:-1970-01-01T00:00:00.000Z}
       ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS:-10000}
       # Model the `anyray-default` routing sentinel resolves to. Set it to a model
       # your configured provider serves (a bare model is read under `anthropic`).
@@ -92,16 +88,13 @@ services:
       # On-top mode: seed the default routing config from an existing upstream
       # gateway so clients send no x-anyray-config header (./setup.sh --upstream).
       ANYRAY_UPSTREAM_URL: ${ANYRAY_UPSTREAM_URL:-}
-      # Anyray Portal metering (content-free rollups only) — ON by default; every
-      # deployment connects. setup.sh --connect writes the deployment token + salt
-      # to .env. The vendor verify key and the control-plane host are PINNED in the
-      # gateway image, so there is no license key to configure here. (Without a
-      # deployment token the gateway serves through the first-boot grace window,
-      # then blocks /v1 until a token is wired — run ./setup.sh --connect <adt_…>.)
-      ANYRAY_METERING_ENABLED: ${ANYRAY_METERING_ENABLED:-true}
+      # Billing is required. setup.sh writes the token and local salt; the image
+      # pins the Billing URL and verification key. Keep this literal so .env
+      # cannot disable usage reporting or entitlement checks.
+      ANYRAY_METERING_ENABLED: "true"
       ANYRAY_CONTROL_PLANE_URL: ${ANYRAY_CONTROL_PLANE_URL:-}
-      ANYRAY_DEPLOYMENT_TOKEN: ${ANYRAY_DEPLOYMENT_TOKEN:-}
-      ANYRAY_PSEUDONYM_SALT: ${ANYRAY_PSEUDONYM_SALT:-}
+      ANYRAY_DEPLOYMENT_TOKEN: ${ANYRAY_DEPLOYMENT_TOKEN:?run ./setup.sh --connect <adt_token> first}
+      ANYRAY_PSEUDONYM_SALT: ${ANYRAY_PSEUDONYM_SALT:?run ./setup.sh --connect <adt_token> first}
       ANYRAY_GATEWAY_PUBLIC_URL: ${ANYRAY_GATEWAY_PUBLIC_URL:-}
       ANYRAY_CONSOLE_PUBLIC_URL: ${ANYRAY_CONSOLE_PUBLIC_URL:-}
       ANYRAY_METERING_INTERVAL_MS: ${ANYRAY_METERING_INTERVAL_MS:-}
@@ -149,9 +142,7 @@ services:
     volumes:
       - anyray_optimizer_data:/data
     healthcheck:
-      # A 200 from a legacy optimizer is not enough: the dependent gateway
-      # activates the coordinated transcript policy as soon as this is healthy.
-      test: ["CMD", "node", "-e", "fetch('http://localhost:8088/health').then(async(r)=>{const b=await r.json();process.exit(r.ok&&b?.features?.persistentTranscriptPolicyV1===true?0:1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8088/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 10

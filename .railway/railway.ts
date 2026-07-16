@@ -15,12 +15,11 @@ import {
 // vX.Y.Z across every install artifact (including this file) on each release,
 // so `railway config apply` from this repo always provisions the current build.
 //
-// Two things IaC cannot express declaratively — both handled once, post-apply,
-// by railway/railway-iac-bootstrap.sh:
-//   1. generated secrets plus, when the repository declares the install
-//      capability, the coordinated policy activation instant — seeded once,
-//      then preserve()d here so apply never clobbers them.
-//   2. generated public domains (gateway :8787, proxy :80) + the URLs that
+// railway/railway-iac-bootstrap.sh handles these post-apply steps:
+//   1. generated secrets — seeded once, then preserve()d here so apply never
+//      clobbers them.
+//   2. the operator's required Billing token.
+//   3. generated public domains (gateway :8787, proxy :80) + the URLs that
 //      reference them — created after apply, so ANYRAY_*_PUBLIC_URL are preserve()d.
 //
 // Private service-to-service hostnames are deterministic (<service>.railway.internal)
@@ -44,7 +43,6 @@ export default defineRailway(() => {
       ANYRAY_OPTIMIZER_URL: "http://optimizer.railway.internal:8088",
       ANYRAY_OPTIMIZER_TOKEN: preserve(), // canonical; optimizer references gateway.env.*
       ANYRAY_OPTIMIZER_TIMEOUT_MS: "800",
-      ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT: preserve(),
       ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS: "10000",
       ANYRAY_DEFAULT_MODEL: "anthropic/claude-sonnet-4-5",
       ANYRAY_CONTENT_KEY: preserve(),

@@ -20,8 +20,6 @@ on:
 jobs:
   chart:
     runs-on: ubuntu-latest
-    env:
-      POLICY_ACTIVATE_AT: '2099-01-01T00:00:00.000Z'
     steps:
       - uses: actions/checkout@v6
       - uses: azure/setup-helm@v4
@@ -30,149 +28,20 @@ jobs:
           token: ${{ github.token }}
 
       - name: Lint
-        run: >-
-          helm lint helm --set host=anyray.example.com
-          --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT"
+        run: helm lint helm --set host=anyray.example.com
 
-      - name: Transcript policy activation follows the chart capability
+      - name: Chart renders with default values, at scale, and autoscaled
         run: |
           set -euo pipefail
-          legacy_chart="$RUNNER_TEMP/legacy-chart"
-          cp -R helm "$legacy_chart"
-          sed -i '/anyray.ai\/persistent-transcript-policy-v1:/d' "$legacy_chart/Chart.yaml"
-          legacy_render="$(helm template t "$legacy_chart" --set host=anyray.example.com \
-            --set-string image.tag=v999.999.999)"
-          printf '%s\n' "$legacy_render" | grep -A1 \
-            'name: ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT' \
-            | grep -q 'value: ""'
-
-          expect_activation_required() {
-            if helm template t helm --set host=anyray.example.com "$@" \
-              >"$RUNNER_TEMP/missing.out" 2>"$RUNNER_TEMP/missing.err"; then
-              echo "::error::capability-aware chart rendered without persistentTranscriptPolicyActivateAt"
-              exit 1
-            fi
-            grep -q 'persistentTranscriptPolicyActivateAt is required' "$RUNNER_TEMP/missing.err"
-          }
-
-          expect_activation_required
-          expect_activation_required --set-string image.tag=policy-stable
-
-          default_render="$(helm template t helm --set host=anyray.example.com \
-            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT")"
-          printf '%s\n' "$default_render" | grep -A1 \
-            'name: ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT' \
-            | grep -q "value: \"$POLICY_ACTIVATE_AT\""
-          printf '%s\n' "$default_render" | grep -Fq \
-            "features?.persistentTranscriptPolicyV1===true"
-
-          if helm template t helm --set host=anyray.example.com \
-            --set-string persistentTranscriptPolicyActivateAt=2000-01-01T00:00:00.000Z \
-            >"$RUNNER_TEMP/stale.out" 2>"$RUNNER_TEMP/stale.err"; then
-            echo "::error::first capable rollout accepted a stale activation instant"
-            exit 1
-          fi
-          grep -q 'must be at least 30 minutes in the future for a first capable rollout' \
-            "$RUNNER_TEMP/stale.err"
-
-          too_near="$(date -u -d '+10 minutes' '+%Y-%m-%dT%H:%M:%S.000Z')"
-          if helm template t helm --set host=anyray.example.com \
-            --set-string persistentTranscriptPolicyActivateAt="$too_near" \
-            >"$RUNNER_TEMP/near.out" 2>"$RUNNER_TEMP/near.err"; then
-            echo "::error::first capable rollout accepted a too-near activation instant"
-            exit 1
-          fi
-          grep -q 'must be at least 30 minutes in the future for a first capable rollout' \
-            "$RUNNER_TEMP/near.err"
-
-          helm template t helm --set host=anyray.example.com \
-            --set-string persistentTranscriptPolicyActivateAt=2000-01-01T00:00:00.000Z \
-            --set persistentTranscriptPolicyInitialRolloutVerified=true \
-            > "$RUNNER_TEMP/offline-verified.out"
-          if helm template t helm --set host=anyray.example.com \
-            --set-string persistentTranscriptPolicyActivateAt=2000-01-01T00:00:00.000Z \
-            --set-string persistentTranscriptPolicyInitialRolloutVerified=true \
-            >"$RUNNER_TEMP/string-confirmation.out" 2>"$RUNNER_TEMP/string-confirmation.err"; then
-            echo "::error::offline rollout verification accepted a string instead of a boolean"
-            exit 1
-          fi
-          grep -q 'persistentTranscriptPolicyInitialRolloutVerified must be a boolean' \
-            "$RUNNER_TEMP/string-confirmation.err"
-          grep -Fq 'lookup "apps/v1" "Deployment"' helm/templates/_helpers.tpl
-
-          expect_policy_rejection() {
-            local diagnostic="$1"
-            shift
-            if helm template t helm --set host=anyray.example.com \
-              --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT" "$@" \
-              >"$RUNNER_TEMP/rejected.out" 2>"$RUNNER_TEMP/rejected.err"; then
-              echo "::error::unsafe capability-aware image override rendered"
-              exit 1
-            fi
-            grep -q "$diagnostic" "$RUNNER_TEMP/rejected.err"
-          }
-
-          expect_policy_rejection 'rejects legacy moving channel latest' \
-            --set-string image.tag=latest
-          expect_policy_rejection 'rejects legacy moving channel stable' \
-            --set-string image.tag=stable
-          expect_policy_rejection 'require persistentTranscriptPolicyImageCapabilityConfirmed=true' \
-            --set-string image.tag=v0.0.1
-          expect_policy_rejection 'require persistentTranscriptPolicyImageCapabilityConfirmed=true' \
-            --set-string image.tag=v0.0.1 \
-            --set-string persistentTranscriptPolicyImageCapabilityConfirmed=false
-          expect_policy_rejection 'requires equal gateway and optimizer image tags' \
-            --set-string images.gateway.tag=v0.0.1 \
-            --set-string images.optimizer.tag=v0.0.2 \
-            --set persistentTranscriptPolicyImageCapabilityConfirmed=true
-          expect_policy_rejection 'require persistentTranscriptPolicyImageCapabilityConfirmed=true' \
-            --set-string images.gateway.repository=registry.example/anyray/gateway
-
-          helm template t helm --set host=anyray.example.com \
-            --set-string image.tag=v0.0.1 \
-            --set persistentTranscriptPolicyImageCapabilityConfirmed=true \
-            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT" \
-            > "$RUNNER_TEMP/confirmed-custom.out"
-
-          expect_activation_required --set gateway.persistence.enabled=false --set gateway.replicas=2
-          expect_activation_required --set optimizer.persistence.enabled=false --set optimizer.replicas=2
-          expect_activation_required --set gateway.persistence.enabled=false --set gateway.autoscaling.enabled=true
-          expect_activation_required --set optimizer.persistence.enabled=false --set optimizer.autoscaling.enabled=true
-
+          helm template t helm --set host=anyray.example.com > /dev/null
           helm template t helm --set host=anyray.example.com \
             --set gateway.persistence.enabled=false --set gateway.replicas=2 \
             --set optimizer.persistence.enabled=false --set optimizer.replicas=2 \
-            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT" \
-            > "$RUNNER_TEMP/scaled.out"
-          grep -A1 'name: ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT' "$RUNNER_TEMP/scaled.out" \
-            | grep -q "value: \"$POLICY_ACTIVATE_AT\""
-
+            > /dev/null
           helm template t helm --set host=anyray.example.com \
             --set gateway.persistence.enabled=false --set gateway.autoscaling.enabled=true \
             --set optimizer.persistence.enabled=false --set optimizer.autoscaling.enabled=true \
-            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT" \
-            > "$RUNNER_TEMP/autoscaled.out"
-
-          if helm template t helm --set host=anyray.example.com \
-            --set-string persistentTranscriptPolicyActivateAt=2099-01-01T00:00:00.000 \
-            >"$RUNNER_TEMP/invalid.out" 2>"$RUNNER_TEMP/invalid.err"; then
-            echo "::error::invalid persistentTranscriptPolicyActivateAt rendered"
-            exit 1
-          fi
-          grep -q 'must be a valid timezone-qualified ISO-8601 instant' "$RUNNER_TEMP/invalid.err"
-
-          invalid_chart="$RUNNER_TEMP/invalid-capability-chart"
-          cp -R helm "$invalid_chart"
-          sed -i 's#anyray.ai/persistent-transcript-policy-v1: "true"#anyray.ai/persistent-transcript-policy-v1: "false"#' \
-            "$invalid_chart/Chart.yaml"
-          if helm template t "$invalid_chart" --set host=anyray.example.com \
-            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT" \
-            >"$RUNNER_TEMP/capability.out" 2>"$RUNNER_TEMP/capability.err"; then
-            echo "::error::malformed chart capability rendered"
-            exit 1
-          fi
-          grep -q 'chart annotation anyray.ai/persistent-transcript-policy-v1 must be true' \
-            "$RUNNER_TEMP/capability.err"
+            > /dev/null
 
       - name: appVersion must be a pinned vX.Y.Z (never a moving tag)
         run: |
@@ -188,8 +57,7 @@ jobs:
       - name: Default render pins every app image to appVersion
         run: |
           set -euo pipefail
-          render="$(helm template t helm --set host=anyray.example.com \
-            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT")"
+          render="$(helm template t helm --set host=anyray.example.com)"
           fail=0
           for c in gateway optimizer proxy; do
             if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:${APP_VERSION}"; then
@@ -208,8 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           render="$(helm template t helm --set host=anyray.example.com \
-            --set-string image.tag=policy-stable \
-            --set-string persistentTranscriptPolicyActivateAt="$POLICY_ACTIVATE_AT")"
+            --set-string image.tag=policy-stable)"
           for c in gateway optimizer proxy; do
             printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:policy-stable"
           done

@@ -35,8 +35,6 @@
 #                             workspace -> tokens). NOT an account token; account
 #                             tokens 401 on template deploys, the CLI OAuth token
 #                             can create projects but cannot deploy templates.
-#   POLICY_ACTIVATE_AT        optional future ISO instant (generated when unset),
-#                             used by capability-aware install revisions.
 #   RAILWAY_WORKSPACE_ID      workspace to create the throwaway project in
 #                             (default: Othentic).
 #   ANYRAY_PROVIDER_KEY_ANTHROPIC  optional -- set to exercise a real chat
@@ -53,21 +51,13 @@ api="https://backboard.railway.com/graphql/v2"
 template_code="anyray"
 default_workspace="eef73845-ee51-42b4-87b1-2873cd0d36fb" # Othentic
 
-# shellcheck source=railway/policy-capability.sh
-source "$here/policy-capability.sh"
+# shellcheck source=railway/release-tag.sh
+source "$here/release-tag.sh"
 
 mode="${1:-prep}"
 
 die() { echo "error: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
-
-future_policy_activation_at() {
-  local value=""
-  value="$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || \
-    value="$(date -u -v+1H '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || true
-  [ -n "$value" ] || die "could not calculate a future policy activation instant with date"
-  printf '%s' "$value"
-}
 
 have jq   || die "jq is required"
 have curl || die "curl is required"
@@ -144,12 +134,7 @@ run_test() {
   echo "    $PROJECT_ID"
 
   echo "==> deploying published template '$template_code'"
-  local -a deploy_args=(-t "$template_code")
-  if anyray_install_has_capability; then
-    local policy_activate_at="${POLICY_ACTIVATE_AT:-$(future_policy_activation_at)}"
-    deploy_args+=(-v "gateway.ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT=$policy_activate_at")
-  fi
-  ( cd "$WORKDIR" && RAILWAY_API_TOKEN="$RAILWAY_WORKSPACE_TOKEN" railway deploy "${deploy_args[@]}" ) \
+  ( cd "$WORKDIR" && RAILWAY_API_TOKEN="$RAILWAY_WORKSPACE_TOKEN" railway deploy -t "$template_code" ) \
     || die "template deploy failed (is the workspace token valid?)"
 
   # resolve environment + services

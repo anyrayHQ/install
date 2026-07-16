@@ -55,14 +55,14 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 systemctl enable --now docker
 
-# ---- 3. Desired deployment identity from instance metadata ------------------
+# ---- 3. Deployment settings from instance metadata --------------------------
 DEPLOYMENT_TOKEN="$(md instance/attributes/anyray-deployment-token)"
 IMAGE_TAG="$(md instance/attributes/anyray-image-tag v1.10.120)"
 DEFAULT_MODEL="$(md instance/attributes/anyray-default-model anthropic/claude-sonnet-4-5)"
 DEPLOY_GENERATION="$(md instance/attributes/anyray-deploy-generation legacy)"
 EXTERNAL_IP="$(md instance/network-interfaces/0/access-configs/0/external-ip)"
 if ! printf '%s' "$DEPLOYMENT_TOKEN" | grep -Eq '^adt_[A-Za-z0-9_-]+$'; then
-  echo "  ✗ valid deployment-token metadata is required; Billing connection is mandatory" >&2
+  echo "  ✗ valid deployment-token metadata is required" >&2
   exit 1
 fi
 case "$IMAGE_TAG$DEFAULT_MODEL$DEPLOY_GENERATION" in
@@ -78,14 +78,12 @@ set_env() {
   mv "$temporary" "$REPO_DIR/.env"
 }
 
-# ---- 4. Resume path: reconcile a reused/reattached persistent disk ----------
-# A generation changes only on an explicit deploy. That deploy refreshes the
-# installer contract and Billing identity exactly once; ordinary reboots retain
-# the pinned install without depending on GitHub availability.
+# ---- 4. Reuse an existing persistent disk -----------------------------------
+# Explicit deploys update once per generation. Reboots use the installed files.
 if [ -f "$REPO_DIR/.env" ]; then
   current_generation="$(cat "$REPO_DIR/.deploy-generation" 2>/dev/null || true)"
   if [ "$current_generation" != "$DEPLOY_GENERATION" ]; then
-    echo "→ Existing deployment found — reconciling installer and mandatory Billing identity."
+    echo "→ Existing deployment found — applying the requested update."
     rm -f "$REPO_DIR/.ready"
     git -C "$REPO_DIR" pull --ff-only
     ( cd "$REPO_DIR" && ./setup.sh --connect "$DEPLOYMENT_TOKEN" --host "$EXTERNAL_IP" )

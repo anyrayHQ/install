@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
-# Anyray setup — generates every secret the stack needs.
-# Default: writes .env for docker compose.
-# With --k8s: writes anyray-secrets.yaml + my-values.yaml for Helm.
-# Full gateway setup requires --connect <adt_token> on the first run to link the
-# deployment to Anyray Billing (token from https://app.anyray.ai).
-# With --attach: generate only the gateway-less LiteLLM attach secrets.
+# Anyray setup — generates stack secrets.
+# Default: Docker Compose. --k8s: Kubernetes and Helm.
+# Gateway installs require --connect <adt_token> on the first run.
+# --attach: gateway-less LiteLLM mode; no Billing token required.
 # With --upstream <url>: point Anyray at an existing OpenAI-compatible gateway
 #   (LiteLLM, OpenRouter, …) so clients send plain requests with NO per-request
 #   x-anyray-config header. Safe to re-run to change the upstream.
-# Idempotent: never overwrites existing secrets; --connect (re)writes only the
-# Anyray Cloud connect vars and --upstream only the upstream vars. Flags: --host
-# <h> --k8s --namespace <namespace> --connect <adt_token> --attach
-# --gateway-url <url> --upstream <url>.
-# (--control-plane <url> is DEV/INTERNAL ONLY: the vendor host is pinned +
-# defaulted in the gateway image, so a normal connect never needs it; passing it
-# only does anything for an internal/dev gateway build via the unsafe override
-# below.)
+# Existing secrets are kept. --connect and --upstream update only their settings.
+# --control-plane is for internal development builds only.
 set -euo pipefail
 
 HOST=""
@@ -36,8 +28,8 @@ Options:
   --host <hostname-or-ip>         Host users reach for Docker/VM installs.
   --k8s                          Generate Kubernetes Secret + Helm values.
   --namespace <namespace>         Existing Kubernetes namespace for --k8s.
-  --connect <adt_token>           Required for gateway deployments; omit only for attach mode.
-  --attach                        Generate secrets for gateway-less LiteLLM attach mode.
+  --connect <adt_token>           Required Billing token for gateway installs.
+  --attach                        Gateway-less LiteLLM mode (no --connect).
   --gateway-url <url>             Public gateway URL shown to developers.
   --upstream <url>                Seed an OpenAI-compatible upstream gateway.
   --control-plane <url>           Dev/internal control plane only.
@@ -69,9 +61,8 @@ if [ -n "$CONNECT_TOKEN" ] && ! valid_deployment_token "$CONNECT_TOKEN"; then
   exit 1
 fi
 
-# Every full gateway deployment connects to Billing. A token-less setup is
-# permitted only through the explicit gateway-less attach lane, or on an
-# idempotent re-run whose existing artifact for the selected lane is connected.
+# Gateway installs require Billing. Only attach mode or an already-connected
+# re-run can omit --connect.
 EXISTING_CONNECT=0
 if [ "$K8S" -eq 1 ] && [ -f anyray-secrets.yaml ]; then
   EXISTING_TOKEN_B64="$(sed -n 's/^[[:space:]]*ANYRAY_DEPLOYMENT_TOKEN:[[:space:]]*//p' anyray-secrets.yaml | head -n 1)"
@@ -173,8 +164,7 @@ add_secret() {
   add_if_missing "$1" "$2"
 }
 
-# Helm values stub (no secrets). Metering is always enabled by the chart; the
-# deployment token + pseudonym salt live in anyray-secrets.yaml.
+# Helm values stub (no secrets). Billing keys live in anyray-secrets.yaml.
 write_values_stub() {
   {
     echo "# Anyray Helm values — safe to commit (no secrets here)."
@@ -190,7 +180,7 @@ write_values_stub() {
     echo "#   tag: policy-stable"
     echo "#   pullPolicy: Always"
     echo ""
-    echo "# Anyray Billing metering is mandatory and always enabled by the chart."
+    echo "# Billing is required and always enabled by the chart."
     echo "# The deployment token + pseudonym salt live in anyray-secrets.yaml."
     case "$HOST" in
       *[!0-9.]*)
@@ -375,8 +365,7 @@ EOF
     done
     grep -v '^# Anyray Cloud (--connect)' .env > .env.tmp || true; mv .env.tmp .env
 
-    # Common header + connect vars. ANYRAY_METERING_ENABLED is deliberately not
-    # written to .env: docker-compose.yml enforces the literal value "true".
+    # Compose sets ANYRAY_METERING_ENABLED=true; .env stores connection data.
     cat >> .env <<EOF
 # Anyray Cloud (--connect) — re-run ./setup.sh --connect <token> to reconnect.
 ANYRAY_DEPLOYMENT_TOKEN=${CONNECT_TOKEN}
@@ -511,10 +500,8 @@ EOF
 fi
 
 # ── Kubernetes / Helm mode (--k8s) ───────────────────────────────────────────
-# --connect <token> folds the deployment token + a locally-generated pseudonym
-# salt into anyray-secrets.yaml. Metering is always enabled by the chart and is
-# not represented as a Helm value. The control-plane host and vendor verify key
-# stay PINNED in the gateway image — never written here.
+# --connect writes the token and local pseudonym salt to anyray-secrets.yaml.
+# The chart enables Billing; its URL and verification key are image-pinned.
 if [ -f anyray-secrets.yaml ]; then
   if [ -n "$NAMESPACE" ]; then
     set_secret_namespace anyray-secrets.yaml
@@ -522,10 +509,7 @@ if [ -f anyray-secrets.yaml ]; then
   fi
 
   if [ -n "$CONNECT_TOKEN" ]; then
-    # Fold the Anyray Cloud connect vars into the existing Secret IN PLACE — every
-    # other key is kept, only the connect keys are (re)written. Reuse the existing
-    # pseudonym salt so usage history stays attributable; mint one only on first
-    # connect. (Mirrors the docker .env --connect path: re-runnable, idempotent.)
+    # Update only the Billing keys. Keep the salt so usage history remains stable.
     EXISTING_SALT="$(sed -n 's/^[[:space:]]*ANYRAY_PSEUDONYM_SALT:[[:space:]]*//p' anyray-secrets.yaml | head -n 1)"
     grep -v -E '^[[:space:]]*ANYRAY_(DEPLOYMENT_TOKEN|PSEUDONYM_SALT):' anyray-secrets.yaml > anyray-secrets.yaml.tmp || true
     mv anyray-secrets.yaml.tmp anyray-secrets.yaml
@@ -538,14 +522,14 @@ if [ -f anyray-secrets.yaml ]; then
       fi
     } >> anyray-secrets.yaml
     chmod 600 anyray-secrets.yaml
-    echo "✓ anyray-secrets.yaml already existed — folded in Anyray Cloud connect vars (deployment token + pseudonym salt)"
-    [ -n "$EXISTING_SALT" ] && echo "  (kept the existing pseudonym salt so usage history stays attributable)"
+    echo "✓ Updated Billing keys in anyray-secrets.yaml"
+    [ -n "$EXISTING_SALT" ] && echo "  Kept the existing pseudonym salt"
 
     if [ -f my-values.yaml ]; then
-      echo "✓ my-values.yaml already existed — leaving it untouched (the chart always enforces metering)"
+      echo "✓ my-values.yaml unchanged — the chart enforces Billing"
     else
       write_values_stub
-      echo "✓ Helm values stub → my-values.yaml (mandatory metering has no off toggle)"
+      echo "✓ Helm values stub → my-values.yaml"
     fi
     echo ""
     echo "  Next:"
@@ -580,10 +564,7 @@ data:
   POSTGRES_PASSWORD: $(b64enc "$POSTGRES_PW")
 EOF
 
-# Anyray Cloud connect (--connect): fold the deployment token + a locally-generated
-# pseudonym salt into the Secret. The salt NEVER leaves your cluster — it
-# pseudonymizes employee identifiers before the content-free usage rollup. The
-# chart always wires these into the mandatory metering configuration.
+# Add the Billing token and local pseudonym salt to the Secret.
 if [ -n "$CONNECT_TOKEN" ]; then
   PSEUDONYM_SALT="$(hex 32)"
   cat >> anyray-secrets.yaml <<EOF
@@ -596,10 +577,10 @@ chmod 600 anyray-secrets.yaml
 
 echo "✓ Secrets generated → anyray-secrets.yaml"
 [ -n "$NAMESPACE" ] && echo "  Namespace: ${NAMESPACE} (must already exist; setup.sh does not create it)"
-[ -n "$CONNECT_TOKEN" ] && echo "  ✓ Anyray Cloud connect vars folded in (deployment token + pseudonym salt)"
+[ -n "$CONNECT_TOKEN" ] && echo "  ✓ Billing token and pseudonym salt added"
 
 if [ -f my-values.yaml ]; then
-  echo "✓ my-values.yaml already exists — leaving it untouched (the chart always enforces metering)"
+  echo "✓ my-values.yaml unchanged — the chart enforces Billing"
 else
   write_values_stub
   echo "✓ Helm values stub → my-values.yaml"

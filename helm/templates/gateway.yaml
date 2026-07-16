@@ -73,10 +73,9 @@ spec:
             # ANYRAY_*_FILE var only if you need to (the per-file var wins).
             - name: ANYRAY_DATA_DIR
               value: /data
-            # Anyray Cloud metering is mandatory. The deployment token + pseudonym
-            # salt come from the Secret (folded in by setup.sh --connect); the
-            # control-plane host and verify key are pinned in the gateway image.
-            # Both Secret keys are required before Kubernetes starts the pod.
+            # Billing is required. setup.sh writes the token and local salt to
+            # the Secret; the image pins the Billing URL and verification key.
+            # Kubernetes requires both Secret keys before starting this pod.
             - name: ANYRAY_METERING_ENABLED
               value: "true"
             - name: ANYRAY_DEPLOYMENT_TOKEN

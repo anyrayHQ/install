@@ -57,9 +57,8 @@ export DEPLOYMENT_TOKEN="adt_..."        # from app.anyray.ai → Deployments
 | `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-4-5` | Target for the `anyray-default` model alias. |
 | `NETWORK` | no | `default` | VPC network for the VM + firewall rules. |
 
-Re-running `deploy.sh` updates the reused VM's metadata and synchronously
-reconciles its installer, Billing token, image pin, and running Compose stack;
-the persistent data disk and locally generated secrets remain intact.
+Re-run `deploy.sh` to update an existing VM's Billing token, image, model, and
+installer. The data disk and generated secrets stay unchanged.
 
 ## What you get
 

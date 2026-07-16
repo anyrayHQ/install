@@ -138,7 +138,7 @@ optimizer config from the console — your `.env` and secrets are untouched.
 ```bash
 docker compose ps           # service health
 docker compose logs <svc>   # diagnose a failing service
-./setup.sh                  # safe after the connected first run; never overwrites .env
+./setup.sh                  # safe to re-run after the initial --connect
                             # (--connect rewrites only the connect vars)
 ```
 
@@ -148,11 +148,9 @@ docker compose logs <svc>   # diagnose a failing service
 - Prompt/response content is encrypted at rest (AES-256-GCM) by default.
 - The admin key (`ANYRAY_ADMIN_TOKEN` in `.env`) gates the console and all admin
   APIs. Rotate by editing `.env` and running `docker compose up -d`.
-- The control-plane host and lease-verify key are pinned in the gateway image, so
-  the billing kill-switch can't be bypassed by re-pointing the URL. Supported
-  Compose, Helm, cloud, and Railway artifacts enforce metering with no off toggle.
-  Metering reports are content-free rollups; the pseudonym salt never leaves the
-  machine.
+- The Billing URL and lease verification key are pinned in the gateway image.
+  Gateway installs send only content-free usage totals; the pseudonym salt
+  stays on your machine.
 
 ## Testing policy — every artifact gets a LIVE lane
 

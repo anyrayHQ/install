@@ -26,9 +26,10 @@ Drop-in Anyray optimizer integration for that existing LiteLLM proxy gives you:
 1. Generate the Anyray secrets:
 
    ```
-   ./setup.sh --host <anyray-host>
+   ./setup.sh --attach --host <anyray-host>
    ```
 
+   `--attach` selects the gateway-less install and does not need a Billing token.
    `setup.sh` writes `.env`, including `ANYRAY_ADMIN_TOKEN`,
    `ANYRAY_OPTIMIZER_TOKEN`, observability backend keys, and the content-encryption
    key. It is safe to re-run; it does not overwrite existing secrets.

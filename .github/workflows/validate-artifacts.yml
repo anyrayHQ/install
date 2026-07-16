@@ -32,6 +32,64 @@ jobs:
           test -f .env
       - name: main stack resolves (every required var satisfied)
         run: docker compose config -q
+      - name: setup requires Billing except for explicit attach mode
+        run: |
+          set -euo pipefail
+          fresh="$(mktemp -d)"
+          if (cd "$fresh" && "$GITHUB_WORKSPACE/setup.sh" --host ci.example.com >/dev/null 2>&1); then
+            echo "::error::fresh gateway setup succeeded without --connect"
+            exit 1
+          fi
+          attach_output="$RUNNER_TEMP/attach-setup.out"
+          (cd "$fresh" && "$GITHUB_WORKSPACE/setup.sh" --attach --host ci.example.com >"$attach_output" 2>&1)
+          test -f "$fresh/.env"
+          grep -q 'docker compose -f docker-compose.attach.yml up -d' "$attach_output"
+          if grep -q 'Gateway:' "$attach_output"; then
+            echo "::error::attach setup advertised a gateway that does not run"
+            exit 1
+          fi
+          if (cd "$(mktemp -d)" && "$GITHUB_WORKSPACE/setup.sh" --attach --upstream http://upstream.internal >/dev/null 2>&1); then
+            echo "::error::attach setup accepted gateway-only --upstream"
+            exit 1
+          fi
+          for invalid in false adt_; do
+            if (cd "$(mktemp -d)" && "$GITHUB_WORKSPACE/setup.sh" --connect "$invalid" --host ci.example.com >/dev/null 2>&1); then
+              echo "::error::setup accepted invalid deployment token '$invalid'"
+              exit 1
+            fi
+          done
+          injected=$'adt_x\nANYRAY_DEV_UNSAFE_CONTROL_PLANE=1'
+          if (cd "$(mktemp -d)" && "$GITHUB_WORKSPACE/setup.sh" --connect "$injected" --host ci.example.com >/dev/null 2>&1); then
+            echo "::error::setup accepted a newline-bearing deployment token"
+            exit 1
+          fi
+
+          mixed="$(mktemp -d)"
+          (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --connect adt_ci0000000000000000 --host ci.example.com >/dev/null 2>&1)
+          if (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --k8s --host anyray.internal >/dev/null 2>&1); then
+            echo "::error::Docker .env incorrectly authorized a token-less Kubernetes setup"
+            exit 1
+          fi
+          (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --k8s --connect adt_ci0000000000000000 --host anyray.internal >/dev/null 2>&1)
+          (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --k8s --host anyray.internal >/dev/null 2>&1)
+      - name: Compose requires the Billing identity
+        run: |
+          set -euo pipefail
+          for missing in ANYRAY_DEPLOYMENT_TOKEN ANYRAY_PSEUDONYM_SALT; do
+            if env "$missing=" docker compose config -q >/dev/null 2>&1; then
+              echo "::error::Compose accepted an empty $missing"
+              exit 1
+            fi
+          done
+      - name: Compose cannot disable mandatory Billing metering
+        run: |
+          set -euo pipefail
+          value="$(ANYRAY_METERING_ENABLED=false docker compose config --format json \
+            | jq -r '.services.gateway.environment.ANYRAY_METERING_ENABLED')"
+          [ "$value" = "true" ] || {
+            echo "::error::Compose honored ANYRAY_METERING_ENABLED=false (resolved '$value')"
+            exit 1
+          }
       - name: gateway waits for optimizer health
         run: |
           set -euo pipefail
@@ -97,7 +155,32 @@ jobs:
           set -euo pipefail
           ./setup.sh --k8s --connect adt_ci0000000000000000 \
             --host anyray.internal --namespace anyray
-          helm template t ./helm -f my-values.yaml > /dev/null
+          render="$(helm template t ./helm -f my-values.yaml)"
+          test "$(grep -c 'name: ANYRAY_METERING_ENABLED' <<<"$render")" -eq 1
+          grep -A1 'name: ANYRAY_METERING_ENABLED' <<<"$render" | grep -q 'value: "true"'
+          for required in ANYRAY_DEPLOYMENT_TOKEN ANYRAY_PSEUDONYM_SALT; do
+            grep -A4 "key: $required" <<<"$render" >/dev/null
+            if grep -A4 "key: $required" <<<"$render" | grep -q 'optional: true'; then
+              echo "::error::Helm made $required optional"
+              exit 1
+            fi
+          done
+
+          # An old values file may still carry the retired toggle. It must be
+          # ignored, while an extraEnv duplicate is rejected instead of winning.
+          legacy="$(helm template t ./helm -f my-values.yaml \
+            --set gateway.metering.enabled=false)"
+          grep -A1 'name: ANYRAY_METERING_ENABLED' <<<"$legacy" | grep -q 'value: "true"'
+          for protected in ANYRAY_METERING_ENABLED ANYRAY_DEPLOYMENT_TOKEN ANYRAY_PSEUDONYM_SALT; do
+            if helm template t ./helm -f my-values.yaml \
+              --set "gateway.extraEnv[0].name=$protected" \
+              --set-string 'gateway.extraEnv[0].value=false' \
+              >"$RUNNER_TEMP/metering-override.out" 2>"$RUNNER_TEMP/metering-override.err"; then
+              echo "::error::Helm accepted a $protected extraEnv override"
+              exit 1
+            fi
+            grep -q 'Billing metering is mandatory' "$RUNNER_TEMP/metering-override.err"
+          done
 
           # Render-only tooling emits the chart's independently pinned appVersion.
           tool_bin="$(mktemp -d)"
@@ -184,6 +267,37 @@ jobs:
             echo "::error::Railway IaC and JSON pins differ"
             exit 1
           }
+
+          jq -e '.services[] | select(.name == "gateway")
+            | .variables.ANYRAY_METERING_ENABLED == "true"' \
+            railway/railway.template.json > /dev/null
+          grep -Fq 'ANYRAY_METERING_ENABLED: "true"' .railway/railway.ts
+
+          grep -Fq "ANYRAY_METERING_ENABLED, Value: 'true'" \
+            aws/anyray-quicklaunch.template.yaml
+          deployment_token_block="$(sed -n '/^  DeploymentToken:/,/^  [A-Za-z]/p' aws/anyray-quicklaunch.template.yaml)"
+          grep -q "AllowedPattern: '\^adt_" <<<"$deployment_token_block"
+          if grep -q 'Default:' <<<"$deployment_token_block"; then
+            echo "::error::AWS DeploymentToken must remain required"
+            exit 1
+          fi
+
+          # The marketplace publisher must retain the empty deployment-token
+          # field so Railway prompts for this required Billing credential.
+          railway/build-publish.sh > /dev/null
+          grep -qx 'ANYRAY_DEPLOYMENT_TOKEN=' railway/.publish/gateway.vars
+
+          if grep -REni 'ANYRAY_METERING_ENABLED[=: ]+false|\bunmetered\b|metering (off|disabled)' \
+            README.md AGENT.md helm/README.md railway/README.md railway/IAC.md; then
+            echo "::error::install documentation advertises a metering-off path"
+            exit 1
+          fi
+
+          grep -Fq 'git -C "$REPO_DIR" pull --ff-only' gcp/gce/startup-script.sh
+          grep -Fq './setup.sh --connect "$DEPLOYMENT_TOKEN"' gcp/gce/startup-script.sh
+          grep -Fq 'anyray-deploy-generation' gcp/gce/deploy.sh
+          grep -Fq "google_metadata_script_runner startup" gcp/gce/deploy.sh
+          grep -Fq '^adt_[A-Za-z0-9_-]+$' railway/railway-iac-bootstrap.sh
 
   gateway-env-coverage:
     # Every deploy-critical gateway env var (ci/critical-gateway-env.txt) must be

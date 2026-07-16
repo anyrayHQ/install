@@ -6,7 +6,7 @@
 # regresses that install path on the next image bump. This also catches
 # a monorepo paired PR that wired the var into some templates but not all.
 #
-# Requires: jq, helm, and my-values.yaml (run `./setup.sh --k8s ...` first, as
+# Requires: jq, helm, and my-values.yaml (run `./setup.sh --k8s --connect ...` first, as
 # the CI job does). Compose / CFN / Railway are read from the source files, so
 # only the Helm leg needs a render.
 set -euo pipefail
@@ -16,7 +16,7 @@ contract="ci/critical-gateway-env.txt"
 mapfile -t vars < <(grep -vE '^[[:space:]]*(#|$)' "$contract")
 
 if [ ! -f my-values.yaml ]; then
-  echo "::error::my-values.yaml missing — run ./setup.sh --k8s … before this check"
+  echo "::error::my-values.yaml missing — run ./setup.sh --k8s --connect <adt_token> … before this check"
   exit 1
 fi
 

@@ -31,7 +31,6 @@
         "ANYRAY_OPTIMIZER_URL": "http://${{optimizer.RAILWAY_PRIVATE_DOMAIN}}:8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{optimizer.ANYRAY_OPTIMIZER_TOKEN}}",
         "ANYRAY_OPTIMIZER_TIMEOUT_MS": "800",
-        "ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT": "",
         "ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS": "10000",
         "ANYRAY_DEFAULT_MODEL": "anthropic/claude-sonnet-4-5",
         "ANYRAY_CONTENT_KEY": "${{secret(64, \"0123456789abcdef\")}}",

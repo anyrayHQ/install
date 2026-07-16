@@ -1,4 +1,8 @@
-{{- $persistentTranscriptPolicyActivateAt := include "anyray.persistentTranscriptPolicyActivateAt" . -}}
+{{- range .Values.gateway.extraEnv }}
+{{- if or (eq .name "ANYRAY_METERING_ENABLED") (eq .name "ANYRAY_DEPLOYMENT_TOKEN") (eq .name "ANYRAY_PSEUDONYM_SALT") }}
+{{- fail (printf "gateway.extraEnv must not override %s: Billing metering is mandatory" .name) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,8 +48,6 @@ spec:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}
             - name: ANYRAY_OPTIMIZER_TIMEOUT_MS
               value: {{ .Values.gateway.optimizerTimeoutMs | quote }}
-            - name: ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT
-              value: {{ $persistentTranscriptPolicyActivateAt | quote }}
             - name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS
               value: {{ .Values.gateway.optimizerVisionTimeoutMs | quote }}
             {{- with .Values.gateway.defaultModel }}
@@ -71,12 +73,9 @@ spec:
             # ANYRAY_*_FILE var only if you need to (the per-file var wins).
             - name: ANYRAY_DATA_DIR
               value: /data
-            {{- if .Values.gateway.metering.enabled }}
-            # Anyray Cloud metering. The deployment token + pseudonym salt come from
-            # the Secret (folded in by setup.sh --connect); the control-plane host and
-            # verify key are pinned in the gateway image, so they are not set here.
-            # optional: true keeps the pod up if a key is missing — the gateway then
-            # logs "metering enabled but not configured" instead of crashlooping.
+            # Billing is required. setup.sh writes the token and local salt to
+            # the Secret; the image pins the Billing URL and verification key.
+            # Kubernetes requires both Secret keys before starting this pod.
             - name: ANYRAY_METERING_ENABLED
               value: "true"
             - name: ANYRAY_DEPLOYMENT_TOKEN
@@ -84,18 +83,15 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: ANYRAY_DEPLOYMENT_TOKEN
-                  optional: true
             - name: ANYRAY_PSEUDONYM_SALT
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: ANYRAY_PSEUDONYM_SALT
-                  optional: true
             - name: ANYRAY_METERING_INTERVAL_MS
               value: {{ .Values.gateway.metering.intervalMs | quote }}
             - name: ANYRAY_ENTITLEMENT_GRACE_MS
               value: {{ .Values.gateway.metering.graceMs | quote }}
-            {{- end }}
             {{- with .Values.gateway.metering.seatExclude }}
             - name: ANYRAY_SEAT_EXCLUDE
               value: {{ . | quote }}

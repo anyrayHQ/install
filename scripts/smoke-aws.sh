@@ -24,8 +24,7 @@
 #
 # Required env: TEMPLATE, LANE, VPC_ID, SUBNET_A, SUBNET_B.
 # Optional: STACK (name), PUBLISHED_URL, ALLOWED_CIDR (defaults to caller IP/32),
-#           POLICY_ACTIVATE_AT (defaults two hours ahead), KEEP=1 to skip
-#           teardown (debugging).
+#           KEEP=1 to skip teardown (debugging).
 set -euo pipefail
 
 TEMPLATE="${TEMPLATE:?path to candidate template}"
@@ -36,17 +35,6 @@ PUBLISHED_URL="${PUBLISHED_URL:-https://anyray-quicklaunch.s3.us-east-1.amazonaw
 ALLOWED_CIDR="${ALLOWED_CIDR:-$(curl -fsS --max-time 10 https://checkip.amazonaws.com)/32}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-future_policy_activation_at() {
-  local value=""
-  value="$(date -u -d '+2 hours' '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || \
-    value="$(date -u -v+2H '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || true
-  [ -n "$value" ] || {
-    echo "could not calculate a future policy activation instant with date" >&2
-    return 1
-  }
-  printf '%s' "$value"
-}
-
 template_image_tag() {
   awk '
     /^  ImageTag:$/ { in_image_tag = 1; next }
@@ -55,11 +43,6 @@ template_image_tag() {
   ' "$@"
 }
 
-template_has_transcript_policy_capability() {
-  grep -q '^[[:space:]]\{4\}persistentTranscriptPolicyV1:[[:space:]]*true[[:space:]]*$' "$1"
-}
-
-POLICY_ACTIVATE_AT="${POLICY_ACTIVATE_AT:-$(future_policy_activation_at)}"
 CANDIDATE_IMAGE_TAG="$(template_image_tag "$TEMPLATE")"
 if [[ ! "$CANDIDATE_IMAGE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "candidate CloudFormation ImageTag.Default is not immutable: ${CANDIDATE_IMAGE_TAG:-missing}" >&2
@@ -73,9 +56,6 @@ BASE_PARAMS=(
   "ParameterKey=DeploymentToken,ParameterValue=adt_cismoke0000000000"
 )
 CANDIDATE_PARAMS=("${BASE_PARAMS[@]}")
-if template_has_transcript_policy_capability "$TEMPLATE"; then
-  CANDIDATE_PARAMS+=("ParameterKey=PersistentTranscriptPolicyActivateAt,ParameterValue=${POLICY_ACTIVATE_AT}")
-fi
 
 cleanup() {
   local rc=$?
@@ -150,11 +130,6 @@ case "$LANE" in
   update)
     echo "→ create ${STACK} from PUBLISHED template"
     published_params=("${BASE_PARAMS[@]}")
-    published_template="$(curl -fsS --max-time 30 "$PUBLISHED_URL")"
-    if grep -q '^[[:space:]]\{4\}persistentTranscriptPolicyV1:[[:space:]]*true[[:space:]]*$' \
-      <<<"$published_template"; then
-      published_params+=("ParameterKey=PersistentTranscriptPolicyActivateAt,ParameterValue=${POLICY_ACTIVATE_AT}")
-    fi
     aws cloudformation create-stack --stack-name "$STACK" \
       --template-url "$PUBLISHED_URL" \
       --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
@@ -176,14 +151,6 @@ case "$LANE" in
       else . + [{ParameterKey: "ImageTag", ParameterValue: $image}]
       end
     ' <<<"$upd_params")"
-    if template_has_transcript_policy_capability "$TEMPLATE"; then
-      upd_params="$(jq --arg value "$POLICY_ACTIVATE_AT" '
-        if any(.ParameterKey == "PersistentTranscriptPolicyActivateAt") then
-          map(if .ParameterKey == "PersistentTranscriptPolicyActivateAt" then {ParameterKey: "PersistentTranscriptPolicyActivateAt", ParameterValue: $value} else . end)
-        else . + [{ParameterKey: "PersistentTranscriptPolicyActivateAt", ParameterValue: $value}]
-        end
-      ' <<<"$upd_params")"
-    fi
     set +e
     upd_err="$(aws cloudformation update-stack --stack-name "$STACK" \
       --template-body "file://${TEMPLATE}" \

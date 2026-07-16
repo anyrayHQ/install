@@ -32,15 +32,69 @@ jobs:
           test -f .env
       - name: main stack resolves (every required var satisfied)
         run: docker compose config -q
-      - name: transcript policy waits for optimizer health and activates
+      - name: setup requires Billing except for explicit attach mode
+        run: |
+          set -euo pipefail
+          fresh="$(mktemp -d)"
+          if (cd "$fresh" && "$GITHUB_WORKSPACE/setup.sh" --host ci.example.com >/dev/null 2>&1); then
+            echo "::error::fresh gateway setup succeeded without --connect"
+            exit 1
+          fi
+          attach_output="$RUNNER_TEMP/attach-setup.out"
+          (cd "$fresh" && "$GITHUB_WORKSPACE/setup.sh" --attach --host ci.example.com >"$attach_output" 2>&1)
+          test -f "$fresh/.env"
+          grep -q 'docker compose -f docker-compose.attach.yml up -d' "$attach_output"
+          if grep -q 'Gateway:' "$attach_output"; then
+            echo "::error::attach setup advertised a gateway that does not run"
+            exit 1
+          fi
+          if (cd "$(mktemp -d)" && "$GITHUB_WORKSPACE/setup.sh" --attach --upstream http://upstream.internal >/dev/null 2>&1); then
+            echo "::error::attach setup accepted gateway-only --upstream"
+            exit 1
+          fi
+          for invalid in false adt_; do
+            if (cd "$(mktemp -d)" && "$GITHUB_WORKSPACE/setup.sh" --connect "$invalid" --host ci.example.com >/dev/null 2>&1); then
+              echo "::error::setup accepted invalid deployment token '$invalid'"
+              exit 1
+            fi
+          done
+          injected=$'adt_x\nANYRAY_DEV_UNSAFE_CONTROL_PLANE=1'
+          if (cd "$(mktemp -d)" && "$GITHUB_WORKSPACE/setup.sh" --connect "$injected" --host ci.example.com >/dev/null 2>&1); then
+            echo "::error::setup accepted a newline-bearing deployment token"
+            exit 1
+          fi
+
+          mixed="$(mktemp -d)"
+          (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --connect adt_ci0000000000000000 --host ci.example.com >/dev/null 2>&1)
+          if (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --k8s --host anyray.internal >/dev/null 2>&1); then
+            echo "::error::Docker .env incorrectly authorized a token-less Kubernetes setup"
+            exit 1
+          fi
+          (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --k8s --connect adt_ci0000000000000000 --host anyray.internal >/dev/null 2>&1)
+          (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --k8s --host anyray.internal >/dev/null 2>&1)
+      - name: Compose requires the Billing identity
+        run: |
+          set -euo pipefail
+          for missing in ANYRAY_DEPLOYMENT_TOKEN ANYRAY_PSEUDONYM_SALT; do
+            if env "$missing=" docker compose config -q >/dev/null 2>&1; then
+              echo "::error::Compose accepted an empty $missing"
+              exit 1
+            fi
+          done
+      - name: Compose cannot disable mandatory Billing metering
+        run: |
+          set -euo pipefail
+          value="$(ANYRAY_METERING_ENABLED=false docker compose config --format json \
+            | jq -r '.services.gateway.environment.ANYRAY_METERING_ENABLED')"
+          [ "$value" = "true" ] || {
+            echo "::error::Compose honored ANYRAY_METERING_ENABLED=false (resolved '$value')"
+            exit 1
+          }
+      - name: gateway waits for optimizer health
         run: |
           set -euo pipefail
           config="$(docker compose config --format json)"
           jq -e '.services.gateway.depends_on.optimizer.condition == "service_healthy"' <<<"$config" > /dev/null
-          jq -e '.services.optimizer.healthcheck.test
-                 | any(contains("persistentTranscriptPolicyV1"))' <<<"$config" > /dev/null
-          jq -e '.services.gateway.environment.ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT
-                 == "1970-01-01T00:00:00.000Z"' <<<"$config" > /dev/null
       - name: every compose image carries an explicit tag
         run: |
           untagged="$(docker compose config --images | grep -Ev ':[^/]+$' || true)"
@@ -50,21 +104,20 @@ jobs:
           fi
       - name: attach mode resolves
         run: docker compose -f docker-compose.attach.yml config -q
-      - name: capability-aware platform defaults move as one release set
+      - name: platform image defaults move as one release set
         run: |
           set -euo pipefail
-          test -s compatibility/persistentTranscriptPolicyV1
           expected="$(sed -nE 's#.*ANYRAY_IMAGE_TAG:-(v[0-9]+\.[0-9]+\.[0-9]+|policy-stable)\}.*#\1#p' \
             docker-compose.yml | head -1)"
           [[ "$expected" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ || "$expected" = policy-stable ]]
           for file in gcp/deploy.sh gcp/gce/deploy.sh azure/deploy.sh; do
             grep -Fq "IMAGE_TAG=\"\${IMAGE_TAG:-${expected}}\"" "$file" || {
-              echo "::error::$file does not share the capability-aware image default $expected"
+              echo "::error::$file does not share the image default $expected"
               exit 1
             }
           done
           grep -Fq "anyray-image-tag $expected" gcp/gce/startup-script.sh || {
-            echo "::error::GCE startup does not share the capability-aware image default $expected"
+            echo "::error::GCE startup does not share the image default $expected"
             exit 1
           }
           ! grep -REn 'IMAGE_TAG=.*\:-latest|anyray-image-tag latest' gcp azure
@@ -89,26 +142,6 @@ jobs:
             exit 1
           fi
 
-  runtime-capability:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install crane
-        env:
-          CRANE_VERSION: v0.20.2
-        run: |
-          set -euo pipefail
-          archive="go-containerregistry_Linux_x86_64.tar.gz"
-          base="https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}"
-          curl -fsSLo "$RUNNER_TEMP/$archive" "$base/$archive"
-          curl -fsSLo "$RUNNER_TEMP/checksums.txt" "$base/checksums.txt"
-          (cd "$RUNNER_TEMP" && grep " $archive$" checksums.txt | sha256sum -c -)
-          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" crane
-          chmod +x "$RUNNER_TEMP/crane"
-          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      - name: Pinned gateway and optimizer declare the install capability
-        run: ci/check-runtime-policy-capability.sh
-
   k8s-artifacts:
     runs-on: ubuntu-latest
     steps:
@@ -120,91 +153,41 @@ jobs:
       - name: setup.sh --k8s secrets + values render against the chart
         run: |
           set -euo pipefail
-          # An older chart revision has no capability annotation. Its behavior
-          # stays legacy regardless of the image version it happens to pin.
-          cp helm/Chart.yaml "$RUNNER_TEMP/Chart.yaml"
-          sed -i '/anyray.ai\/persistent-transcript-policy-v1:/d' helm/Chart.yaml
-          sed -i 's/^appVersion:.*/appVersion: "v999.999.999"/' helm/Chart.yaml
           ./setup.sh --k8s --connect adt_ci0000000000000000 \
             --host anyray.internal --namespace anyray
-          if grep -q '^persistentTranscriptPolicyActivateAt:' my-values.yaml; then
-            echo "::error::legacy chart revision unexpectedly generated a policy activation"
-            exit 1
-          fi
-          helm template t ./helm -f my-values.yaml > /dev/null
+          render="$(helm template t ./helm -f my-values.yaml)"
+          test "$(grep -c 'name: ANYRAY_METERING_ENABLED' <<<"$render")" -eq 1
+          grep -A1 'name: ANYRAY_METERING_ENABLED' <<<"$render" | grep -q 'value: "true"'
+          for required in ANYRAY_DEPLOYMENT_TOKEN ANYRAY_PSEUDONYM_SALT; do
+            grep -A4 "key: $required" <<<"$render" >/dev/null
+            if grep -A4 "key: $required" <<<"$render" | grep -q 'optional: true'; then
+              echo "::error::Helm made $required optional"
+              exit 1
+            fi
+          done
 
-          # Legacy chart revisions preserve a missing or blank value.
-          printf '\npersistentTranscriptPolicyActivateAt: ""\n' >> my-values.yaml
-          ./setup.sh --k8s --connect adt_ci0000000000000000 \
-            --host anyray.internal --namespace anyray
-          grep -qx 'persistentTranscriptPolicyActivateAt: ""' my-values.yaml
+          # An old values file may still carry the retired toggle. It must be
+          # ignored, while an extraEnv duplicate is rejected instead of winning.
+          legacy="$(helm template t ./helm -f my-values.yaml \
+            --set gateway.metering.enabled=false)"
+          grep -A1 'name: ANYRAY_METERING_ENABLED' <<<"$legacy" | grep -q 'value: "true"'
+          for protected in ANYRAY_METERING_ENABLED ANYRAY_DEPLOYMENT_TOKEN ANYRAY_PSEUDONYM_SALT; do
+            if helm template t ./helm -f my-values.yaml \
+              --set "gateway.extraEnv[0].name=$protected" \
+              --set-string 'gateway.extraEnv[0].value=false' \
+              >"$RUNNER_TEMP/metering-override.out" 2>"$RUNNER_TEMP/metering-override.err"; then
+              echo "::error::Helm accepted a $protected extraEnv override"
+              exit 1
+            fi
+            grep -q 'Billing metering is mandatory' "$RUNNER_TEMP/metering-override.err"
+          done
 
-          # A declared capability must be the exact supported value. Setup
-          # fails closed instead of silently treating malformed metadata as
-          # a legacy chart.
-          rm my-values.yaml
-          cp "$RUNNER_TEMP/Chart.yaml" helm/Chart.yaml
-          sed -i 's#anyray.ai/persistent-transcript-policy-v1: "true"#anyray.ai/persistent-transcript-policy-v1: "false"#' \
-            helm/Chart.yaml
-          if ./setup.sh --k8s --connect adt_ci0000000000000000 \
-            --host anyray.internal --namespace anyray \
-            > "$RUNNER_TEMP/malformed.out" 2> "$RUNNER_TEMP/malformed.err"; then
-            echo "::error::setup accepted a malformed chart capability"
-            exit 1
-          fi
-          grep -q 'capability anyray.ai/persistent-transcript-policy-v1 must be true' \
-            "$RUNNER_TEMP/malformed.err"
-
-          # Restoring the capable chart makes setup backfill exactly once.
-          cp "$RUNNER_TEMP/Chart.yaml" helm/Chart.yaml
-          ./setup.sh --k8s --connect adt_ci0000000000000000 \
-            --host anyray.internal --namespace anyray
-          grep -Eq '^persistentTranscriptPolicyActivateAt: "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z"$' my-values.yaml
-          helm template t ./helm -f my-values.yaml > /dev/null
-          activation="$(sed -nE 's/^persistentTranscriptPolicyActivateAt: "([^"]+)"/\1/p' my-values.yaml)"
-
-          # A generated value is not an evergreen first-rollout bypass. A
-          # delayed first use fails until the operator chooses a new boundary.
-          sed -i 's/^persistentTranscriptPolicyActivateAt:.*/persistentTranscriptPolicyActivateAt: "2000-01-01T00:00:00.000Z"/' my-values.yaml
-          if helm template t ./helm -f my-values.yaml \
-            >"$RUNNER_TEMP/stale-setup.out" 2>"$RUNNER_TEMP/stale-setup.err"; then
-            echo "::error::setup-generated values permitted a stale first rollout"
-            exit 1
-          fi
-          grep -q 'must be at least 30 minutes in the future for a first capable rollout' \
-            "$RUNNER_TEMP/stale-setup.err"
-          sed -i "s#^persistentTranscriptPolicyActivateAt:.*#persistentTranscriptPolicyActivateAt: \"$activation\"#" my-values.yaml
-
-          # A simulated nightly appVersion bump cannot regenerate the rollout
-          # boundary because the annotation, not semver, owns the capability.
-          sed -i 's/^appVersion:.*/appVersion: "v999.999.999"/' helm/Chart.yaml
-          ./setup.sh --k8s --connect adt_ci0000000000000000 \
-            --host anyray.internal --namespace anyray
-          grep -qx "persistentTranscriptPolicyActivateAt: \"$activation\"" my-values.yaml
-          cp "$RUNNER_TEMP/Chart.yaml" helm/Chart.yaml
-
-          sed -i 's/^persistentTranscriptPolicyActivateAt:.*/persistentTranscriptPolicyActivateAt: ""/' my-values.yaml
-          ./setup.sh --k8s --connect adt_ci0000000000000000 \
-            --host anyray.internal --namespace anyray
-          grep -Eq '^persistentTranscriptPolicyActivateAt: "[^"]+"$' my-values.yaml
-
-          # Render-only tooling supplies a non-activating render value and still
-          # emits the chart's independently pinned appVersion.
+          # Render-only tooling emits the chart's independently pinned appVersion.
           tool_bin="$(mktemp -d)"
           ln -s "$(command -v helm)" "$tool_bin/helm"
           image_bom="$(PATH="$tool_bin:/usr/bin:/bin" scripts/gen-image-bom.sh)"
           app="$(sed -nE 's/^appVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' helm/Chart.yaml | head -1)"
           grep -q "public.ecr.aws/anyray/gateway:$app" <<<"$image_bom"
-
-          sed -i 's/^persistentTranscriptPolicyActivateAt:.*/persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z"/' my-values.yaml
-          ./setup.sh --k8s --connect adt_ci0000000000000000 \
-            --host anyray.internal --namespace anyray
-          grep -qx 'persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z"' my-values.yaml
-
-          sed -i '/^persistentTranscriptPolicyActivateAt:/d' my-values.yaml
-          ./setup.sh --k8s --connect adt_ci0000000000000000 \
-            --host anyray.internal --namespace anyray
-          grep -Eq '^persistentTranscriptPolicyActivateAt: "[^"]+"$' my-values.yaml
 
   cloudformation:
     runs-on: ubuntu-latest
@@ -214,12 +197,11 @@ jobs:
         run: |
           pipx install cfn-lint
           cfn-lint aws/anyray-quicklaunch.template.yaml
-      - name: CloudFormation capability is independent from the image pin
+      - name: CloudFormation image pin stays immutable across release stamps
         run: |
           set -euo pipefail
           template=aws/anyray-quicklaunch.template.yaml
           image_parameter="$(awk '/^  ImageTag:/{p=1;print;next} p && /^  [A-Za-z][A-Za-z0-9]*:/{exit} p{print}' "$template")"
-          activation_parameter="$(awk '/^  PersistentTranscriptPolicyActivateAt:/{p=1;print;next} p && /^  [A-Za-z][A-Za-z0-9]*:/{exit} p{print}' "$template")"
 
           current_tag="$(awk '$1 == "Default:" { print $2; exit }' <<<"$image_parameter")"
           if [[ ! "$current_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -231,44 +213,17 @@ jobs:
             echo "::error::CloudFormation must never default to a mutable image channel"
             exit 1
           fi
-          grep -qx "    Default: ''" <<<"$activation_parameter"
-          grep -Fq "AllowedPattern: '^$|^" <<<"$activation_parameter"
 
-          # The template revision declares the capability. Its activation rule
-          # and semantic health check are unconditional and never inspect ImageTag.
-          capability_before="$RUNNER_TEMP/cfn-capability-before"
-          rule_before="$RUNNER_TEMP/cfn-policy-rule-before"
-          health_before="$RUNNER_TEMP/cfn-policy-health-before"
-          awk '/^  AnyrayCapabilities:/{p=1} p && /^  AWS::CloudFormation::Interface:/{exit} p{print}' "$template" > "$capability_before"
-          awk '/^  PersistentTranscriptPolicyActivationRequired:/{p=1} p && /^  AllowedCidrMustNotBePublic:/{exit} p{print}' "$template" > "$rule_before"
-          awk '/^          HealthCheck:/{p=1} p && /^          LogConfiguration:/{exit} p{print}' "$template" > "$health_before"
-          grep -Fq 'persistentTranscriptPolicyV1: true' "$capability_before"
-          test "$(grep -Fc 'Fn::Not:' "$rule_before")" -eq 1
-          test "$(grep -Fc -- '!Ref PersistentTranscriptPolicyActivateAt' "$rule_before")" -eq 1
-          ! grep -Eq 'RuleCondition|ImageTag|Fn::Contains' "$rule_before"
-          ! grep -q 'PersistentTranscriptPolicyV1Enabled' "$template"
-          grep -Fq 'features?.persistentTranscriptPolicyV1===true' "$health_before"
-          ! grep -Fq 'Command: !If' "$health_before"
-
-          # Simulate unrelated nightly releases. Stamping ImageTag.Default may
-          # not alter capability metadata, activation rules, or health semantics.
+          # Simulate unrelated nightly releases: stamping ImageTag.Default must
+          # keep the template lintable and only move the pin.
           first="$RUNNER_TEMP/anyray-quicklaunch-first.template.yaml"
           staged="$RUNNER_TEMP/anyray-quicklaunch-staged.template.yaml"
-          capability_after="$RUNNER_TEMP/cfn-capability-after"
-          rule_after="$RUNNER_TEMP/cfn-policy-rule-after"
-          health_after="$RUNNER_TEMP/cfn-policy-health-after"
           cp "$template" "$first"
           cp "$template" "$staged"
           scripts/stamp-aws-image-tag.sh v0.0.1 "$first"
           simulated_tag=v999.999.999
           [ "$current_tag" != "$simulated_tag" ] || simulated_tag=v999.999.998
           scripts/stamp-aws-image-tag.sh "$simulated_tag" "$staged"
-          awk '/^  AnyrayCapabilities:/{p=1} p && /^  AWS::CloudFormation::Interface:/{exit} p{print}' "$staged" > "$capability_after"
-          awk '/^  PersistentTranscriptPolicyActivationRequired:/{p=1} p && /^  AllowedCidrMustNotBePublic:/{exit} p{print}' "$staged" > "$rule_after"
-          awk '/^          HealthCheck:/{p=1} p && /^          LogConfiguration:/{exit} p{print}' "$staged" > "$health_after"
-          cmp -s "$capability_before" "$capability_after"
-          cmp -s "$rule_before" "$rule_after"
-          cmp -s "$health_before" "$health_after"
           first_image_parameter="$(awk '/^  ImageTag:/{p=1;print;next} p && /^  [A-Za-z][A-Za-z0-9]*:/{exit} p{print}' "$first")"
           staged_image_parameter="$(awk '/^  ImageTag:/{p=1;print;next} p && /^  [A-Za-z][A-Za-z0-9]*:/{exit} p{print}' "$staged")"
           grep -qx '    Default: v0.0.1' <<<"$first_image_parameter"
@@ -285,22 +240,72 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: activation follows the install capability marker
-        # Also verifies that JSON and IaC image pins remain equal while their
-        # values stay independent from install semantics.
-        run: ci/check-railway-policy-activation.sh
+      - name: JSON and IaC image pins stay equal and immutable
+        run: |
+          set -euo pipefail
+          source railway/release-tag.sh
+          tag_for() {
+            anyray_tag_from_image "$(jq -r --arg name "$1" \
+              '.services[] | select(.name == $name) | .source.image // empty' \
+              railway/railway.template.json)"
+          }
+          gateway_tag="$(tag_for gateway)"
+          anyray_valid_release_tag "$gateway_tag" || {
+            echo "::error::Railway gateway image is not pinned to vX.Y.Z"
+            exit 1
+          }
+          [ "$(tag_for optimizer)" = "$gateway_tag" ] || {
+            echo "::error::Railway optimizer pin differs from gateway"
+            exit 1
+          }
+          [ "$(tag_for proxy)" = "$gateway_tag" ] || {
+            echo "::error::Railway proxy pin differs from gateway"
+            exit 1
+          }
+          iac_tag="$(sed -nE 's/^const TAG = "(v[0-9]+\.[0-9]+\.[0-9]+)";.*/\1/p' .railway/railway.ts)"
+          [ "$iac_tag" = "$gateway_tag" ] || {
+            echo "::error::Railway IaC and JSON pins differ"
+            exit 1
+          }
 
-      - name: policy install capability marker is present
-        run: test -s compatibility/persistentTranscriptPolicyV1
+          jq -e '.services[] | select(.name == "gateway")
+            | .variables.ANYRAY_METERING_ENABLED == "true"' \
+            railway/railway.template.json > /dev/null
+          grep -Fq 'ANYRAY_METERING_ENABLED: "true"' .railway/railway.ts
+
+          grep -Fq "ANYRAY_METERING_ENABLED, Value: 'true'" \
+            aws/anyray-quicklaunch.template.yaml
+          deployment_token_block="$(sed -n '/^  DeploymentToken:/,/^  [A-Za-z]/p' aws/anyray-quicklaunch.template.yaml)"
+          grep -q "AllowedPattern: '\^adt_" <<<"$deployment_token_block"
+          if grep -q 'Default:' <<<"$deployment_token_block"; then
+            echo "::error::AWS DeploymentToken must remain required"
+            exit 1
+          fi
+
+          # The marketplace publisher must retain the empty deployment-token
+          # field so Railway prompts for this required Billing credential.
+          railway/build-publish.sh > /dev/null
+          grep -qx 'ANYRAY_DEPLOYMENT_TOKEN=' railway/.publish/gateway.vars
+
+          if grep -REni 'ANYRAY_METERING_ENABLED[=: ]+false|\bunmetered\b|metering (off|disabled)' \
+            README.md AGENT.md helm/README.md railway/README.md railway/IAC.md; then
+            echo "::error::install documentation advertises a metering-off path"
+            exit 1
+          fi
+
+          grep -Fq 'git -C "$REPO_DIR" pull --ff-only' gcp/gce/startup-script.sh
+          grep -Fq './setup.sh --connect "$DEPLOYMENT_TOKEN"' gcp/gce/startup-script.sh
+          grep -Fq 'anyray-deploy-generation' gcp/gce/deploy.sh
+          grep -Fq "google_metadata_script_runner startup" gcp/gce/deploy.sh
+          grep -Fq '^adt_[A-Za-z0-9_-]+$' railway/railway-iac-bootstrap.sh
 
   gateway-env-coverage:
     # Every deploy-critical gateway env var (ci/critical-gateway-env.txt) must be
     # wired into EVERY template — compose, CloudFormation, both Railway paths,
     # and Helm. A var
     # the gateway fail-fasts on (or the admin console needs), silently dropped
-    # from one template, bricks that install path on the next image bump. This
-    # generalises the per-template railway check above across all install paths,
-    # and — running daily — catches template drift before a customer hits it (and
+    # from one template, bricks that install path on the next image bump.
+    # Running daily, it catches template drift before a customer hits it (and
     # a monorepo paired PR that wired a new var into some templates but not all).
     runs-on: ubuntu-latest
     steps:

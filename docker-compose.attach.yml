@@ -5,7 +5,7 @@ name: anyray-attach
 # The gateway plugin/callback calls the optimizer, which records content-free
 # traces straight into Postgres via /v1/record (no Anyray gateway in the path).
 #
-# Generate secrets: ./setup.sh
+# Generate secrets: ./setup.sh --attach
 # Console → http://<host>:3000
 # Optimizer hook → http://<host>:8088  (in-network only)
 # Docs → https://docs.anyray.ai/attach
@@ -33,8 +33,8 @@ services:
       - "${ANYRAY_OPTIMIZER_BIND:-127.0.0.1}:8088:8088"
     environment:
       PORT: 8088
-      ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
-      ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
+      ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh --attach first}
+      ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh --attach first}
       # Runtime config + audit log under ANYRAY_DATA_DIR; the runtime config
       # starts empty and is seeded from the image-baked optimizer.config.json
       # until the first admin edit writes here.
@@ -97,7 +97,7 @@ services:
       retries: 10
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./setup.sh first}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./setup.sh --attach first}
       POSTGRES_DB: postgres
       TZ: UTC
       PGTZ: UTC

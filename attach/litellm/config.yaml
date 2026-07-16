@@ -3,7 +3,7 @@
 #
 # Required env vars (set in your .env or shell, then: docker compose -f docker-compose.attach.yml up -d):
 #   ANYRAY_OPTIMIZER_URL          e.g. http://<anyray-host>:8088
-#   ANYRAY_OPTIMIZER_TOKEN        from ./setup.sh → .env
+#   ANYRAY_OPTIMIZER_TOKEN        from ./setup.sh --attach → .env
 
 model_list:
   - model_name: gpt-4o

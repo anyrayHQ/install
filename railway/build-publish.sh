@@ -74,10 +74,10 @@ desc_warn=""
 
 # --- per-service Raw Editor blocks ------------------------------------------
 # Skip optional empty-valued vars: in a Railway *template* an empty value renders as
-# "Empty value to be filled by the user" (a required prompt), which breaks the
-# one-click "No config required" UX. The empty optional knobs (rate limits,
-# verified-dev gate, upstream) behave identically unset or "" at the gateway,
-# so they're omitted from the published template rather than prompted for.
+# "Empty value to be filled by the user" (a required prompt). The empty optional
+# knobs (rate limits, seat exclusions) behave identically unset or "" at the
+# gateway, so they're omitted. ANYRAY_DEPLOYMENT_TOKEN is deliberately retained:
+# Billing connectivity is mandatory, and the deployer must supply this one value.
 #
 # CAVEAT (do not set proxy ANYRAY_UPDATER_TOKEN back to ""): the proxy's nginx
 # template injects ${ANYRAY_UPDATER_TOKEN} via envsubst, which only substitutes
@@ -90,7 +90,7 @@ for svc in $services; do
   jq -r --arg n "$svc" '
     .services[] | select(.name == $n) | .variables // {}
     | to_entries[]
-    | select(.value != "")
+    | select(.value != "" or .key == "ANYRAY_DEPLOYMENT_TOKEN")
     | "\(.key)=\(.value)"
   ' "$tpl" > "$out/$svc.vars"
 done
@@ -127,7 +127,8 @@ lint="$(jq -r '
   echo
   echo "> Empty-valued optional knobs are intentionally omitted from each block:"
   echo "> in a Railway template an empty value becomes a required user prompt,"
-  echo "> which would break the one-click \"No config required\" experience."
+  echo "> while ANYRAY_DEPLOYMENT_TOKEN is retained because Billing connectivity"
+  echo "> is mandatory and the deployer must be prompted for it."
   echo
   for svc in $services; do
     image="$(jq -r --arg n "$svc" '.services[]|select(.name==$n)|.source.image // "(no image / source build)"' "$tpl")"
@@ -160,8 +161,10 @@ lint="$(jq -r '
   echo "4. Confirm Display name / Description / Category match **Publish metadata** above."
   echo "5. Click **Update Template** → expect **Success**."
   echo "6. Verify with the cache-busted URL above: confirm the service list, every"
-  echo "   image tag, and that no stale variables remain. Railway's plain URL is"
-  echo "   CDN-cached -- always append \`?v=N\` (bump N) when checking."
+  echo "   image tag, the required deployment-token prompt,"
+  echo "   \`ANYRAY_METERING_ENABLED=true\`, and that no stale variables remain."
+  echo "   Railway's plain URL is CDN-cached -- always append \`?v=N\` (bump N)"
+  echo "   when checking."
   echo
   echo "## Why the manual step exists"
   echo

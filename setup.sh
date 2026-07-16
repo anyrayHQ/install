@@ -2,14 +2,15 @@
 # Anyray setup — generates every secret the stack needs.
 # Default: writes .env for docker compose.
 # With --k8s: writes anyray-secrets.yaml + my-values.yaml for Helm.
-# With --connect <adt_token>: also links this deployment to Anyray Cloud
-#   (token from https://app.anyray.ai). Safe to re-run to reconnect.
+# Full gateway setup requires --connect <adt_token> on the first run to link the
+# deployment to Anyray Billing (token from https://app.anyray.ai).
+# With --attach: generate only the gateway-less LiteLLM attach secrets.
 # With --upstream <url>: point Anyray at an existing OpenAI-compatible gateway
 #   (LiteLLM, OpenRouter, …) so clients send plain requests with NO per-request
 #   x-anyray-config header. Safe to re-run to change the upstream.
 # Idempotent: never overwrites existing secrets; --connect (re)writes only the
 # Anyray Cloud connect vars and --upstream only the upstream vars. Flags: --host
-# <h> --k8s --namespace <namespace> --connect <adt_token>
+# <h> --k8s --namespace <namespace> --connect <adt_token> --attach
 # --gateway-url <url> --upstream <url>.
 # (--control-plane <url> is DEV/INTERNAL ONLY: the vendor host is pinned +
 # defaulted in the gateway image, so a normal connect never needs it; passing it
@@ -21,9 +22,11 @@ HOST=""
 K8S=0
 CONNECT_TOKEN=""
 CONTROL_PLANE="https://app.anyray.ai"
+CONTROL_PLANE_SET=0
 GATEWAY_URL=""
 UPSTREAM_URL=""
 NAMESPACE=""
+ATTACH=0
 
 usage() {
   cat <<'EOF'
@@ -33,7 +36,8 @@ Options:
   --host <hostname-or-ip>         Host users reach for Docker/VM installs.
   --k8s                          Generate Kubernetes Secret + Helm values.
   --namespace <namespace>         Existing Kubernetes namespace for --k8s.
-  --connect <adt_token>           Connect deployment to Anyray Portal.
+  --connect <adt_token>           Required for gateway deployments; omit only for attach mode.
+  --attach                        Generate secrets for gateway-less LiteLLM attach mode.
   --gateway-url <url>             Public gateway URL shown to developers.
   --upstream <url>                Seed an OpenAI-compatible upstream gateway.
   --control-plane <url>           Dev/internal control plane only.
@@ -48,25 +52,49 @@ while [ $# -gt 0 ]; do
     --k8s)  K8S=1; shift ;;
     --namespace)     NAMESPACE="${2:?--namespace needs a Kubernetes namespace}"; shift 2 ;;
     --connect)       CONNECT_TOKEN="${2:?--connect needs a deployment token (adt_…)}"; shift 2 ;;
-    --control-plane) CONTROL_PLANE="${2:?--control-plane needs a URL}"; shift 2 ;;
+    --attach)        ATTACH=1; shift ;;
+    --control-plane) CONTROL_PLANE="${2:?--control-plane needs a URL}"; CONTROL_PLANE_SET=1; shift 2 ;;
     --gateway-url)   GATEWAY_URL="${2:?--gateway-url needs a URL}"; shift 2 ;;
     --upstream)      UPSTREAM_URL="${2:?--upstream needs a URL (e.g. http://host.docker.internal:4000)}"; shift 2 ;;
     *) echo "✗ unknown flag: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
-# Every Anyray deployment connects to Anyray Portal for content-free usage metering
-# (a product invariant). Metering is ON by default, so an install with no deployment
-# token serves through the first-boot grace window and then blocks /v1 until a token
-# is wired. Warn loudly here rather than hard-fail — the gateway-less attach mode
-# (docker-compose.attach.yml) legitimately runs setup.sh without --connect.
-if [ -z "$CONNECT_TOKEN" ]; then
-  echo "⚠ No --connect token. Every Anyray deployment connects to Anyray Portal for" >&2
-  echo "  content-free usage metering (counts/aggregates only — never content), which" >&2
-  echo "  is ON by default. Without a deployment token the gateway serves through the" >&2
-  echo "  first-boot grace window, then blocks /v1. Get a token at https://app.anyray.ai" >&2
-  echo "  (Deployments → Connect a deployment) and re-run: ./setup.sh --connect <adt_…> …" >&2
-  echo "  (Ignore this only for gateway-less attach mode.)" >&2
+valid_deployment_token() {
+  [[ "$1" =~ ^adt_[A-Za-z0-9_-]+$ ]]
+}
+
+if [ -n "$CONNECT_TOKEN" ] && ! valid_deployment_token "$CONNECT_TOKEN"; then
+  echo "✗ deployment token must match adt_[A-Za-z0-9_-]+ (get one at https://app.anyray.ai)" >&2
+  exit 1
+fi
+
+# Every full gateway deployment connects to Billing. A token-less setup is
+# permitted only through the explicit gateway-less attach lane, or on an
+# idempotent re-run whose existing artifact for the selected lane is connected.
+EXISTING_CONNECT=0
+if [ "$K8S" -eq 1 ] && [ -f anyray-secrets.yaml ]; then
+  EXISTING_TOKEN_B64="$(sed -n 's/^[[:space:]]*ANYRAY_DEPLOYMENT_TOKEN:[[:space:]]*//p' anyray-secrets.yaml | head -n 1)"
+  EXISTING_SALT_B64="$(sed -n 's/^[[:space:]]*ANYRAY_PSEUDONYM_SALT:[[:space:]]*//p' anyray-secrets.yaml | head -n 1)"
+  EXISTING_TOKEN="$(printf '%s' "$EXISTING_TOKEN_B64" | openssl base64 -d -A 2>/dev/null || true)"
+  EXISTING_SALT="$(printf '%s' "$EXISTING_SALT_B64" | openssl base64 -d -A 2>/dev/null || true)"
+  if valid_deployment_token "$EXISTING_TOKEN" && [ -n "$EXISTING_SALT" ]; then
+    EXISTING_CONNECT=1
+  fi
+elif [ "$K8S" -eq 0 ] && [ -f .env ] && grep -Eq '^ANYRAY_DEPLOYMENT_TOKEN=adt_[A-Za-z0-9_-]+$' .env && grep -Eq '^ANYRAY_PSEUDONYM_SALT=.+$' .env; then
+  EXISTING_CONNECT=1
+fi
+if [ "$ATTACH" -eq 1 ]; then
+  if [ "$K8S" -eq 1 ] || [ -n "$CONNECT_TOKEN" ] || [ -n "$UPSTREAM_URL" ] || [ -n "$GATEWAY_URL" ] || [ "$CONTROL_PLANE_SET" -eq 1 ]; then
+    echo "✗ --attach is gateway-less and cannot be combined with --k8s, --connect, --upstream, --gateway-url, or --control-plane" >&2
+    exit 1
+  fi
+fi
+if [ "$ATTACH" -eq 0 ] && [ -z "$CONNECT_TOKEN" ] && [ "$EXISTING_CONNECT" -eq 0 ]; then
+  echo "✗ --connect <adt_token> is required for every gateway deployment" >&2
+  echo "  Get a token at https://app.anyray.ai (Deployments → Connect a deployment)." >&2
+  echo "  Use --attach only for the gateway-less LiteLLM integration." >&2
+  exit 1
 fi
 
 if [ "$K8S" -eq 1 ] && [ -n "$UPSTREAM_URL" ]; then
@@ -101,7 +129,7 @@ if [ "$K8S" -eq 1 ]; then
   # its local IP is meaningless to the cluster.
   if [ -z "$HOST" ]; then
     echo "✗ --host is required with --k8s — pass your cluster's external ingress hostname" >&2
-    echo "  e.g. ./setup.sh --k8s --host anyray.example.com" >&2
+    echo "  e.g. ./setup.sh --k8s --connect adt_... --host anyray.example.com" >&2
     exit 1
   fi
   case "$HOST" in
@@ -145,7 +173,7 @@ add_secret() {
   add_if_missing "$1" "$2"
 }
 
-# Helm values stub (no secrets). With --connect, also turns metering on; the
+# Helm values stub (no secrets). Metering is always enabled by the chart; the
 # deployment token + pseudonym salt live in anyray-secrets.yaml.
 write_values_stub() {
   {
@@ -161,48 +189,17 @@ write_values_stub() {
     echo "# image:"
     echo "#   tag: policy-stable"
     echo "#   pullPolicy: Always"
-    if [ -n "$CONNECT_TOKEN" ]; then
-      echo ""
-      echo "# Anyray Cloud metering — deployment token + pseudonym salt live in anyray-secrets.yaml."
-      echo "gateway:"
-      echo "  metering:"
-      echo "    enabled: true"
-      # publicUrl is what the gateway advertises to Anyray Cloud — enrollment
-      # links hand it to developer tools. The chart defaults it to https://<host>
-      # (Ingress); only a NodePort/IP host needs an explicit non-TLS override.
-      case "$HOST" in
-        *[!0-9.]*)  # hostname → Ingress; chart's https://<host> default is right
-          echo "  # publicUrl: \"https://${HOST}\"  # default; override for non-TLS ingress" ;;
-        *)          # raw IP → NodePort dev; https://<ip> would be wrong, so set it
-          echo "  publicUrl: \"http://${HOST}:30787\"  # NodePort dev (set the gateway NodePort to match)" ;;
-      esac
-    fi
+    echo ""
+    echo "# Anyray Billing metering is mandatory and always enabled by the chart."
+    echo "# The deployment token + pseudonym salt live in anyray-secrets.yaml."
+    case "$HOST" in
+      *[!0-9.]*)
+        echo "# gateway.publicUrl defaults to https://${HOST}; override only for non-TLS ingress." ;;
+      *)
+        echo "gateway:"
+        echo "  publicUrl: \"http://${HOST}:30787\"  # NodePort dev (set the gateway NodePort to match)" ;;
+    esac
   } > my-values.yaml
-}
-
-# Ensure gateway.metering.enabled: true in an existing Helm values file while
-# keeping every other line — used when --connect re-runs against a my-values.yaml
-# that's already there. Assumes the 2-space structure setup.sh emits; handles a
-# missing gateway: block, a gateway: without metering:, and an existing enabled:
-# flag (flipped to true).
-enable_metering() {
-  awk '
-    function flush_gw() {
-      if (in_gw && !done) {
-        if (!met_seen)     { print "  metering:"; print "    enabled: true"; done=1 }
-        else if (!en_seen) { print "    enabled: true"; done=1 }
-      }
-    }
-    /^[^[:space:]#]/ && !/^gateway:[[:space:]]*$/ { flush_gw(); in_gw=0; in_met=0 }
-    /^gateway:[[:space:]]*$/ { flush_gw(); in_gw=1; gw_seen=1; met_seen=0; en_seen=0; print; next }
-    in_gw && /^  metering:[[:space:]]*$/ { in_met=1; met_seen=1; print; next }
-    in_gw && in_met && /^    enabled:/ { print "    enabled: true"; en_seen=1; done=1; next }
-    { print }
-    END {
-      flush_gw()
-      if (!gw_seen) { print "gateway:"; print "  metering:"; print "    enabled: true" }
-    }
-  ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 
 set_secret_namespace() {
@@ -314,9 +311,16 @@ EOF
     echo ""
     echo "  Console:   http://${HOST}:3000"
     echo "  Admin key: $(get_env ANYRAY_ADMIN_TOKEN)   (also stored in .env as ANYRAY_ADMIN_TOKEN)"
-    echo "  Gateway:   http://${HOST}:8787"
-    [ -n "$CONNECT_TOKEN" ] || { echo ""; echo "  Next:      docker compose up -d"; }
-    echo "  Verify:    ./scripts/verify-deploy.sh   (after 'docker compose up -d' — checks every leg)"
+    if [ "$ATTACH" -eq 1 ]; then
+      echo "  Optimizer: http://${HOST}:8088 (keep private)"
+      echo ""
+      echo "  Next:      docker compose -f docker-compose.attach.yml up -d"
+      echo "  Verify:    docker compose -f docker-compose.attach.yml ps"
+    else
+      echo "  Gateway:   http://${HOST}:8787"
+      [ -n "$CONNECT_TOKEN" ] || { echo ""; echo "  Next:      docker compose up -d"; }
+      echo "  Verify:    ./scripts/verify-deploy.sh   (after 'docker compose up -d' — checks every leg)"
+    fi
   elif [ "$ADDED" -gt 0 ]; then
     echo "✓ .env reconciled — added ${ADDED} missing variable(s); existing values kept"
     grep '^# Console:' .env | sed 's/^# //' || true
@@ -328,11 +332,6 @@ EOF
   # ── Anyray Cloud connect (--connect) ───────────────────────────────────────
   # (Re)writes only the connect vars below — every other line of .env is kept.
   if [ -n "$CONNECT_TOKEN" ]; then
-    case "$CONNECT_TOKEN" in
-      adt_*) : ;;
-      *) echo "⚠ deployment token does not start with adt_ — double-check it against app.anyray.ai" ;;
-    esac
-
     # The vendor's Ed25519 verify key and the control-plane host are PINNED in
     # the gateway image — they are no longer fetched or written here. That is
     # what makes the billing kill-switch tamper-resistant: re-pointing the URL
@@ -376,10 +375,10 @@ EOF
     done
     grep -v '^# Anyray Cloud (--connect)' .env > .env.tmp || true; mv .env.tmp .env
 
-    # Common header + connect vars.
+    # Common header + connect vars. ANYRAY_METERING_ENABLED is deliberately not
+    # written to .env: docker-compose.yml enforces the literal value "true".
     cat >> .env <<EOF
 # Anyray Cloud (--connect) — re-run ./setup.sh --connect <token> to reconnect.
-ANYRAY_METERING_ENABLED=true
 ANYRAY_DEPLOYMENT_TOKEN=${CONNECT_TOKEN}
 ANYRAY_PSEUDONYM_SALT=${PSEUDONYM_SALT}
 ANYRAY_GATEWAY_PUBLIC_URL=${GATEWAY_URL}
@@ -512,17 +511,10 @@ EOF
 fi
 
 # ── Kubernetes / Helm mode (--k8s) ───────────────────────────────────────────
-# --connect <token> works here too: the deployment token + a locally-generated
-# pseudonym salt are folded into anyray-secrets.yaml, and gateway.metering.enabled
-# is turned on in my-values.yaml. The control-plane host and the vendor verify key
+# --connect <token> folds the deployment token + a locally-generated pseudonym
+# salt into anyray-secrets.yaml. Metering is always enabled by the chart and is
+# not represented as a Helm value. The control-plane host and vendor verify key
 # stay PINNED in the gateway image — never written here.
-if [ -n "$CONNECT_TOKEN" ]; then
-  case "$CONNECT_TOKEN" in
-    adt_*) : ;;
-    *) echo "⚠ deployment token does not start with adt_ — double-check it against app.anyray.ai" ;;
-  esac
-fi
-
 if [ -f anyray-secrets.yaml ]; then
   if [ -n "$NAMESPACE" ]; then
     set_secret_namespace anyray-secrets.yaml
@@ -550,11 +542,10 @@ if [ -f anyray-secrets.yaml ]; then
     [ -n "$EXISTING_SALT" ] && echo "  (kept the existing pseudonym salt so usage history stays attributable)"
 
     if [ -f my-values.yaml ]; then
-      enable_metering my-values.yaml
-      echo "✓ my-values.yaml already existed — ensured gateway.metering.enabled: true"
+      echo "✓ my-values.yaml already existed — leaving it untouched (the chart always enforces metering)"
     else
       write_values_stub
-      echo "✓ Helm values stub → my-values.yaml (metering on)"
+      echo "✓ Helm values stub → my-values.yaml (mandatory metering has no off toggle)"
     fi
     echo ""
     echo "  Next:"
@@ -592,7 +583,7 @@ EOF
 # Anyray Cloud connect (--connect): fold the deployment token + a locally-generated
 # pseudonym salt into the Secret. The salt NEVER leaves your cluster — it
 # pseudonymizes employee identifiers before the content-free usage rollup. The
-# gateway reads these only when gateway.metering.enabled is set (below).
+# chart always wires these into the mandatory metering configuration.
 if [ -n "$CONNECT_TOKEN" ]; then
   PSEUDONYM_SALT="$(hex 32)"
   cat >> anyray-secrets.yaml <<EOF
@@ -608,12 +599,7 @@ echo "✓ Secrets generated → anyray-secrets.yaml"
 [ -n "$CONNECT_TOKEN" ] && echo "  ✓ Anyray Cloud connect vars folded in (deployment token + pseudonym salt)"
 
 if [ -f my-values.yaml ]; then
-  if [ -n "$CONNECT_TOKEN" ]; then
-    enable_metering my-values.yaml
-    echo "✓ my-values.yaml already existed — ensured gateway.metering.enabled: true"
-  else
-    echo "✓ my-values.yaml already exists — leaving it untouched"
-  fi
+  echo "✓ my-values.yaml already exists — leaving it untouched (the chart always enforces metering)"
 else
   write_values_stub
   echo "✓ Helm values stub → my-values.yaml"

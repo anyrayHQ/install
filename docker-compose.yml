@@ -1,6 +1,7 @@
 name: anyray
 
-# Anyray from published images. Generate secrets first: ./setup.sh
+# Anyray from published images. Generate secrets first:
+# ./setup.sh --connect <adt_token>
 # Console → http://<host>:3000   |   Gateway API → http://<host>:8787
 # Docs → https://docs.anyray.ai
 #
@@ -87,16 +88,17 @@ services:
       # On-top mode: seed the default routing config from an existing upstream
       # gateway so clients send no x-anyray-config header (./setup.sh --upstream).
       ANYRAY_UPSTREAM_URL: ${ANYRAY_UPSTREAM_URL:-}
-      # Anyray Portal metering (content-free rollups only) — ON by default; every
-      # deployment connects. setup.sh --connect writes the deployment token + salt
+      # Anyray Portal metering (content-free rollups only) — mandatory for every
+      # deployment. setup.sh --connect writes the deployment token + salt
       # to .env. The vendor verify key and the control-plane host are PINNED in the
-      # gateway image, so there is no license key to configure here. (Without a
-      # deployment token the gateway serves through the first-boot grace window,
-      # then blocks /v1 until a token is wired — run ./setup.sh --connect <adt_…>.)
-      ANYRAY_METERING_ENABLED: ${ANYRAY_METERING_ENABLED:-true}
+      # gateway image, so there is no license key to configure here. setup.sh
+      # requires the deployment token before this supported stack can start.
+      # Literal by design: a stale/user-supplied .env value must not disconnect a
+      # supported deployment from Billing or disable entitlement enforcement.
+      ANYRAY_METERING_ENABLED: "true"
       ANYRAY_CONTROL_PLANE_URL: ${ANYRAY_CONTROL_PLANE_URL:-}
-      ANYRAY_DEPLOYMENT_TOKEN: ${ANYRAY_DEPLOYMENT_TOKEN:-}
-      ANYRAY_PSEUDONYM_SALT: ${ANYRAY_PSEUDONYM_SALT:-}
+      ANYRAY_DEPLOYMENT_TOKEN: ${ANYRAY_DEPLOYMENT_TOKEN:?run ./setup.sh --connect <adt_token> first}
+      ANYRAY_PSEUDONYM_SALT: ${ANYRAY_PSEUDONYM_SALT:?run ./setup.sh --connect <adt_token> first}
       ANYRAY_GATEWAY_PUBLIC_URL: ${ANYRAY_GATEWAY_PUBLIC_URL:-}
       ANYRAY_CONSOLE_PUBLIC_URL: ${ANYRAY_CONSOLE_PUBLIC_URL:-}
       ANYRAY_METERING_INTERVAL_MS: ${ANYRAY_METERING_INTERVAL_MS:-}

@@ -20,13 +20,6 @@ in-process — there is no separate observability backend to run.
 The chart is published as an OCI artifact to the same public registry as the
 images — no git clone, no `setup.sh`:
 
-Capability-aware chart revisions require
-`persistentTranscriptPolicyActivateAt` in `my-values.yaml`: set one shared
-ISO-8601 instant at least 30 minutes in the future before the first rollout,
-then preserve that exact value. See the coordinated upgrade section below.
-Older chart revisions without the capability annotation remain legacy and can
-omit the value.
-
 ```bash
 helm install anyray oci://public.ecr.aws/anyray/anyray \
   --version <x.y.z> \
@@ -56,8 +49,6 @@ spec:
     helm:
       valuesObject:
         host: anyray.example.com
-        persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z" # example only; replace with a safely-future instant
-        persistentTranscriptPolicyInitialRolloutVerified: false
         gateway:
           publicUrl: https://anyray.example.com
           consolePublicUrl: https://anyray.example.com
@@ -119,50 +110,14 @@ assumes `default`.
 
 ```bash
 git pull
+# Run before the first upgrade from an older Secret. Safe to repeat.
+./setup.sh --k8s --connect adt_XXXX --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
+kubectl apply -n "$ANYRAY_NAMESPACE" -f anyray-secrets.yaml
 helm upgrade anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 ```
 
-### Coordinated transcript-policy upgrade
-
-Kubernetes rolls the gateway and optimizer Deployments independently, including
-at one replica. A chart revision declares this coordination requirement with
-the `anyray.ai/persistent-transcript-policy-v1: "true"` annotation in
-`Chart.yaml`. A declaring chart requires an explicit
-`persistentTranscriptPolicyActivateAt` value for every topology. Image tags do
-not activate install semantics, but the capable chart requires equal gateway
-and optimizer tags and rejects the legacy `latest` and `stable` channels. It
-accepts its own pinned `appVersion` or `policy-stable`; an equal custom immutable
-tag additionally requires
-`persistentTranscriptPolicyImageCapabilityConfirmed: true` after both images'
-OCI capability labels have been verified. Older chart revisions without the
-annotation remain legacy.
-
-For a capability-aware chart, `setup.sh` generates a value one hour in the
-future for a new `my-values.yaml` and backfills a missing or blank value on
-re-run. It reads the chart annotation, not `appVersion` or an image tag, and
-preserves any existing nonblank value exactly. GitOps installs must set and
-retain the value themselves. For the first capability-aware rollout:
-
-1. Choose one ISO-8601 UTC instant at least 30 minutes in the future, with enough
-   time for every gateway and optimizer pod to become Ready and roll back.
-2. Put that exact value in the values file used by every release, for example
-   `persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z"`
-   (replace the example with a future instant for your rollout).
-3. Run `helm upgrade`, then verify both Deployments complete before that instant.
-   Roll back before activation if either workload is not healthy.
-4. Preserve the same value on every later upgrade, even after it is in the past.
-
-Online Helm upgrades query the live gateway Deployment and accept only its
-exact existing activation value, including after it is in the past. A delayed
-first rollout with a stale or less-than-30-minute value fails before rendering;
-clear that value and rerun `setup.sh`, or choose a new safely-future value.
-
-Offline GitOps renderers cannot query the live Deployment. Keep
-`persistentTranscriptPolicyInitialRolloutVerified: false` for the first sync.
-After both initial capable Deployments are healthy with the configured value,
-set it to `true` and preserve both fields on later syncs. This acknowledgment is
-not an image-capability override and must not be set before verifying the first
-rollout.
+Apply the updated Secret before upgrading. The gateway pod will not start
+without `ANYRAY_DEPLOYMENT_TOKEN` and `ANYRAY_PSEUDONYM_SALT`.
 
 When following `policy-stable`, restart the app Deployments after each channel
 promotion so Kubernetes resolves the new digest:
@@ -174,31 +129,19 @@ kubectl rollout status deployment -n "$ANYRAY_NAMESPACE" \
   -l app.kubernetes.io/instance=anyray --timeout=10m
 ```
 
-Do not use different timestamps between Helm releases or activate while an old
-gateway or optimizer pod can still receive traffic. The gate changes provider
-cache prefixes, so an uncoordinated mixed-version rollout can increase prompt
-cache writes and session spend.
+## Billing
 
-## Connect to Anyray Portal (metering)
-
-Metering is **on by default** (`gateway.metering.enabled: true`) — every deployment
-connects to Anyray Portal for content-free usage rollups and a signed entitlement lease.
-Generate the manifests with `--connect` so the Secret carries a deployment token:
+Billing is required. The chart always enables content-free usage metering.
+Create or update the Secret with:
 
 ```bash
 ./setup.sh --k8s --connect adt_XXXX --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
 ```
 
-This folds `ANYRAY_DEPLOYMENT_TOKEN` and a locally-generated `ANYRAY_PSEUDONYM_SALT`
-into `anyray-secrets.yaml` and keeps `gateway.metering.enabled: true` in `my-values.yaml`.
-The chart then injects the metering env into the gateway (the token + salt are read from
-the Secret; the control-plane host and the vendor verify key stay pinned in the gateway
-image). If you install with `enabled: true` but no deployment token in the Secret, the
-gateway serves through the first-boot grace window and then blocks `/v1` until a token is
-wired — so always generate the Secret with `--connect`.
-
-The pseudonym salt never leaves your cluster — it pseudonymizes employee identifiers
-before the content-free usage rollup is sent. Tune cadence with
+`setup.sh` adds the deployment token and a local pseudonym salt to
+`anyray-secrets.yaml`. The chart requires both keys. The Billing URL and
+verification key are pinned in the gateway image, and the salt stays in your
+cluster. Tune the reporting interval with
 `gateway.metering.intervalMs` / `gateway.metering.graceMs`.
 
 ## Exposing services
@@ -311,10 +254,8 @@ postgres:
 
 All component images can be redirected to an internal registry. This changes
 image distribution only; the deployment must still connect to the Anyray
-Billing app. Preserve the gateway and optimizer OCI capability label while
-mirroring, leave their tags equal, and set
-`persistentTranscriptPolicyImageCapabilityConfirmed: true`. Leave the app `tag`
-empty to keep the chart's pinned appVersion, or set a concrete `vX.Y.Z`:
+Billing app. Leave the app `tag` empty to keep the chart's pinned appVersion,
+or set a concrete `vX.Y.Z`:
 
 ```yaml
 images:
@@ -327,7 +268,6 @@ images:
   postgres:
     repository: registry.example.com/postgres
     tag: "17"
-persistentTranscriptPolicyImageCapabilityConfirmed: true
 ```
 
 **Running NetworkPolicies?** The chart ships none, but if your cluster enforces
@@ -357,7 +297,8 @@ gateway:
 ```
 
 Use `gateway.extraEnv`, `optimizer.extraEnv`, or `proxy.extraEnv` for advanced
-environment variables not modeled directly.
+environment variables not modeled directly. Billing variables cannot be
+overridden through `gateway.extraEnv`.
 
 ## Scaling
 
@@ -374,12 +315,9 @@ proxy:
 
 Gateway and optimizer HPAs are also available, but the bundled data PVCs are
 `ReadWriteOnce`, so autoscaling those components requires disabling their bundled
-persistence and providing an external/shared state plan for production. Keep the
-coordinated activation instant from the upgrade section in the values when
-using a capability-aware chart:
+persistence and providing an external/shared state plan for production:
 
 ```yaml
-persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z" # example only
 gateway:
   persistence:
     enabled: false
@@ -436,7 +374,8 @@ the gateway alone silently degrades the optimizer to in-memory stash
 ## Secrets
 
 All secrets live in a single Kubernetes Secret named `anyray-secrets` (configurable
-via `values.secretName`). Generate it with `./setup.sh --k8s`. Never commit
+via `values.secretName`). Generate it with
+`./setup.sh --k8s --connect <adt_token>`. Never commit
 `anyray-secrets.yaml` — it is in `.gitignore` at the install repo root.
 
 ## Uninstall

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
 # GKE/AKS one-click deploys may use only the chart's audited image set or the
-# capability-compatible moving channel. Other immutable tags need the manual
-# Helm flow, where the operator verifies both runtime OCI capability labels.
+# policy-stable moving channel. Other immutable tags need the manual Helm flow.
 set -euo pipefail
 
 requested="${1:?usage: validate-one-click-image-tag.sh IMAGE_TAG [Chart.yaml]}"
@@ -23,7 +22,7 @@ if [ "$requested" = "$app_version" ] || [ "$requested" = policy-stable ]; then
   exit 0
 fi
 if [[ "$requested" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "error: IMAGE_TAG=$requested is not accepted by the one-click Kubernetes deploy; use $app_version or policy-stable. For another immutable release, use the documented manual Helm flow after verifying both gateway and optimizer OCI capability labels." >&2
+  echo "error: IMAGE_TAG=$requested is not accepted by the one-click Kubernetes deploy; use $app_version or policy-stable. For another immutable release, use the documented manual Helm flow." >&2
   exit 1
 fi
 echo "error: IMAGE_TAG must be $app_version or policy-stable; latest, stable, and malformed tags are not supported." >&2

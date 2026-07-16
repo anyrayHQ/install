@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Generate the image bill-of-materials (BOM) for the Anyray Helm chart — the exact
-# set of container images an air-gapped / private-registry install must mirror.
+# set of container images a private-registry install must mirror. Redirecting
+# image pulls does not make the deployment air-gapped: Billing connectivity is
+# mandatory.
 #
 # It renders the chart with `helm template` and extracts every `image:` reference,
 # so the list always matches what the chart actually deploys (no drift). When
@@ -20,12 +22,7 @@ chart_dir="$(cd "$(dirname "$0")/../helm" && pwd)"
 
 # host= is required by the chart but irrelevant to the image set.
 refs="$(
-  # Rendering a BOM does not deploy or activate the policy. Supply a stable,
-  # syntactically valid instant so capability-aware chart revisions still render;
-  # caller arguments remain last and can override it when needed.
-  helm template anyray "$chart_dir" --set host=airgap.invalid \
-    --set-string persistentTranscriptPolicyActivateAt=1970-01-01T00:00:00.000Z \
-    --set persistentTranscriptPolicyInitialRolloutVerified=true \
+  helm template anyray "$chart_dir" --set host=mirror.invalid \
     "$@" \
     | grep -oE 'image:[[:space:]]*"?[^[:space:]"]+' \
     | sed -E 's/^image:[[:space:]]*"?//' \

@@ -1,6 +1,6 @@
 # Anyray Helm chart values.
-# Run setup.sh --k8s to generate anyray-secrets.yaml + a starter my-values.yaml,
-# then install into your chosen namespace:
+# Run setup.sh --k8s --connect <adt_token> to generate the Secret and a starter
+# values file, then install into your chosen namespace:
 #   kubectl apply -n "$ANYRAY_NAMESPACE" -f anyray-secrets.yaml
 #   helm install anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 # Omit the namespace flags only when you intentionally want the current kubectl/Helm namespace.
@@ -17,29 +17,6 @@ host: ""
 # cluster.local).
 clusterDomain: cluster.local
 
-# Coordinated activation instant for the append-only transcript safety policy.
-# Required by chart revisions declaring the persistent-transcript-policy-v1
-# capability, because the gateway and optimizer Deployments roll independently.
-# Image tags do not toggle install semantics. Set one future ISO-8601 UTC
-# timestamp for the first capable rollout and keep that exact value on later
-# upgrades. setup.sh reads the chart capability and generates a safely-future
-# value.
-# See helm/README.md "Coordinated transcript-policy upgrade" before changing it.
-persistentTranscriptPolicyActivateAt: ""
-
-# Online Helm upgrades read the live gateway Deployment and accept its exact
-# activation value even after that instant passes. Offline GitOps renderers
-# cannot perform that lookup. Leave this false for the first capable sync; only
-# set true after verifying both initial capable Deployments are healthy, while
-# preserving persistentTranscriptPolicyActivateAt exactly.
-persistentTranscriptPolicyInitialRolloutVerified: false
-
-# Leave false when using the chart's appVersion or policy-stable. Set true only
-# for an equal, immutable custom gateway/optimizer tag or custom registry after
-# verifying both images declare
-# ai.anyray.capability.persistent-transcript-policy-v1=true.
-persistentTranscriptPolicyImageCapabilityConfirmed: false
-
 # Private-registry mirrors: set imageRegistry to your internal
 # registry host to repoint EVERY image (gateway/optimizer/proxy/postgres) at it in
 # one shot, e.g. "my.registry:5000" → my.registry:5000/anyray/gateway. The image
@@ -53,9 +30,7 @@ global:
 image:
   # Empty → images pin to the chart's appVersion (the release this chart ships),
   # so production deploys are reproducible and auditable. Set to "policy-stable"
-  # for the compatible moving channel; it forces pullPolicy: Always. A custom
-  # immutable gateway/optimizer tag also needs the explicit capability
-  # confirmation above. Legacy latest/stable channels are rejected.
+  # for the moving channel; it forces pullPolicy: Always.
   tag: ""
   # Pinned, immutable tags don't need re-pulling; a cached layer is the same build.
   pullPolicy: IfNotPresent
@@ -77,7 +52,7 @@ images:
     repository: docker.io/postgres
     tag: "17"
 
-# Name of the Kubernetes Secret created by: ./setup.sh --k8s
+# Name of the Kubernetes Secret created by: ./setup.sh --k8s --connect <adt_token>
 secretName: anyray-secrets
 
 # Common pod/runtime controls. These apply to all workload pods.
@@ -183,14 +158,10 @@ gateway:
   maxConcurrentRequests: ""
   authFailLimit: ""
   maxBodyBytes: ""
-  # Anyray Portal metering. ON by default — every deployment connects for content-free
-  # usage metering. `setup.sh --k8s --connect <token>` folds ANYRAY_DEPLOYMENT_TOKEN +
-  # ANYRAY_PSEUDONYM_SALT into the Secret. The control-plane host and the vendor verify
-  # key are pinned in the gateway image, so they are NOT set here. (With enabled: true
-  # but no deployment token in the Secret, the gateway serves through the first-boot
-  # grace window, then blocks /v1 until a token is wired.)
+  # Billing is required. The chart always enables content-free usage metering.
+  # `setup.sh --k8s --connect <token>` adds the required deployment token and
+  # local pseudonym salt to the Secret. The Billing URL and key are image-pinned.
   metering:
-    enabled: true
     intervalMs: "900000"
     graceMs: "86400000"
     # Globs of x-anyray-metadata user ids to exclude from the billed seat

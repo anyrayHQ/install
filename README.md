@@ -63,7 +63,7 @@ Docker Compose (above) is the default. Each target has its own recipe:
 
 | Target | Command / artifact | Docs |
 | --- | --- | --- |
-| **Kubernetes (Helm / ArgoCD)** | GitOps-native OCI chart: `oci://public.ecr.aws/anyray/anyray` (or `./setup.sh --k8s …` + `helm install` from source) | [`helm/README.md`](./helm/README.md) |
+| **Kubernetes (Helm / ArgoCD)** | GitOps-native OCI chart: `oci://public.ecr.aws/anyray/anyray` (or `./setup.sh --k8s --connect adt_…` + `helm install` from source) | [`helm/README.md`](./helm/README.md) |
 | **AWS (CloudFormation)** | One-click ECS/Fargate + RDS + EFS stack; secrets via Secrets Manager | [`aws/`](./aws/) |
 | **Google Cloud (GKE Autopilot)** | One-click Cloud Shell deploy of the bundled Helm chart | [`gcp/README.md`](./gcp/README.md) |
 | **Google Cloud (Compute Engine VM)** | One-click Cloud Shell deploy; docker compose on one VM (no Kubernetes, no managed DB) | [`gcp/gce/README.md`](./gcp/gce/README.md) |
@@ -138,7 +138,7 @@ optimizer config from the console — your `.env` and secrets are untouched.
 ```bash
 docker compose ps           # service health
 docker compose logs <svc>   # diagnose a failing service
-./setup.sh                  # safe to re-run; never overwrites .env
+./setup.sh                  # safe after the connected first run; never overwrites .env
                             # (--connect rewrites only the connect vars)
 ```
 
@@ -149,8 +149,10 @@ docker compose logs <svc>   # diagnose a failing service
 - The admin key (`ANYRAY_ADMIN_TOKEN` in `.env`) gates the console and all admin
   APIs. Rotate by editing `.env` and running `docker compose up -d`.
 - The control-plane host and lease-verify key are pinned in the gateway image, so
-  the billing kill-switch can't be bypassed by re-pointing the URL. Metering reports
-  are content-free rollups; the pseudonym salt never leaves the machine.
+  the billing kill-switch can't be bypassed by re-pointing the URL. Supported
+  Compose, Helm, cloud, and Railway artifacts enforce metering with no off toggle.
+  Metering reports are content-free rollups; the pseudonym salt never leaves the
+  machine.
 
 ## Testing policy — every artifact gets a LIVE lane
 

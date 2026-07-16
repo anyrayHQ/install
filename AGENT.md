@@ -20,8 +20,8 @@ optimizer + observability console). Docs: https://docs.anyray.ai
    `--namespace`.
 4. Their Anyray Cloud deployment token (starts with `adt_`) — they get it at
    https://app.anyray.ai (Deployments → Connect a deployment). Full-gateway
-   deployments require this for usage metering; omit `--connect` only for the
-   gateway-less LiteLLM attach mode.
+   deployments require this for usage metering. The gateway-less LiteLLM attach
+   mode instead uses the explicit `./setup.sh --attach` lane.
 
 ## Step 2 — Platform preparation (your job)
 

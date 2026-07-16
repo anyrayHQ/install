@@ -3,8 +3,7 @@
 #
 # `railway config apply` provisions the services and wires every internal reference,
 # but two things IaC can't express declaratively are seeded here (idempotently):
-#   1. generated secrets, plus the policy activation instant when this install
-#      revision declares the capability (preserve()d in railway.ts)
+#   1. generated secrets (preserve()d in railway.ts)
 #   2. public domains for gateway (:8787) and proxy (:80) + the URLs that reference them
 #
 # Run AFTER `railway config apply`, with the target project/environment linked
@@ -14,8 +13,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=railway/policy-capability.sh
-source "$here/policy-capability.sh"
+# shellcheck source=railway/release-tag.sh
+source "$here/release-tag.sh"
 
 iac_tag="$(sed -nE 's/^const TAG = "(v[0-9]+\.[0-9]+\.[0-9]+)";.*/\1/p' "$here/../.railway/railway.ts")"
 anyray_valid_release_tag "$iac_tag" || {
@@ -28,17 +27,6 @@ command -v openssl >/dev/null || { echo "openssl required for secret generation"
 railway status >/dev/null 2>&1 || { echo "No linked project — run 'railway link' first."; exit 1; }
 
 hex() { openssl rand -hex "$1"; }
-
-future_policy_activation_at() {
-  local value=""
-  value="$(date -u -d '+1 hour' '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || \
-    value="$(date -u -v+1H '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null)" || true
-  [ -n "$value" ] || {
-    echo "could not calculate a future policy activation instant with date" >&2
-    return 1
-  }
-  printf '%s' "$value"
-}
 
 # Read a service's current value for KEY ("" if unset).
 getvar() { railway variables -s "$1" --kv 2>/dev/null | sed -n "s/^$2=//p"; }
@@ -54,30 +42,12 @@ set_if_empty() {
   fi
 }
 
-# The activation value must reach a running gateway before its future instant;
-# unlike secret seeding, deliberately trigger the gateway redeploy when added.
-set_activation_if_empty() {
-  local value="$1"
-  if [ -z "$(getvar gateway ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT)" ]; then
-    railway variables -s gateway \
-      --set "ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT=$value" >/dev/null
-    echo "  set gateway.ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT (redeploying)"
-  else
-    echo "  keep gateway.ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT (already set)"
-  fi
-}
-
 echo "== seeding generated secrets =="
 # Canonical secrets live on the gateway; optimizer references them via railway.ts.
 set_if_empty gateway ANYRAY_ADMIN_TOKEN "$(hex 24)"
 set_if_empty gateway ANYRAY_CONTENT_KEY "$(hex 32)"      # 32-byte AES-256-GCM key
 set_if_empty gateway ANYRAY_OPTIMIZER_TOKEN "$(hex 24)"
 set_if_empty gateway ANYRAY_PSEUDONYM_SALT "$(hex 16)"
-if anyray_install_has_capability; then
-  set_activation_if_empty "$(future_policy_activation_at)"
-else
-  echo "  skip gateway.ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT (install capability is absent)"
-fi
 set_if_empty proxy   ANYRAY_UPDATER_TOKEN "$(hex 16)"
 
 # Metering deployment token (adt_…): from arg, else leave for the grace window.

@@ -52,11 +52,6 @@ services:
       ANYRAY_OPTIMIZER_URL: http://optimizer:8088
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
       ANYRAY_OPTIMIZER_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_TIMEOUT_MS:-800}
-      # This stack runs one optimizer and one dependent gateway. Once the
-      # optimizer is healthy, activate the coordinated persistent-transcript
-      # safety policy immediately. Clustered installs must instead use one
-      # shared future ISO instant after every compatible replica is staged.
-      ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT: ${ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT:-1970-01-01T00:00:00.000Z}
       ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS: ${ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS:-10000}
       # Model the `anyray-default` routing sentinel resolves to. Set it to a model
       # your configured provider serves (a bare model is read under `anthropic`).
@@ -149,9 +144,7 @@ services:
     volumes:
       - anyray_optimizer_data:/data
     healthcheck:
-      # A 200 from a legacy optimizer is not enough: the dependent gateway
-      # activates the coordinated transcript policy as soon as this is healthy.
-      test: ["CMD", "node", "-e", "fetch('http://localhost:8088/health').then(async(r)=>{const b=await r.json();process.exit(r.ok&&b?.features?.persistentTranscriptPolicyV1===true?0:1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8088/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 10

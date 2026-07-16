@@ -95,28 +95,19 @@ sudo docker compose logs -f gateway
 ## Upgrade
 
 The migration template starts on one coordinated immutable release. After that
-release is healthy, refreshed templates default to the capability-compatible
-`policy-stable` channel. The console's one-click **Update now** button pulls the
-latest compatible images. To converge manually, or to select a compatible
-immutable tag:
+release is healthy, refreshed templates default to the `policy-stable` channel.
+The console's one-click **Update now** button pulls the latest compatible
+images. To converge manually, or to select a compatible immutable tag:
 
 ```bash
 gcloud compute ssh anyray --zone us-central1-a --tunnel-through-iap
 cd /opt/anyray
 sudo git pull --ff-only
 sudo ./gcp/gce/upgrade.sh
-# Optional capability-verified override: sudo ./gcp/gce/upgrade.sh vX.Y.Z
+# Optional immutable-tag override: sudo ./gcp/gce/upgrade.sh vX.Y.Z
 ```
 
-The `git pull` is required for this hard update: it reconciles the optimizer
-capability health gate and gateway activation wiring before any capable image is
-started. `upgrade.sh` also replaces the image pin that first-time GCE setup wrote
-to `.env`; leaving the old pin would override the refreshed template. A reboot
+The `git pull` keeps the running install on the checked-out template.
+`upgrade.sh` also replaces the image pin that first-time GCE setup wrote to
+`.env`; leaving the old pin would override the refreshed template. A reboot
 intentionally resumes the checked-out template without updating it.
-
-Before changing `.env` or any running container, `upgrade.sh` resolves and pulls
-the effective gateway and optimizer images and requires both to declare
-`ai.anyray.capability.persistent-transcript-policy-v1=true`. A legacy immutable
-tag, an unlabeled `policy-stable` promotion, or an incompatible custom image
-override therefore leaves the current install untouched. The subsequent
-reconcile uses those locally verified images without re-pulling a moving tag.

@@ -20,13 +20,6 @@ in-process — there is no separate observability backend to run.
 The chart is published as an OCI artifact to the same public registry as the
 images — no git clone, no `setup.sh`:
 
-Capability-aware chart revisions require
-`persistentTranscriptPolicyActivateAt` in `my-values.yaml`: set one shared
-ISO-8601 instant at least 30 minutes in the future before the first rollout,
-then preserve that exact value. See the coordinated upgrade section below.
-Older chart revisions without the capability annotation remain legacy and can
-omit the value.
-
 ```bash
 helm install anyray oci://public.ecr.aws/anyray/anyray \
   --version <x.y.z> \
@@ -56,8 +49,6 @@ spec:
     helm:
       valuesObject:
         host: anyray.example.com
-        persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z" # example only; replace with a safely-future instant
-        persistentTranscriptPolicyInitialRolloutVerified: false
         gateway:
           publicUrl: https://anyray.example.com
           consolePublicUrl: https://anyray.example.com
@@ -122,48 +113,6 @@ git pull
 helm upgrade anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 ```
 
-### Coordinated transcript-policy upgrade
-
-Kubernetes rolls the gateway and optimizer Deployments independently, including
-at one replica. A chart revision declares this coordination requirement with
-the `anyray.ai/persistent-transcript-policy-v1: "true"` annotation in
-`Chart.yaml`. A declaring chart requires an explicit
-`persistentTranscriptPolicyActivateAt` value for every topology. Image tags do
-not activate install semantics, but the capable chart requires equal gateway
-and optimizer tags and rejects the legacy `latest` and `stable` channels. It
-accepts its own pinned `appVersion` or `policy-stable`; an equal custom immutable
-tag additionally requires
-`persistentTranscriptPolicyImageCapabilityConfirmed: true` after both images'
-OCI capability labels have been verified. Older chart revisions without the
-annotation remain legacy.
-
-For a capability-aware chart, `setup.sh` generates a value one hour in the
-future for a new `my-values.yaml` and backfills a missing or blank value on
-re-run. It reads the chart annotation, not `appVersion` or an image tag, and
-preserves any existing nonblank value exactly. GitOps installs must set and
-retain the value themselves. For the first capability-aware rollout:
-
-1. Choose one ISO-8601 UTC instant at least 30 minutes in the future, with enough
-   time for every gateway and optimizer pod to become Ready and roll back.
-2. Put that exact value in the values file used by every release, for example
-   `persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z"`
-   (replace the example with a future instant for your rollout).
-3. Run `helm upgrade`, then verify both Deployments complete before that instant.
-   Roll back before activation if either workload is not healthy.
-4. Preserve the same value on every later upgrade, even after it is in the past.
-
-Online Helm upgrades query the live gateway Deployment and accept only its
-exact existing activation value, including after it is in the past. A delayed
-first rollout with a stale or less-than-30-minute value fails before rendering;
-clear that value and rerun `setup.sh`, or choose a new safely-future value.
-
-Offline GitOps renderers cannot query the live Deployment. Keep
-`persistentTranscriptPolicyInitialRolloutVerified: false` for the first sync.
-After both initial capable Deployments are healthy with the configured value,
-set it to `true` and preserve both fields on later syncs. This acknowledgment is
-not an image-capability override and must not be set before verifying the first
-rollout.
-
 When following `policy-stable`, restart the app Deployments after each channel
 promotion so Kubernetes resolves the new digest:
 
@@ -173,11 +122,6 @@ kubectl rollout restart deployment -n "$ANYRAY_NAMESPACE" \
 kubectl rollout status deployment -n "$ANYRAY_NAMESPACE" \
   -l app.kubernetes.io/instance=anyray --timeout=10m
 ```
-
-Do not use different timestamps between Helm releases or activate while an old
-gateway or optimizer pod can still receive traffic. The gate changes provider
-cache prefixes, so an uncoordinated mixed-version rollout can increase prompt
-cache writes and session spend.
 
 ## Connect to Anyray Portal (metering)
 
@@ -311,10 +255,8 @@ postgres:
 
 All component images can be redirected to an internal registry. This changes
 image distribution only; the deployment must still connect to the Anyray
-Billing app. Preserve the gateway and optimizer OCI capability label while
-mirroring, leave their tags equal, and set
-`persistentTranscriptPolicyImageCapabilityConfirmed: true`. Leave the app `tag`
-empty to keep the chart's pinned appVersion, or set a concrete `vX.Y.Z`:
+Billing app. Leave the app `tag` empty to keep the chart's pinned appVersion,
+or set a concrete `vX.Y.Z`:
 
 ```yaml
 images:
@@ -327,7 +269,6 @@ images:
   postgres:
     repository: registry.example.com/postgres
     tag: "17"
-persistentTranscriptPolicyImageCapabilityConfirmed: true
 ```
 
 **Running NetworkPolicies?** The chart ships none, but if your cluster enforces
@@ -374,12 +315,9 @@ proxy:
 
 Gateway and optimizer HPAs are also available, but the bundled data PVCs are
 `ReadWriteOnce`, so autoscaling those components requires disabling their bundled
-persistence and providing an external/shared state plan for production. Keep the
-coordinated activation instant from the upgrade section in the values when
-using a capability-aware chart:
+persistence and providing an external/shared state plan for production:
 
 ```yaml
-persistentTranscriptPolicyActivateAt: "2099-01-01T00:00:00.000Z" # example only
 gateway:
   persistence:
     enabled: false

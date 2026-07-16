@@ -75,25 +75,15 @@ the console, add a provider key, and enroll developers — see the
 ## Upgrade
 
 Re-run `./gcp/deploy.sh` (it is `helm upgrade --install`). The one-click path
-rejects any other immutable tag before provisioning; to select one, verify both
-runtime capability labels and run the chart directly:
-
-When the template follows `policy-stable`, the deploy script explicitly
-restarts and waits for the app Deployments so Kubernetes resolves the promoted
-digest with `imagePullPolicy: Always`.
-
-The first rerun with a capability-aware chart backfills one
-`persistentTranscriptPolicyActivateAt` value an hour in the future into
-`my-values.yaml`; later reruns preserve it. Confirm gateway and optimizer finish
-rolling before that instant, and roll back before it if either is unhealthy.
+accepts only the chart's pinned release or `policy-stable`; to select another
+immutable tag, run the chart directly:
 
 ```bash
 helm upgrade anyray ./helm -f my-values.yaml \
   --namespace "$NAMESPACE" --reuse-values \
-  --set image.tag=vX.Y.Z \
-  --set persistentTranscriptPolicyImageCapabilityConfirmed=true
+  --set image.tag=vX.Y.Z
 ```
 
-Use the confirmation only after both pinned gateway and optimizer image configs
-have been verified to carry
-`ai.anyray.capability.persistent-transcript-policy-v1=true`.
+When the template follows `policy-stable`, the deploy script explicitly
+restarts and waits for the app Deployments so Kubernetes resolves the promoted
+digest with `imagePullPolicy: Always`.

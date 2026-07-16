@@ -38,8 +38,8 @@ tpl="$here/railway.template.json"
 out="$here/.publish"
 runbook="$out/RUNBOOK.md"
 
-# shellcheck source=railway/policy-capability.sh
-source "$here/policy-capability.sh"
+# shellcheck source=railway/release-tag.sh
+source "$here/release-tag.sh"
 
 command -v jq >/dev/null || { echo "error: jq is required" >&2; exit 1; }
 [ -f "$tpl" ] || { echo "error: $tpl not found" >&2; exit 1; }
@@ -60,11 +60,6 @@ if [ -z "$gateway_tag" ] || [ "$optimizer_tag" != "$gateway_tag" ] || \
   exit 1
 fi
 
-policy_prompt=false
-if anyray_install_has_capability; then
-  policy_prompt=true
-fi
-
 mkdir -p "$out"
 rm -f "$out"/*.vars "$runbook"
 
@@ -82,9 +77,7 @@ desc_warn=""
 # "Empty value to be filled by the user" (a required prompt), which breaks the
 # one-click "No config required" UX. The empty optional knobs (rate limits,
 # verified-dev gate, upstream) behave identically unset or "" at the gateway,
-# so they're omitted from the published template rather than prompted for. The
-# transcript-policy activation instant becomes the one required prompt in an
-# install revision that declares the capability. Older revisions omit it.
+# so they're omitted from the published template rather than prompted for.
 #
 # CAVEAT (do not set proxy ANYRAY_UPDATER_TOKEN back to ""): the proxy's nginx
 # template injects ${ANYRAY_UPDATER_TOKEN} via envsubst, which only substitutes
@@ -94,10 +87,10 @@ desc_warn=""
 # image that bakes an empty ANYRAY_UPDATER_TOKEN default ships to :stable
 # (monorepo: observability/ui/Dockerfile), this template var is no longer needed.
 for svc in $services; do
-  jq -r --arg n "$svc" --argjson policy_prompt "$policy_prompt" '
+  jq -r --arg n "$svc" '
     .services[] | select(.name == $n) | .variables // {}
     | to_entries[]
-    | select(.value != "" or ($policy_prompt and .key == "ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_ACTIVATE_AT"))
+    | select(.value != "")
     | "\(.key)=\(.value)"
   ' "$tpl" > "$out/$svc.vars"
 done
@@ -135,14 +128,6 @@ lint="$(jq -r '
   echo "> Empty-valued optional knobs are intentionally omitted from each block:"
   echo "> in a Railway template an empty value becomes a required user prompt,"
   echo "> which would break the one-click \"No config required\" experience."
-  if [ "$policy_prompt" = true ]; then
-    echo "> The policy activation instant is the sole required prompt in this capability-aware revision;"
-    echo "> its matching images are pinned to $gateway_tag."
-    echo "> set one safely-future ISO value and preserve it on later updates."
-  else
-    echo "> The policy prompt is omitted because this install revision does not"
-    echo "> declare $ANYRAY_PERSISTENT_TRANSCRIPT_POLICY_CAPABILITY."
-  fi
   echo
   for svc in $services; do
     image="$(jq -r --arg n "$svc" '.services[]|select(.name==$n)|.source.image // "(no image / source build)"' "$tpl")"

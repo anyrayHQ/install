@@ -121,6 +121,13 @@ services:
     restart: always
     labels:
       com.centurylinklabs.watchtower.enable: "true"
+    # The optimizer's durable stash + /v1/record ride the same bundled Postgres
+    # as the gateway; without this gate it races Postgres on a cold `up` and
+    # boots with its observability self-check failed until the next restart.
+    # (docker-compose.attach.yml already carries the same gate.)
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       PORT: 8088
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}

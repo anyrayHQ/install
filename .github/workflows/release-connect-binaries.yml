@@ -49,6 +49,16 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           test -f package/dist/index.js
 
+      - name: Install runtime dependencies
+        # npm pack ships the package without its deps, so `bun --compile` can't
+        # resolve them (connect requires zod). Install production deps into
+        # package/ so the compile bundles them into the binary.
+        run: |
+          set -euo pipefail
+          cd package
+          npm install --omit=dev --ignore-scripts
+          test -d node_modules/zod
+
       - name: Compile standalone binaries (Bun)
         run: |
           set -euo pipefail

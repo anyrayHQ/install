@@ -49,6 +49,18 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           test -f package/dist/index.js
 
+      - name: Install runtime dependencies for bundling
+        working-directory: package
+        run: |
+          set -euo pipefail
+          # anyray-connect gained a runtime dep (zod) on 2026-07-20; the packed
+          # npm tarball ships dist/ but no node_modules, so `bun build --compile`
+          # can't resolve the bare `import { z } from "zod"`. Install prod deps
+          # here for Bun to bundle into each --compile output — the emitted
+          # binaries stay self-contained; the dep only has to exist at build time.
+          # --ignore-scripts: never run lifecycle scripts from fetched deps.
+          bun install --production --ignore-scripts
+
       - name: Compile standalone binaries (Bun)
         run: |
           set -euo pipefail

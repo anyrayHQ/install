@@ -17,6 +17,10 @@ on:
       - '.github/workflows/helm-chart.yml'
   workflow_dispatch:
 
+# Read-only: the chart job only checks out the repo and runs helm lint/template.
+permissions:
+  contents: read
+
 jobs:
   chart:
     runs-on: ubuntu-latest

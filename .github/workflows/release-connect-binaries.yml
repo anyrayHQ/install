@@ -94,10 +94,19 @@ jobs:
         env:
           # Via env (not inline) so the dispatch input can't be shell-injected.
           MIN_VERSION: ${{ github.event.inputs.min_version }}
+          VERSION: ${{ steps.pkg.outputs.version }}
         run: |
           set -euo pipefail
           if [[ ! "$MIN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "min_version must be a plain semver (e.g. 0.11.72)" >&2
+            echo "::error::min_version must be a plain semver (e.g. 0.11.72)"
+            exit 1
+          fi
+          # A floor above the binaries in this very release can never be met:
+          # the updater refuses to install a version that would still leave the
+          # machine below it, so the release would be a silent no-op for exactly
+          # the opted-out seats it was cut to reach. Fail loudly instead.
+          if [[ "$(printf '%s\n%s\n' "$MIN_VERSION" "$VERSION" | sort -V | head -n1)" != "$MIN_VERSION" ]]; then
+            echo "::error::min_version ($MIN_VERSION) is above the version being released ($VERSION); no machine could satisfy it."
             exit 1
           fi
           jq -n --arg min "$MIN_VERSION" '{minVersion: $min}' > out/connect-update.json

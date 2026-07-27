@@ -16,6 +16,10 @@ on:
         description: 'anyray-connect npm version to compile (e.g. 0.3.0, or "latest")'
         required: true
         default: 'latest'
+      min_version:
+        description: 'MANDATORY release: install on machines below this version even if they opted out (blank = normal release)'
+        required: false
+        default: ''
 
 permissions:
   contents: write # create the release + upload assets
@@ -77,6 +81,27 @@ jobs:
           # Checksums so the installers can verify integrity before running.
           ( cd out && sha256sum * > SHA256SUMS )
           ls -lh out
+
+      - name: Mark the release mandatory (optional)
+        # anyray-connect self-updates on a ~30 min tick and reads this asset ONLY
+        # when the developer opted out (`anyray-connect update --auto off`). A
+        # minVersion above their installed version overrides that opt-out — the
+        # lever for a security or correctness fix, not for ordinary releases.
+        # Absent asset (the normal case) = the opt-out stands.
+        # Written after SHA256SUMS on purpose: that file stays a list of binaries,
+        # which is what connect.sh and the updater parse.
+        if: ${{ github.event.inputs.min_version != '' }}
+        env:
+          # Via env (not inline) so the dispatch input can't be shell-injected.
+          MIN_VERSION: ${{ github.event.inputs.min_version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$MIN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "min_version must be a plain semver (e.g. 0.11.72)" >&2
+            exit 1
+          fi
+          jq -n --arg min "$MIN_VERSION" '{minVersion: $min}' > out/connect-update.json
+          cat out/connect-update.json
 
       - name: Publish the release
         env:

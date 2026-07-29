@@ -144,10 +144,35 @@ jobs:
             echo "::error::APPLE_SIGNING_CERT_P12 holds no Developer ID Application identity"
             exit 1
           fi
+          # Bun-compiled binaries embed JavaScriptCore, which allocates JIT
+          # pages at startup; the hardened runtime (mandatory for notarization)
+          # forbids that without the allow-jit entitlement, and the signed
+          # binary then dies on EVERY machine with "Ran out of executable
+          # memory" the moment it launches. Caught by the local E2E rehearsal
+          # (signed + notarized real v0.11.81 binaries; allow-jit alone is the
+          # minimal sufficient set — keep it minimal, each extra entitlement
+          # weakens the hardening story the EDR/transparency docs sell).
+          cat > "$RUNNER_TEMP/entitlements.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-jit</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
           for bin in out/anyray-connect-darwin-*; do
             codesign --force --options runtime --timestamp \
+              --entitlements "$RUNNER_TEMP/entitlements.plist" \
               --identifier ai.anyray.connect --sign "$IDENTITY" "$bin"
             codesign --verify --strict --verbose=2 "$bin"
+            # The signed binary must still RUN — a signature that verifies but
+            # aborts at launch is exactly the failure the entitlement fixes.
+            # Only the arm64 slice can execute on the arm64 runner.
+            case "$bin" in
+              *darwin-arm64) "$bin" --help > /dev/null ;;
+            esac
           done
 
       - name: Notarize the darwin binaries

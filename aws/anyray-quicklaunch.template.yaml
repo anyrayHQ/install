@@ -76,7 +76,7 @@ Parameters:
       multiple with commas.
   ImageTag:
     Type: String
-    Default: v1.10.170
+    Default: v1.10.171
     AllowedPattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
     ConstraintDescription: Must be an immutable Anyray release tag such as v1.10.120.
     Description: >-

@@ -162,6 +162,11 @@ jobs:
           </dict>
           </plist>
           PLIST
+          # Artifact transfer strips file modes (actions/upload-artifact v4
+          # documents this) — the post-sign smoke run below would otherwise die
+          # with "Permission denied". Harmless for the published assets: both
+          # consumers (connect.sh, selfUpdate.ts) chmod after download.
+          chmod +x out/anyray-connect-darwin-*
           for bin in out/anyray-connect-darwin-*; do
             codesign --force --options runtime --timestamp \
               --entitlements "$RUNNER_TEMP/entitlements.plist" \

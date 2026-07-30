@@ -41,14 +41,18 @@ up() {
     echo "fleet already exists: $arn"
   fi
 
-  echo "waiting for the fleet to reach ACTIVE (Mac host allocation ~minutes)…"
+  echo "waiting for the fleet to be usable (Mac host allocation ~minutes)…"
   for _ in $(seq 1 60); do
     local st
     st="$(aws codebuild batch-get-fleets --region "$REGION" --names "$FLEET" \
       --query 'fleets[0].status.statusCode' --output text 2>/dev/null || echo PENDING)"
     echo "  fleet status: $st"
     case "$st" in
-      ACTIVE) break ;;
+      # ACTIVE = freshly warmed. PENDING_DELETION = a prior release's fleet
+      # inside its 24h-minimum window: CodeBuild keeps it "available to build
+      # projects while pending deletion", so a release within 24h reuses the
+      # same Mac at no additional host charge. Both are ready to build on.
+      ACTIVE|PENDING_DELETION) break ;;
       CREATE_FAILED|UPDATE_ROLLBACK_FAILED|DELETING) echo "::error::fleet entered $st"; exit 1 ;;
     esac
     sleep 20

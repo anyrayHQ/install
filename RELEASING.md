@@ -75,3 +75,23 @@ The optional `min_version` dispatch input publishes `connect-update.json`
 (`{"minVersion": …}`) which overrides developers' auto-update opt-out — a lever
 for security/correctness fixes only. See the comment on the *Mark the release
 mandatory* step.
+
+## CI runners
+
+The release workflow runs on **self-hosted AWS CodeBuild runners** (same pattern as the
+monorepo's CI), not GitHub-hosted ones — created 2026-07-30 because org-level GitHub billing
+blocks hosted runners:
+
+| Job | Runner | CodeBuild project (eu-central-1) |
+| --- | --- | --- |
+| build, package-linux, release | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`, MEDIUM) | `anyray-install-runner` |
+| sign-windows | Windows Server 2022 (`windows-base:2022-1.0`, MEDIUM) | `anyray-install-runner-win` |
+| sign-macos | **GitHub-hosted `macos-latest`** — the one exception | — |
+
+Both projects are webhook-driven (`WORKFLOW_JOB_QUEUED`), authenticate through the account's
+CodeConnections GitHub connection, and share the `anyray-gha-runner-codebuild` service role.
+macOS cannot run on CodeBuild without a reserved EC2 Mac fleet (24-hour-minimum billing per
+host under Apple's licensing) — a standing cost decision, deliberately not taken. Until org
+GitHub billing is restored, dispatch releases with `skip_macos_signing: true` to publish
+unsigned darwin binaries (the pre-signing status quo); signed darwin releases resume the
+moment hosted macOS runners can start again.

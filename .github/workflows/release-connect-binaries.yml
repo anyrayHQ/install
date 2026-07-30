@@ -29,13 +29,18 @@ on:
         description: 'MANDATORY release: install on machines below this version even if they opted out (blank = normal release)'
         required: false
         default: ''
+      skip_macos_signing:
+        description: 'Skip the macOS sign+notarize job (publishes unsigned darwin binaries — the pre-signing status quo). Escape hatch while GitHub-hosted macOS runners are unavailable (org billing): every other job runs on self-hosted CodeBuild.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     outputs:
       version: ${{ steps.pkg.outputs.version }}
     steps:
@@ -103,6 +108,13 @@ jobs:
   # binaries pass through byte-identical.
   sign-macos:
     needs: build
+    # Deliberately the one job left on a GitHub-HOSTED runner: codesign +
+    # notarytool need macOS, and CodeBuild only offers macOS via a reserved
+    # EC2 Mac fleet (24h-minimum billing per Apple's licensing — a standing
+    # cost, not taken unilaterally). While org billing blocks hosted runners,
+    # dispatch with skip_macos_signing=true to release unsigned darwin
+    # binaries (the pre-signing status quo).
+    if: ${{ !inputs.skip_macos_signing }}
     runs-on: macos-latest
     env:
       # GitHub Actions can't read `secrets.*` in a step `if:` — map the secrets
@@ -224,7 +236,7 @@ jobs:
   # configured; otherwise it passes through byte-identical.
   sign-windows:
     needs: build
-    runs-on: windows-latest
+    runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
     env:
       # Same pattern as sign-macos: secrets into env, gate on `env.X != ''`.
       WINDOWS_SIGNING_CERT_PFX: ${{ secrets.WINDOWS_SIGNING_CERT_PFX }}
@@ -242,8 +254,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $pfx = Join-Path $env:RUNNER_TEMP 'signing-cert.pfx'
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT_PFX))
-          # signtool ships with the Windows SDK on the hosted runners; take the
-          # newest x64 build.
+          # signtool ships with the Windows SDK. NOTE: on the CodeBuild
+          # windows-base image the SDK may be absent — when the Windows cert is
+          # provisioned and this step first goes live, it may need a pinned
+          # SDK/choco install step above. Inert until then (secret-gated).
           $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
             Where-Object { $_.FullName -like '*\x64\*' } |
             Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
@@ -271,7 +285,7 @@ jobs:
   # public key ships alongside them.
   package-linux:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     env:
       # Same pattern as sign-macos: secrets into env, gate on `env.X != ''`.
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
@@ -347,10 +361,26 @@ jobs:
 
   release:
     needs: [build, sign-macos, sign-windows, package-linux]
-    runs-on: ubuntu-latest
+    # sign-macos may be legitimately SKIPPED (skip_macos_signing); a plain
+    # `needs` would skip this job too. Everything else must have succeeded.
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.sign-macos.result) }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: write # create the release + upload assets
     steps:
+      # The CodeBuild AL2 runner image ships no gh CLI (hosted ubuntu does) —
+      # install it pinned by version + sha256, same discipline as nfpm below.
+      - name: Install gh CLI
+        run: |
+          set -euo pipefail
+          V=2.76.1
+          SHA=18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
+          curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v${V}/gh_${V}_linux_amd64.tar.gz"
+          echo "${SHA}  /tmp/gh.tgz" | sha256sum -c -
+          tar -xzf /tmp/gh.tgz -C /tmp
+          install -m 0755 "/tmp/gh_${V}_linux_amd64/bin/gh" /usr/local/bin/gh
+          gh --version
+
       # gh release create needs a git checkout to resolve the repo + create the tag.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 

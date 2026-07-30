@@ -76,8 +76,6 @@ spec:
             - name: ANYRAY_CONTENT_KEY
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_CONTENT_KEY" "context" .) | nindent 16 }}
-            - name: ANYRAY_CONTENT_MODE
-              value: {{ .Values.gateway.contentMode | quote }}
             - name: ANYRAY_ALLOW_PLAINTEXT
               value: {{ .Values.gateway.allowPlaintext | quote }}
             - name: ANYRAY_ADMIN_TOKEN

@@ -267,6 +267,9 @@ if [ "$K8S" -eq 0 ]; then
   # Reconcile: add only missing vars (existing values untouched).
   add_if_missing ANYRAY_OPTIMIZER_TOKEN          "$(hex 32)"
   add_if_missing ANYRAY_CONTENT_KEY              "$(hex 32)"
+  # Feeds the OPTIMIZER only — the gateway's content mode is set in the console
+  # and stored in the shared database. This still governs BYO /v1/record writes
+  # and attach mode, which run without a gateway.
   add_if_missing ANYRAY_CONTENT_MODE             "encrypted"
   add_if_missing ANYRAY_ALLOW_PLAINTEXT          "false"
   add_if_missing ANYRAY_ADMIN_TOKEN              "ar-adm-$(hex 16)"

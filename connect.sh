@@ -66,14 +66,23 @@ mv -f "$dl" "$bin" || err "could not install anyray-connect to ${bin}"
 chmod +x "$bin"
 
 # Reconnect stdin: this script arrived over a pipe (curl | sh), so the prompts
-# would otherwise see EOF. Dup a terminal fd we already hold rather than open
-# /dev/tty — the compiled binary's readline never receives input on the /dev/tty
-# clone device, and the prompt then eats every keystroke, Ctrl+C included.
-# No terminal on any fd means it can't prompt at all, so auto-confirm.
+# would otherwise see EOF. Not `< /dev/tty` — the compiled binary's readline
+# never receives input on the clone device, and the prompt then eats every
+# keystroke, Ctrl+C included. Not a bare dup either: a terminal can be open
+# write-only (`… > log 2>/dev/tty`), which /dev/fd rejects and a dup doesn't.
+# Probing a copy keeps the probe's own `2>/dev/null` off the fd it tests.
+tty_fd=
 if [ -t 1 ]; then
-  exec "$bin" "$@" 0<&1
-elif [ -t 2 ]; then
-  exec "$bin" "$@" 0<&2
+  exec 8>&1
+  if (exec 0</dev/fd/8) 2>/dev/null; then tty_fd=8; fi
+fi
+if [ -z "$tty_fd" ] && [ -t 2 ]; then
+  exec 9>&2
+  if (exec 0</dev/fd/9) 2>/dev/null; then tty_fd=9; fi
+fi
+
+if [ -n "$tty_fd" ]; then
+  exec "$bin" "$@" 0</dev/fd/"$tty_fd"
 else
   exec "$bin" "$@" --yes
 fi

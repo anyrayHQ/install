@@ -140,6 +140,10 @@ pass (dict "component" <name> "context" .) and a non-empty .Values.<name>.<field
 wins over the global .Values.<field>; unset falls back to the global. Called with
 the bare root context (.) it emits the global values only. The component blocks
 that carry overrides are gateway / optimizer / proxy / postgres.
+
+terminationGracePeriodSeconds resolves the same way but keys off hasKey rather
+than truthiness, so an explicit component-level 0 is honoured instead of falling
+back to the global (Go templates treat 0 as empty).
 */}}
 {{- define "anyray.podSpecCommonNoSecurity" -}}
 {{- $context := . -}}
@@ -153,7 +157,14 @@ that carry overrides are gateway / optimizer / proxy / postgres.
 {{- $tolerations := $overrides.tolerations | default $context.Values.tolerations -}}
 {{- $topologySpreadConstraints := $overrides.topologySpreadConstraints | default $context.Values.topologySpreadConstraints -}}
 {{- $priorityClassName := $overrides.priorityClassName | default $context.Values.priorityClassName -}}
+{{- $terminationGrace := $context.Values.terminationGracePeriodSeconds -}}
+{{- if hasKey $overrides "terminationGracePeriodSeconds" -}}
+{{- $terminationGrace = $overrides.terminationGracePeriodSeconds -}}
+{{- end -}}
 serviceAccountName: {{ include "anyray.serviceAccountName" $context }}
+{{- if not (kindIs "invalid" $terminationGrace) }}
+terminationGracePeriodSeconds: {{ int $terminationGrace }}
+{{- end }}
 {{- with $context.Values.image.pullSecrets }}
 imagePullSecrets:
   {{- toYaml . | nindent 2 }}
@@ -203,6 +214,64 @@ Common container security context.
 securityContext:
   {{- toYaml . | nindent 2 }}
 {{- end }}
+{{- end }}
+
+{{/*
+Container lifecycle preStop hook. Holds the pod open for preStopDrainSeconds
+BEFORE SIGTERM, covering the window where Kubernetes has begun terminating the
+pod but its removal from the Service endpoints has not yet reached every
+kube-proxy / nginx upstream. Without the pause those in-flight requests land on
+a process that is already shutting down and surface to the caller as a reset
+connection rather than a retryable response.
+
+Emits nothing at 0 (or nil), so the hook can be switched off. Per-component
+overridable via .Values.<component>.preStopDrainSeconds — keyed off hasKey so an
+explicit 0 is honoured.
+
+Uses `sleep` rather than the native preStop `sleep:` action because that field
+requires Kubernetes >= 1.29 and this chart declares no kubeVersion floor. All
+three runtime images carry a full userland — the `FROM scratch` final stages
+copy one in from their assemble stage — so /bin/sleep is present in each.
+*/}}
+{{- define "anyray.preStopDrain" -}}
+{{- $context := . -}}
+{{- $overrides := dict -}}
+{{- if hasKey . "context" -}}
+{{- $context = .context -}}
+{{- $overrides = (index $context.Values .component | default dict) -}}
+{{- end -}}
+{{- $seconds := $context.Values.preStopDrainSeconds -}}
+{{- if hasKey $overrides "preStopDrainSeconds" -}}
+{{- $seconds = $overrides.preStopDrainSeconds -}}
+{{- end -}}
+{{- if and (not (kindIs "invalid" $seconds)) (gt (int $seconds) 0) -}}
+lifecycle:
+  preStop:
+    exec:
+      command: ["sleep", "{{ int $seconds }}"]
+{{- end -}}
+{{- end }}
+
+{{/*
+Deployment minReadySeconds — how long a new pod must stay Ready before the
+rollout treats it as available, so a pod that passes one probe and then crashes
+cannot retire the previous version. Per-component overridable; explicit 0 is
+honoured (hasKey, not truthiness).
+*/}}
+{{- define "anyray.minReadySeconds" -}}
+{{- $context := . -}}
+{{- $overrides := dict -}}
+{{- if hasKey . "context" -}}
+{{- $context = .context -}}
+{{- $overrides = (index $context.Values .component | default dict) -}}
+{{- end -}}
+{{- $seconds := $context.Values.minReadySeconds -}}
+{{- if hasKey $overrides "minReadySeconds" -}}
+{{- $seconds = $overrides.minReadySeconds -}}
+{{- end -}}
+{{- if not (kindIs "invalid" $seconds) -}}
+minReadySeconds: {{ int $seconds }}
+{{- end -}}
 {{- end }}
 
 {{/*

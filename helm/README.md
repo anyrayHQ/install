@@ -129,6 +129,54 @@ kubectl rollout status deployment -n "$ANYRAY_NAMESPACE" \
   -l app.kubernetes.io/instance=anyray --timeout=10m
 ```
 
+### Rollout behaviour and downtime
+
+**With the default values an upgrade is not seamless, by construction.** Bundled
+persistence puts the gateway and optimizer on a `ReadWriteOnce` PVC, which one node
+must release before the replacement pod can mount it, so both Deployments use
+`strategy: Recreate`: every old pod stops, and only then does a new one start.
+Callers get connection failures through the proxy for as long as the replacement
+takes to boot and pass its readiness probe. No setting makes a rolling update
+possible while a single-attach volume is in play.
+
+For a genuinely gap-free roll, take the components off the PVC — the chart then
+switches them to `RollingUpdate` with `maxUnavailable` held at zero, so a
+replacement is Ready before any old pod is retired (this holds even at one
+replica, since the strategy surges a second pod first):
+
+```yaml
+gateway:
+  persistence:
+    enabled: false
+  replicas: 2
+optimizer:
+  persistence:
+    enabled: false
+  replicas: 2
+```
+
+Read the trade-off in `## v1 limitations` below first: `emptyDir` today means any
+gateway state still kept in files — routing config and the content-mode settings —
+resets when a pod is replaced. Everything security-relevant (client keys, provider
+keys, user caps, model aliases, the audit log) already lives in Postgres and is
+unaffected.
+
+Independent of the strategy, three values shape how termination is handled, and
+each is overridable per component:
+
+| Value | Default | What it does |
+| --- | --- | --- |
+| `preStopDrainSeconds` | `5` | Keeps a pod serving after termination starts but before SIGTERM, so requests stop arriving before the process stops listening. On the `Recreate` path this also lengthens the gap, since nothing starts until the old pod is gone — set `0` to trade in-flight requests for a shorter window. |
+| `terminationGracePeriodSeconds` | `45` | Budget from "terminating" to SIGKILL. Must exceed `preStopDrainSeconds` plus the gateway's own drain of in-flight requests (`ANYRAY_SHUTDOWN_DRAIN_MS`, default 20000), or streams are cut mid-response. A ceiling, not a delay. |
+| `minReadySeconds` | `10` | How long a new pod must stay Ready before the rollout counts it available, so a pod that passes one probe and then crashes cannot retire the previous version. |
+
+A `PodDisruptionBudget` (`podDisruptionBudget.maxUnavailable`, default `1`) is
+created for each Deployment that runs two or more pods, capping how many pods a
+node drain or autoscaler scale-down may remove at once. It is deliberately not
+created for a single-replica workload: such a budget could never allow its only
+pod to be evicted, and `kubectl drain` would block indefinitely on a node upgrade.
+At the default `replicas: 1` that means only the proxy is covered.
+
 ## Billing
 
 Billing is required. The chart always enables content-free usage metering.
@@ -363,10 +411,13 @@ the gateway alone silently degrades the optimizer to in-memory stash
   config, spend and audit logs persist across pod restarts and upgrades (the PVCs
   also survive `helm uninstall` via a `helm.sh/resource-policy: keep` annotation).
   The trade-off: the volumes are `ReadWriteOnce`, so these Deployments use a
-  `Recreate` strategy (brief downtime on upgrade) and must stay at `replicas: 1` —
-  the chart fails fast if you raise replicas with persistence enabled. Scaling
-  beyond one replica requires moving gateway state out of files (planned follow-up).
-  Set `gateway.persistence.enabled: false` to fall back to ephemeral `emptyDir`.
+  `Recreate` strategy — downtime on every upgrade, not merely a risk of it — and
+  must stay at `replicas: 1`; the chart fails fast if you raise replicas with
+  persistence enabled. Scaling beyond one replica requires moving gateway state out
+  of files (planned follow-up). Set `gateway.persistence.enabled: false` to fall
+  back to ephemeral `emptyDir` and get a gap-free `RollingUpdate`, at the cost of
+  resetting the state still held in files — see
+  [Rollout behaviour and downtime](#rollout-behaviour-and-downtime).
 - **Single-replica bundled Postgres.** The bundled Postgres is a `replicas: 1`
   StatefulSet — adequate for most orgs, but not HA. Use the external-Postgres
   values above for a managed cloud equivalent.

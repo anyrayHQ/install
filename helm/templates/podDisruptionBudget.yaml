@@ -8,8 +8,10 @@ Deployment's strategy instead. Without a budget the eviction API is free to take
 every pod of a workload at once, so a routine node roll can produce the same
 outage an upgrade does.
 
-A budget is rendered only for a workload actually running two or more pods
-(autoscaling.enabled, or replicas > 1). That skip is deliberate rather than an
+A budget is rendered only for a workload whose FLOOR is two or more pods —
+autoscaling.minReplicas when the HPA is on, replicas otherwise. Keying off
+autoscaling.enabled alone was wrong: an HPA with minReplicas: 1 can sit at one
+pod, where a budget protects nothing. That skip is deliberate rather than an
 oversight: over a single replica any budget that protects anything makes the only
 pod permanently unevictable, and `kubectl drain` then blocks forever instead of
 completing the node upgrade. At the default gateway/optimizer replicas: 1 this
@@ -19,7 +21,8 @@ is the one workload covered out of the box.
 {{- if .Values.podDisruptionBudget.enabled }}
 {{- range $component := list "gateway" "optimizer" "proxy" }}
 {{- $cfg := index $.Values $component }}
-{{- if or $cfg.autoscaling.enabled (gt (int $cfg.replicas) 1) }}
+{{- $floor := ternary (int $cfg.autoscaling.minReplicas) (int $cfg.replicas) $cfg.autoscaling.enabled }}
+{{- if gt $floor 1 }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

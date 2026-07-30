@@ -244,7 +244,18 @@ copy one in from their assemble stage — so /bin/sleep is present in each.
 {{- if hasKey $overrides "preStopDrainSeconds" -}}
 {{- $seconds = $overrides.preStopDrainSeconds -}}
 {{- end -}}
+{{- $grace := $context.Values.terminationGracePeriodSeconds -}}
+{{- if hasKey $overrides "terminationGracePeriodSeconds" -}}
+{{- $grace = $overrides.terminationGracePeriodSeconds -}}
+{{- end -}}
 {{- if and (not (kindIs "invalid" $seconds)) (gt (int $seconds) 0) -}}
+{{- /* The pre-stop sleep is spent INSIDE the termination budget, so a pause at
+or above it means the kubelet SIGKILLs the container before the app is ever
+signalled — every in-flight request reset, and the app's own drain never runs.
+Fail the render rather than ship that silently. */ -}}
+{{- if and (not (kindIs "invalid" $grace)) (ge (int $seconds) (int $grace)) -}}
+{{- fail (printf "preStopDrainSeconds (%d) must be less than terminationGracePeriodSeconds (%d): the pre-stop pause is spent inside the termination budget, so the container would be SIGKILLed before it is ever sent SIGTERM" (int $seconds) (int $grace)) -}}
+{{- end -}}
 lifecycle:
   preStop:
     exec:

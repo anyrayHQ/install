@@ -129,6 +129,56 @@ kubectl rollout status deployment -n "$ANYRAY_NAMESPACE" \
   -l app.kubernetes.io/instance=anyray --timeout=10m
 ```
 
+### Rollout behaviour and downtime
+
+**With the default values an upgrade is not seamless, by construction.** Bundled
+persistence puts the gateway and optimizer on a `ReadWriteOnce` PVC, which one node
+must release before the replacement pod can mount it, so both Deployments use
+`strategy: Recreate`: every old pod stops, and only then does a new one start.
+Callers get connection failures through the proxy for as long as the replacement
+takes to boot and pass its readiness probe. No setting makes a rolling update
+possible while a single-attach volume is in play.
+
+For a genuinely gap-free roll, take the components off the PVC — the chart then
+switches them to `RollingUpdate` with `maxUnavailable` held at zero, so a
+replacement is Ready before any old pod is retired (this holds even at one
+replica, since the strategy surges a second pod first):
+
+```yaml
+gateway:
+  persistence:
+    enabled: false
+  replicas: 2
+optimizer:
+  persistence:
+    enabled: false
+  replicas: 2
+```
+
+Read the trade-off in `## v1 limitations` below first: `emptyDir` means the gateway
+state still kept in files resets when a pod is replaced — the runtime settings JSON
+(content-capture mode, heartbeat tier), the entitlement-lease cache, the optimizer's
+runtime config, and for now the default routing config. Everything
+security-relevant — client keys, provider keys, per-user caps, model aliases, team
+policy, the audit trail — already lives in Postgres and is unaffected, as are spend
+and trace history.
+
+Independent of the strategy, three values shape how termination is handled, and
+each is overridable per component:
+
+| Value | Default | What it does |
+| --- | --- | --- |
+| `preStopDrainSeconds` | `5` | Keeps a pod serving after termination starts but before SIGTERM, so requests stop arriving before the process stops listening. On the `Recreate` path this also lengthens the gap, since nothing starts until the old pod is gone — set `0` to trade in-flight requests for a shorter window. |
+| `terminationGracePeriodSeconds` | `45` | Budget from "terminating" to SIGKILL. Must exceed `preStopDrainSeconds` plus the gateway's own drain of in-flight requests (`ANYRAY_SHUTDOWN_DRAIN_MS`, default 20000), or streams are cut mid-response. A ceiling, not a delay. |
+| `minReadySeconds` | `10` | How long a new pod must stay Ready before the rollout counts it available, so a pod that passes one probe and then crashes cannot retire the previous version. |
+
+A `PodDisruptionBudget` (`podDisruptionBudget.maxUnavailable`, default `1`) is
+created for each Deployment that runs two or more pods, capping how many pods a
+node drain or autoscaler scale-down may remove at once. It is deliberately not
+created for a single-replica workload: such a budget could never allow its only
+pod to be evicted, and `kubectl drain` would block indefinitely on a node upgrade.
+At the default `replicas: 1` that means only the proxy is covered.
+
 ## Billing
 
 Billing is required. The chart always enables content-free usage metering.
@@ -359,14 +409,23 @@ the gateway alone silently degrades the optimizer to in-memory stash
 
 ## v1 limitations to be aware of
 
-- **Gateway and optimizer state is on single-attach PVCs.** Provider keys, routing
-  config, spend and audit logs persist across pod restarts and upgrades (the PVCs
-  also survive `helm uninstall` via a `helm.sh/resource-policy: keep` annotation).
+- **Gateway and optimizer state is on single-attach PVCs — but much less of it than
+  it used to be.** Everything security- or spend-relevant already lives in the shared
+  Postgres rather than on these volumes: provider keys, client keys, per-user caps,
+  model aliases, team policy, the admin/GDPR audit trail, and of course the spend and
+  trace history. **Disabling persistence loses none of that.** What is still
+  file-backed is the runtime settings JSON (content-capture mode, heartbeat tier), the
+  entitlement-lease cache, the optimizer's runtime config, and the default routing
+  config — the last of which moves to Postgres in the next gateway release. The PVCs
+  also survive `helm uninstall`, via a `helm.sh/resource-policy: keep` annotation.
   The trade-off: the volumes are `ReadWriteOnce`, so these Deployments use a
-  `Recreate` strategy (brief downtime on upgrade) and must stay at `replicas: 1` —
-  the chart fails fast if you raise replicas with persistence enabled. Scaling
-  beyond one replica requires moving gateway state out of files (planned follow-up).
-  Set `gateway.persistence.enabled: false` to fall back to ephemeral `emptyDir`.
+  `Recreate` strategy — downtime on every upgrade, not merely a risk of it — and
+  must stay at `replicas: 1`; the chart fails fast if you raise replicas with
+  persistence enabled. Scaling beyond one replica requires moving the rest of that
+  file-backed state into Postgres (in progress). Set
+  `gateway.persistence.enabled: false` to fall back to ephemeral `emptyDir` and get a
+  gap-free `RollingUpdate`, at the cost of resetting the state still held in files —
+  see [Rollout behaviour and downtime](#rollout-behaviour-and-downtime).
 - **Single-replica bundled Postgres.** The bundled Postgres is a `replicas: 1`
   StatefulSet — adequate for most orgs, but not HA. Use the external-Postgres
   values above for a managed cloud equivalent.

@@ -1,0 +1,61 @@
+{{- /*
+PodDisruptionBudgets for the gateway, optimizer and proxy Deployments.
+
+These bound VOLUNTARY disruption only — a `kubectl drain` for a node upgrade, a
+cluster-autoscaler scale-down, a machine-pool roll. They do not apply to node
+failure, and they do not apply to `helm upgrade`, which is governed by each
+Deployment's strategy instead. Without a budget the eviction API is free to take
+every pod of a workload at once, so a routine node roll can produce the same
+outage an upgrade does.
+
+A budget is rendered only for a workload whose FLOOR is two or more pods —
+autoscaling.minReplicas when the HPA is on, replicas otherwise. Keying off
+autoscaling.enabled alone was wrong: an HPA with minReplicas: 1 can sit at one
+pod, where a budget protects nothing. That skip is deliberate rather than an
+oversight: over a single replica any budget that protects anything makes the only
+pod permanently unevictable, and `kubectl drain` then blocks forever instead of
+completing the node upgrade. At the default gateway/optimizer replicas: 1 this
+file therefore emits nothing for them, and the proxy — two replicas by default —
+is the one workload covered out of the box.
+*/}}
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- range $component := list "gateway" "optimizer" "proxy" }}
+{{- $cfg := index $.Values $component }}
+{{- $floor := ternary (int $cfg.autoscaling.minReplicas) (int $cfg.replicas) $cfg.autoscaling.enabled }}
+{{- if gt $floor 1 }}
+{{- /* A budget that permits evicting the whole floor is not a budget: the
+eviction API would be free to take every serving pod at once, which is exactly
+the outage this file exists to prevent. Fail loudly rather than render a
+reassuring no-op. */ -}}
+{{- $mu := $.Values.podDisruptionBudget.maxUnavailable }}
+{{- if hasSuffix "%" (toString $mu) }}
+{{- /* Kubernetes accepts a percentage here, and `int` on "100%" parses to 0 —
+which would sail past a numeric comparison and then be emitted verbatim. Compare
+the percentage on its own terms. */ -}}
+{{- /* Kubernetes rounds a PDB maxUnavailable percentage UP, so a value well
+under 100% can still resolve to the entire floor — 99% of 2 replicas is 2. Check
+the effective pod count, not the percentage. */ -}}
+{{- $pct := int (trimSuffix "%" (toString $mu)) }}
+{{- $effective := int (ceil (divf (mulf $pct $floor) 100.0)) }}
+{{- if ge $effective $floor }}
+{{- fail (printf "podDisruptionBudget.maxUnavailable (%s) resolves to %d of the %s replica floor (%d) — Kubernetes rounds the percentage up — so a voluntary disruption may evict every serving pod at once" (toString $mu) $effective $component $floor) }}
+{{- end }}
+{{- else if ge (int $mu) $floor }}
+{{- fail (printf "podDisruptionBudget.maxUnavailable (%d) must be less than the %s replica floor (%d), or a voluntary disruption may evict every serving pod at once" (int $mu) $component $floor) }}
+{{- end }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "anyray.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "anyray.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  maxUnavailable: {{ $.Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" $component "context" $) | nindent 6 }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -155,11 +155,13 @@ optimizer:
   replicas: 2
 ```
 
-Read the trade-off in `## v1 limitations` below first: `emptyDir` today means any
-gateway state still kept in files — routing config and the content-mode settings —
-resets when a pod is replaced. Everything security-relevant (client keys, provider
-keys, user caps, model aliases, the audit log) already lives in Postgres and is
-unaffected.
+Read the trade-off in `## v1 limitations` below first: `emptyDir` means the gateway
+state still kept in files resets when a pod is replaced — the runtime settings JSON
+(content-capture mode, heartbeat tier), the entitlement-lease cache, the optimizer's
+runtime config, and for now the default routing config. Everything
+security-relevant — client keys, provider keys, per-user caps, model aliases, team
+policy, the audit trail — already lives in Postgres and is unaffected, as are spend
+and trace history.
 
 Independent of the strategy, three values shape how termination is handled, and
 each is overridable per component:
@@ -407,17 +409,23 @@ the gateway alone silently degrades the optimizer to in-memory stash
 
 ## v1 limitations to be aware of
 
-- **Gateway and optimizer state is on single-attach PVCs.** Provider keys, routing
-  config, spend and audit logs persist across pod restarts and upgrades (the PVCs
-  also survive `helm uninstall` via a `helm.sh/resource-policy: keep` annotation).
+- **Gateway and optimizer state is on single-attach PVCs — but much less of it than
+  it used to be.** Everything security- or spend-relevant already lives in the shared
+  Postgres rather than on these volumes: provider keys, client keys, per-user caps,
+  model aliases, team policy, the admin/GDPR audit trail, and of course the spend and
+  trace history. **Disabling persistence loses none of that.** What is still
+  file-backed is the runtime settings JSON (content-capture mode, heartbeat tier), the
+  entitlement-lease cache, the optimizer's runtime config, and the default routing
+  config — the last of which moves to Postgres in the next gateway release. The PVCs
+  also survive `helm uninstall`, via a `helm.sh/resource-policy: keep` annotation.
   The trade-off: the volumes are `ReadWriteOnce`, so these Deployments use a
   `Recreate` strategy — downtime on every upgrade, not merely a risk of it — and
   must stay at `replicas: 1`; the chart fails fast if you raise replicas with
-  persistence enabled. Scaling beyond one replica requires moving gateway state out
-  of files (planned follow-up). Set `gateway.persistence.enabled: false` to fall
-  back to ephemeral `emptyDir` and get a gap-free `RollingUpdate`, at the cost of
-  resetting the state still held in files — see
-  [Rollout behaviour and downtime](#rollout-behaviour-and-downtime).
+  persistence enabled. Scaling beyond one replica requires moving the rest of that
+  file-backed state into Postgres (in progress). Set
+  `gateway.persistence.enabled: false` to fall back to ephemeral `emptyDir` and get a
+  gap-free `RollingUpdate`, at the cost of resetting the state still held in files —
+  see [Rollout behaviour and downtime](#rollout-behaviour-and-downtime).
 - **Single-replica bundled Postgres.** The bundled Postgres is a `replicas: 1`
   StatefulSet — adequate for most orgs, but not HA. Use the external-Postgres
   values above for a managed cloud equivalent.

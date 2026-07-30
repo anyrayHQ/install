@@ -65,15 +65,15 @@ mkdir -p "$INSTALL_DIR" || err "could not create ${INSTALL_DIR}"
 mv -f "$dl" "$bin" || err "could not install anyray-connect to ${bin}"
 chmod +x "$bin"
 
-# Reconnect stdin to the terminal: this script arrived over a pipe (curl | sh),
-# so without this the binary's confirm prompt would see EOF. Test that /dev/tty
-# is actually openable — it exists as a device node even with no controlling
-# terminal (CI, sandboxes), where opening it fails — and fall back to running
-# without it. In a real terminal the dev gets the normal confirm prompt; with no
-# terminal the binary can't prompt, so we auto-confirm with --yes (the dev
-# invoked the installer explicitly; harmless for --help/--dry-run/--revert).
-if { : < /dev/tty; } 2>/dev/null; then
-  exec "$bin" "$@" < /dev/tty
+# Reconnect stdin: this script arrived over a pipe (curl | sh), so the prompts
+# would otherwise see EOF. Dup a terminal fd we already hold rather than open
+# /dev/tty — the compiled binary's readline never receives input on the /dev/tty
+# clone device, and the prompt then eats every keystroke, Ctrl+C included.
+# No terminal on any fd means it can't prompt at all, so auto-confirm.
+if [ -t 1 ]; then
+  exec "$bin" "$@" 0<&1
+elif [ -t 2 ]; then
+  exec "$bin" "$@" 0<&2
 else
   exec "$bin" "$@" --yes
 fi

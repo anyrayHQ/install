@@ -14,23 +14,34 @@ on:
 
 permissions:
   contents: read
-  packages: read
 
 jobs:
   smoke-attach:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Log in to GHCR
-        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Generate secrets
         run: ./setup.sh --attach
       - name: Start the attach stack
         env:
-          ANYRAY_OPTIMIZER_IMAGE: ghcr.io/anyrayhq/optimizer:latest
-          ANYRAY_PROXY_IMAGE: ghcr.io/anyrayhq/proxy:latest
+          # ECR Public pulls are anonymous — no registry login needed. See
+          # smoke.yml for why this is public.ecr.aws/anyray, not GHCR. Retry
+          # with backoff: anonymous ECR Public pulls share a low per-IP rate
+          # limit across every GitHub-hosted runner, so `toomanyrequests` is
+          # expected occasionally, not a real failure.
+          ANYRAY_OPTIMIZER_IMAGE: public.ecr.aws/anyray/optimizer:latest
+          ANYRAY_PROXY_IMAGE: public.ecr.aws/anyray/proxy:latest
           ANYRAY_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:17
-        run: docker compose -f docker-compose.attach.yml up -d --quiet-pull
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if docker compose -f docker-compose.attach.yml up -d --quiet-pull; then
+              exit 0
+            fi
+            echo "attempt $attempt failed (likely ECR Public anonymous pull rate limit) — backing off"
+            docker compose -f docker-compose.attach.yml down --remove-orphans
+            sleep $((attempt * 20))
+          done
+          echo "attach stack never started after 5 attempts"; exit 1
       - name: Wait for optimizer health
         run: |
           for _ in $(seq 1 30); do

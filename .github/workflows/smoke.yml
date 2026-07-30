@@ -27,12 +27,26 @@ jobs:
           # anyrayHQ/monorepo .github/workflows/publish-images.yml +
           # promote-ecr-channels.sh for how gateway/optimizer/proxy:latest gets
           # published on every prod promotion.
+          # Retry with backoff: anonymous ECR Public pulls share a low per-IP
+          # rate limit across every GitHub-hosted runner, so `toomanyrequests`
+          # is expected occasionally, not a real failure — and every service
+          # here has pull_policy: always, so a separate pre-pull step wouldn't
+          # shield this `up` from repulling anyway.
           ANYRAY_GATEWAY_IMAGE: public.ecr.aws/anyray/gateway:latest
           ANYRAY_OPTIMIZER_IMAGE: public.ecr.aws/anyray/optimizer:latest
           ANYRAY_PROXY_IMAGE: public.ecr.aws/anyray/proxy:latest
           ANYRAY_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:17
           ANYRAY_UPDATER_ENABLED: "false"
-        run: docker compose up -d --quiet-pull gateway optimizer proxy postgres
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if docker compose up -d --quiet-pull gateway optimizer proxy postgres; then
+              exit 0
+            fi
+            echo "attempt $attempt failed (likely ECR Public anonymous pull rate limit) — backing off"
+            docker compose down --remove-orphans
+            sleep $((attempt * 20))
+          done
+          echo "stack never started after 5 attempts"; exit 1
       - name: Wait for health
         run: |
           for _ in $(seq 1 30); do

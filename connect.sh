@@ -65,15 +65,24 @@ mkdir -p "$INSTALL_DIR" || err "could not create ${INSTALL_DIR}"
 mv -f "$dl" "$bin" || err "could not install anyray-connect to ${bin}"
 chmod +x "$bin"
 
-# Reconnect stdin to the terminal: this script arrived over a pipe (curl | sh),
-# so without this the binary's confirm prompt would see EOF. Test that /dev/tty
-# is actually openable — it exists as a device node even with no controlling
-# terminal (CI, sandboxes), where opening it fails — and fall back to running
-# without it. In a real terminal the dev gets the normal confirm prompt; with no
-# terminal the binary can't prompt, so we auto-confirm with --yes (the dev
-# invoked the installer explicitly; harmless for --help/--dry-run/--revert).
-if { : < /dev/tty; } 2>/dev/null; then
-  exec "$bin" "$@" < /dev/tty
+# Reconnect stdin: this script arrived over a pipe (curl | sh), so the prompts
+# would otherwise see EOF. Not `< /dev/tty` — the compiled binary's readline
+# never receives input on the clone device, and the prompt then eats every
+# keystroke, Ctrl+C included. Not a bare dup either: a terminal can be open
+# write-only (`… > log 2>/dev/tty`), which /dev/fd rejects and a dup doesn't.
+# Probing a copy keeps the probe's own `2>/dev/null` off the fd it tests.
+tty_fd=
+if [ -t 1 ]; then
+  exec 8>&1
+  if (exec 0</dev/fd/8) 2>/dev/null; then tty_fd=8; fi
+fi
+if [ -z "$tty_fd" ] && [ -t 2 ]; then
+  exec 9>&2
+  if (exec 0</dev/fd/9) 2>/dev/null; then tty_fd=9; fi
+fi
+
+if [ -n "$tty_fd" ]; then
+  exec "$bin" "$@" 0</dev/fd/"$tty_fd"
 else
   exec "$bin" "$@" --yes
 fi

@@ -43,6 +43,35 @@ deployment. The deployment should show as **Connected** at
 | `ANYRAY_CONTENT_KEY`           | `${{secret(64, "0123456789abcdef")}}` on gateway | 32-byte hex AES-256-GCM at-rest encryption key.                             |
 | `ANYRAY_OBSERVABILITY_DB_URL`  | `${{Postgres.*}}` refs          | Postgres URL for the content-free trace store (falls back to spend DB URL). |
 | `POSTGRES_PASSWORD`            | `${{secret()}}` on Postgres     | Never leaves Railway's environment.                                         |
+| `ANYRAY_CONTENT_MODE`          | `encrypted` on **optimizer**    | See "Content privacy" below. A default, not a lock — edit it at deploy time or after. |
+| `ANYRAY_ALLOW_PLAINTEXT`       | `false` on gateway              | Deploy gate for `plaintext`. The optimizer inherits it.                     |
+
+### Content privacy
+
+The **gateway's** content mode is set in the console (**Privacy** page) and stored
+in the shared database — there is no environment variable for it, so a change
+applies to every replica and there is one place to audit it. New deployments start
+on `encrypted`.
+
+`ANYRAY_CONTENT_MODE` on the **optimizer** service governs only the paths that run
+without a gateway in the loop: BYO `/v1/record` writes and attach-style use. The
+template ships `encrypted` as the default; it is an ordinary editable variable, not
+a fixed value.
+
+To capture content in plaintext (debugging only — it stores raw prompts and
+responses), BOTH are required, because plaintext is deliberately deploy-gated:
+
+```bash
+# on the gateway service
+ANYRAY_ALLOW_PLAINTEXT=true          # the optimizer inherits this
+# then, for the gateway: set the mode to plaintext on the console Privacy page
+# and, for the optimizer's gateway-less paths:
+ANYRAY_CONTENT_MODE=plaintext        # on the optimizer service
+```
+
+Without the gate, a `plaintext` mode degrades to `encrypted` (or to `off` when no
+content key is set) rather than storing raw content — the effective mode only ever
+degrades, never escalates.
 
 After generating public domains, redeploy or restart the gateway so Railway
 resolves the template's public-domain references. `ANYRAY_TRUST_PROXY` and

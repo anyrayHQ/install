@@ -23,6 +23,13 @@ is the one workload covered out of the box.
 {{- $cfg := index $.Values $component }}
 {{- $floor := ternary (int $cfg.autoscaling.minReplicas) (int $cfg.replicas) $cfg.autoscaling.enabled }}
 {{- if gt $floor 1 }}
+{{- /* A budget that permits evicting the whole floor is not a budget: the
+eviction API would be free to take every serving pod at once, which is exactly
+the outage this file exists to prevent. Fail loudly rather than render a
+reassuring no-op. */ -}}
+{{- if ge (int $.Values.podDisruptionBudget.maxUnavailable) $floor }}
+{{- fail (printf "podDisruptionBudget.maxUnavailable (%d) must be less than the %s replica floor (%d), or a voluntary disruption may evict every serving pod at once" (int $.Values.podDisruptionBudget.maxUnavailable) $component $floor) }}
+{{- end }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

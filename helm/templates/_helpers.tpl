@@ -256,6 +256,24 @@ Fail the render rather than ship that silently. */ -}}
 {{- if and (not (kindIs "invalid" $grace)) (ge (int $seconds) (int $grace)) -}}
 {{- fail (printf "preStopDrainSeconds (%d) must be less than terminationGracePeriodSeconds (%d): the pre-stop pause is spent inside the termination budget, so the container would be SIGKILLed before it is ever sent SIGTERM" (int $seconds) (int $grace)) -}}
 {{- end -}}
+{{- /* The pause is only half the budget: after SIGTERM the app drains its own
+in-flight requests. The gateway does that for ANYRAY_SHUTDOWN_DRAIN_MS, which an
+operator raises through extraEnv for long streaming completions — and raising it
+past the remaining budget puts SIGKILL back in the middle of the drain, which is
+the very thing terminationGracePeriodSeconds was set to prevent. Read the
+override back out of extraEnv and check the SUM. */ -}}
+{{- $drainMs := 0 -}}
+{{- range $env := ($overrides.extraEnv | default list) -}}
+{{- if eq (toString $env.name) "ANYRAY_SHUTDOWN_DRAIN_MS" -}}
+{{- $drainMs = int (toString $env.value) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (gt $drainMs 0) (not (kindIs "invalid" $grace)) -}}
+{{- $needed := add (int $seconds) (div (add $drainMs 999) 1000) -}}
+{{- if gt $needed (int $grace) -}}
+{{- fail (printf "preStopDrainSeconds (%ds) plus ANYRAY_SHUTDOWN_DRAIN_MS (%dms) needs %ds, which exceeds terminationGracePeriodSeconds (%ds): the kubelet would SIGKILL mid-drain and reset in-flight streams. Raise terminationGracePeriodSeconds to at least %d" (int $seconds) $drainMs $needed (int $grace) $needed) -}}
+{{- end -}}
+{{- end -}}
 lifecycle:
   preStop:
     exec:

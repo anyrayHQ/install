@@ -22,10 +22,27 @@ spec:
   {{- if and (not .Values.gateway.autoscaling.enabled) (gt (int .Values.gateway.replicas) 1) }}
   {{- fail "gateway.replicas > 1 needs gateway.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
   {{- end }}
-  # Recreate: the RWO volume must detach before the replacement pod can mount it
+  # Recreate: the RWO volume must detach before the replacement pod can mount it.
+  # This makes every upgrade a downtime window BY CONSTRUCTION — Recreate stops
+  # all old pods and only then starts new ones, so callers get connection
+  # failures through the proxy for as long as the replacement takes to boot and
+  # pass its readinessProbe. It is not a rolling update and cannot be made one
+  # while a single ReadWriteOnce volume is in play. For a seamless roll, set
+  # gateway.persistence.enabled=false to take the RollingUpdate branch below.
   strategy:
     type: Recreate
+  {{- else }}
+  # No RWO volume to detach, so a replacement can run alongside the outgoing pod:
+  # surge one new pod, wait for it to pass the readinessProbe, then retire an old
+  # one. Holding maxUnavailable at zero is the part that matters — it keeps the
+  # Service endpoint list non-empty for the whole rollout, even at one replica.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   {{- end }}
+  {{- include "anyray.minReadySeconds" (dict "component" "gateway" "context" .) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 6 }}
@@ -173,6 +190,12 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 10
+          # Runs BEFORE SIGTERM, so the pod is still serving while its removal
+          # from the Service endpoints propagates. Once SIGTERM lands the gateway
+          # marks itself down on `/` (503) and drains in-flight requests for
+          # ANYRAY_SHUTDOWN_DRAIN_MS; terminationGracePeriodSeconds has to cover
+          # this pause plus that drain, or the kubelet kills it mid-stream.
+          {{- include "anyray.preStopDrain" (dict "component" "gateway" "context" .) | nindent 10 }}
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
           volumeMounts:

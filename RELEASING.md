@@ -78,20 +78,34 @@ mandatory* step.
 
 ## CI runners
 
-The release workflow runs on **self-hosted AWS CodeBuild runners** (same pattern as the
-monorepo's CI), not GitHub-hosted ones — created 2026-07-30 because org-level GitHub billing
-blocks hosted runners:
+The release workflow runs on **self-hosted AWS CodeBuild runners** (org GitHub billing
+blocks GitHub-hosted runners). Two persistent Linux/Windows runner projects plus an
+**on-demand macOS fleet** created per release:
 
 | Job | Runner | CodeBuild project (eu-central-1) |
 | --- | --- | --- |
-| build, package-linux, release | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`, MEDIUM) | `anyray-install-runner` |
-| sign-windows | Windows Server 2022 (`windows-base:2022-1.0`, MEDIUM) | `anyray-install-runner-win` |
-| sign-macos | **GitHub-hosted `macos-latest`** — the one exception | — |
+| build, provision-mac, package-linux, release, teardown-mac | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`) | `anyray-install-runner` |
+| sign-windows | Windows Server 2022 | `anyray-install-runner-win` |
+| sign-macos | **on-demand** macOS (MAC_ARM, `mac2-m2.metal`) | `anyray-install-runner-mac` (ephemeral) |
 
-Both projects are webhook-driven (`WORKFLOW_JOB_QUEUED`), authenticate through the account's
-CodeConnections GitHub connection, and share the `anyray-gha-runner-codebuild` service role.
-macOS cannot run on CodeBuild without a reserved EC2 Mac fleet (24-hour-minimum billing per
-host under Apple's licensing) — a standing cost decision, deliberately not taken. Until org
-GitHub billing is restored, dispatch releases with `skip_macos_signing: true` to publish
-unsigned darwin binaries (the pre-signing status quo); signed darwin releases resume the
-moment hosted macOS runners can start again.
+**Why macOS is on-demand.** Bun-compiled binaries can only be Developer-ID-signed by Apple's
+own `codesign` (the Linux signers rcodesign and quill both mishandle Bun's x64 Mach-O — proven
+by E2E: the signature verifies but the binary won't launch). Apple's codesign needs macOS, and
+CodeBuild only offers macOS via a reserved-capacity EC2 Mac fleet that cannot scale below one
+instance (24-hour-minimum dedicated-host billing, ~$450/mo if left standing). So the release
+allocates a Mac **only for the signing run**: `provision-mac` creates the MAC_ARM fleet + an
+ephemeral runner project, `sign-macos` runs on it, and `teardown-mac` (always) deletes both.
+Net cost is one 24-hour-minimum Mac charge per release (~$15-16), never a standing bill. The
+lifecycle lives in `scripts/mac-fleet.sh` (`up`/`down`); the release workflow drives it via a
+scoped GitHub-OIDC role (`AWS_MAC_FLEET_ROLE_ARN` repo variable → `anyray-install-mac-fleet-ci`).
+
+Both persistent projects and the ephemeral mac project are webhook-driven
+(`WORKFLOW_JOB_QUEUED`) and **gated to the maintainer actor** (`ACTOR_ACCOUNT_ID` = 16443050) —
+required because the repo is public, so a fork-PR actor can never start a runner. Adding a
+release maintainer means extending that id in the webhook filters and `mac-fleet.sh`.
+
+Apple signing secrets (codesign path, all set): `APPLE_SIGNING_CERT_P12` +
+`APPLE_SIGNING_CERT_PASSWORD`, `APPLE_NOTARY_KEY` (base64 `.p8`), `APPLE_NOTARY_KEY_ID`,
+`APPLE_NOTARY_ISSUER_ID`. (`APPLE_SIGNING_CERT_PEM` was set for the abandoned rcodesign path and
+is unused.)
+

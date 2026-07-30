@@ -1,7 +1,7 @@
 name: Install smoke test
 
 # Installs Anyray exactly the way the README tells a human to, against the
-# published GHCR images, and probes the gateway + console + admin gate.
+# published ECR Public images, and probes the gateway + console + admin gate.
 on:
   push:
     branches: [main]
@@ -11,22 +11,25 @@ on:
 
 permissions:
   contents: read
-  packages: read
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Log in to GHCR
-        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Generate secrets
         run: ./setup.sh --connect adt_ci0000000000000000
       - name: Start the stack
         env:
-          ANYRAY_GATEWAY_IMAGE: ghcr.io/anyrayhq/gateway:latest
-          ANYRAY_OPTIMIZER_IMAGE: ghcr.io/anyrayhq/optimizer:latest
-          ANYRAY_PROXY_IMAGE: ghcr.io/anyrayhq/proxy:latest
+          # ECR Public pulls are anonymous — no registry login needed. `latest`
+          # is the documented testing-opt-in moving channel (customer default
+          # is the pinned Chart appVersion / ANYRAY_IMAGE_TAG); see
+          # anyrayHQ/monorepo .github/workflows/publish-images.yml +
+          # promote-ecr-channels.sh for how gateway/optimizer/proxy:latest gets
+          # published on every prod promotion.
+          ANYRAY_GATEWAY_IMAGE: public.ecr.aws/anyray/gateway:latest
+          ANYRAY_OPTIMIZER_IMAGE: public.ecr.aws/anyray/optimizer:latest
+          ANYRAY_PROXY_IMAGE: public.ecr.aws/anyray/proxy:latest
           ANYRAY_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:17
           ANYRAY_UPDATER_ENABLED: "false"
         run: docker compose up -d --quiet-pull gateway optimizer proxy postgres

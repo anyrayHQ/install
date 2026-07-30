@@ -29,6 +29,11 @@ on:
         description: 'MANDATORY release: install on machines below this version even if they opted out (blank = normal release)'
         required: false
         default: ''
+      dry_run:
+        description: 'Test run: build + sign + notarize + exercise the on-demand Mac fleet, but do NOT publish a GitHub release (no customer-facing change). Signed binaries are uploaded as a workflow artifact for inspection.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -389,9 +394,6 @@ jobs:
 
   release:
     needs: [build, sign-macos, sign-windows, package-linux]
-    # sign-macos may be legitimately SKIPPED (skip_macos_signing); a plain
-    # `needs` would skip this job too. Everything else must have succeeded.
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.sign-macos.result) }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: write # create the release + upload assets
@@ -472,6 +474,7 @@ jobs:
           cat assets/connect-update.json
 
       - name: Publish the release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
@@ -484,3 +487,13 @@ jobs:
             --title "anyray-connect ${VERSION} (binaries)" \
             --notes "Standalone \`anyray-connect\` ${VERSION} executables for the zero-install \`connect.sh\` / \`connect.ps1\` installers. No Node required. Built from the public npm package." \
             assets/*
+
+      # dry_run: prove the whole build->sign->notarize->fleet path without a
+      # customer-facing release. The signed, checksummed asset set is inspectable.
+      - name: Upload assembled assets (dry run — not published)
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dry-run-release-assets
+          path: assets/
+          if-no-files-found: error

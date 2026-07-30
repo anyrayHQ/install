@@ -1,0 +1,26 @@
+# nfpm (https://nfpm.goreleaser.com) config for the anyray-connect .deb/.rpm
+# packages, rendered per arch by .github/workflows/release-connect-binaries.yml
+# with NFPM_VERSION / NFPM_ARCH / NFPM_BIN in the environment.
+name: anyray-connect
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+section: utils
+priority: optional
+maintainer: Anyray <support@anyray.ai>
+vendor: Anyray
+homepage: https://docs.anyray.ai
+license: MIT
+description: |
+  Anyray Connect — points a developer machine's AI tools at the org's
+  self-hosted Anyray gateway. Standalone build; no Node required.
+contents:
+  # `expand: true` is required for env expansion in src/dst — top-level fields
+  # (version/arch) expand unconditionally, contents entries do not.
+  - src: ${NFPM_BIN}
+    dst: /usr/bin/anyray-connect
+    expand: true
+    file_info:
+      # Artifact transfer between CI jobs drops the exec bit; set it here so
+      # the packaged binary installs executable regardless.
+      mode: 0755

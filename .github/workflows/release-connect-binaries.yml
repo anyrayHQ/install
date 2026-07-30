@@ -159,19 +159,29 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/signing-cert.p12"
           security import "$RUNNER_TEMP/signing-cert.p12" -k "$KEYCHAIN" -f pkcs12 \
-            -P "$APPLE_SIGNING_CERT_PASSWORD" -T /usr/bin/codesign
+            -P "$APPLE_SIGNING_CERT_PASSWORD" -A -T /usr/bin/codesign
           rm -f "$RUNNER_TEMP/signing-cert.p12"
           # Allow codesign to use the imported key non-interactively; the
           # command dumps key attributes on success, so discard its stdout.
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
-          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+          # Diagnostics: what actually landed in the throwaway keychain.
+          echo "--- codesigning identities (all / valid-only) ---"
+          security find-identity -p codesigning "$KEYCHAIN" || true
+          security find-identity -v -p codesigning "$KEYCHAIN" || true
+          # Select by name WITHOUT -v: on a fresh CI keychain the Developer ID
+          # chain often can't establish anchor trust for the `-v` validity
+          # filter (no login keychain, no OCSP), so `-v` hides an identity that
+          # signs perfectly well. The key + cert are ours; codesign validates
+          # the real signature afterwards.
+          IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" \
             | awk '/Developer ID Application/ {print $2; exit}')"
           if [ -z "$IDENTITY" ]; then
-            echo "::error::APPLE_SIGNING_CERT_P12 holds no Developer ID Application identity"
+            echo "::error::APPLE_SIGNING_CERT_P12 imported no Developer ID Application identity (see diagnostics above)"
             exit 1
           fi
+          echo "using signing identity $IDENTITY"
           # Bun-compiled binaries embed JavaScriptCore, which allocates JIT
           # pages at startup; the hardened runtime (mandatory for notarization)
           # forbids that without the allow-jit entitlement, and the signed

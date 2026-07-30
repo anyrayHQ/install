@@ -22,10 +22,25 @@ spec:
   {{- if or .Values.optimizer.autoscaling.enabled (gt (int .Values.optimizer.replicas) 1) }}
   {{- fail "optimizer.replicas > 1 or optimizer.autoscaling.enabled needs optimizer.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
   {{- end }}
-  # Recreate: the RWO volume must detach before the replacement pod can mount it
+  # Recreate: the RWO volume must detach before the replacement pod can mount it.
+  # As with the gateway this is a downtime window by construction, and here it
+  # costs money rather than availability: the gateway fails open when the
+  # optimizer is unreachable and forwards the ORIGINAL request, which busts the
+  # provider prompt cache on every warm session for the length of the gap. Set
+  # optimizer.persistence.enabled=false for the RollingUpdate branch below.
   strategy:
     type: Recreate
+  {{- else }}
+  # No RWO volume to detach: surge a replacement, let it pass /health, then retire
+  # the outgoing pod. Holding maxUnavailable at zero keeps an optimizer reachable
+  # throughout, so no request has to take the fail-open path during an upgrade.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   {{- end }}
+  {{- include "anyray.minReadySeconds" (dict "component" "optimizer" "context" .) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 6 }}
@@ -81,6 +96,14 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 10
+          # The optimizer installs no SIGTERM handler, so it exits the moment the
+          # signal lands and terminationGracePeriodSeconds is never consumed. This
+          # pause is therefore the only thing standing between an upgrade and a
+          # burst of fail-open (cache-busting) requests: it holds the pod open,
+          # still answering /v1/optimize, until the gateway has stopped routing to
+          # it. In-flight optimize calls are short (~44ms p50) and fail open by
+          # design, so nothing is lost by the abrupt exit that follows.
+          {{- include "anyray.preStopDrain" (dict "component" "optimizer" "context" .) | nindent 10 }}
           resources:
             {{- toYaml .Values.optimizer.resources | nindent 12 }}
           volumeMounts:

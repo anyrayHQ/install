@@ -140,6 +140,10 @@ pass (dict "component" <name> "context" .) and a non-empty .Values.<name>.<field
 wins over the global .Values.<field>; unset falls back to the global. Called with
 the bare root context (.) it emits the global values only. The component blocks
 that carry overrides are gateway / optimizer / proxy / postgres.
+
+terminationGracePeriodSeconds resolves the same way but keys off hasKey rather
+than truthiness, so an explicit component-level 0 is honoured instead of falling
+back to the global (Go templates treat 0 as empty).
 */}}
 {{- define "anyray.podSpecCommonNoSecurity" -}}
 {{- $context := . -}}
@@ -153,7 +157,14 @@ that carry overrides are gateway / optimizer / proxy / postgres.
 {{- $tolerations := $overrides.tolerations | default $context.Values.tolerations -}}
 {{- $topologySpreadConstraints := $overrides.topologySpreadConstraints | default $context.Values.topologySpreadConstraints -}}
 {{- $priorityClassName := $overrides.priorityClassName | default $context.Values.priorityClassName -}}
+{{- $terminationGrace := $context.Values.terminationGracePeriodSeconds -}}
+{{- if hasKey $overrides "terminationGracePeriodSeconds" -}}
+{{- $terminationGrace = $overrides.terminationGracePeriodSeconds -}}
+{{- end -}}
 serviceAccountName: {{ include "anyray.serviceAccountName" $context }}
+{{- if not (kindIs "invalid" $terminationGrace) }}
+terminationGracePeriodSeconds: {{ int $terminationGrace }}
+{{- end }}
 {{- with $context.Values.image.pullSecrets }}
 imagePullSecrets:
   {{- toYaml . | nindent 2 }}
@@ -203,6 +214,93 @@ Common container security context.
 securityContext:
   {{- toYaml . | nindent 2 }}
 {{- end }}
+{{- end }}
+
+{{/*
+Container lifecycle preStop hook. Holds the pod open for preStopDrainSeconds
+BEFORE SIGTERM, covering the window where Kubernetes has begun terminating the
+pod but its removal from the Service endpoints has not yet reached every
+kube-proxy / nginx upstream. Without the pause those in-flight requests land on
+a process that is already shutting down and surface to the caller as a reset
+connection rather than a retryable response.
+
+Emits nothing at 0 (or nil), so the hook can be switched off. Per-component
+overridable via .Values.<component>.preStopDrainSeconds — keyed off hasKey so an
+explicit 0 is honoured.
+
+Uses `sleep` rather than the native preStop `sleep:` action because that field
+requires Kubernetes >= 1.29 and this chart declares no kubeVersion floor. All
+three runtime images carry a full userland — the `FROM scratch` final stages
+copy one in from their assemble stage — so /bin/sleep is present in each.
+*/}}
+{{- define "anyray.preStopDrain" -}}
+{{- $context := . -}}
+{{- $overrides := dict -}}
+{{- if hasKey . "context" -}}
+{{- $context = .context -}}
+{{- $overrides = (index $context.Values .component | default dict) -}}
+{{- end -}}
+{{- $seconds := $context.Values.preStopDrainSeconds -}}
+{{- if hasKey $overrides "preStopDrainSeconds" -}}
+{{- $seconds = $overrides.preStopDrainSeconds -}}
+{{- end -}}
+{{- $grace := $context.Values.terminationGracePeriodSeconds -}}
+{{- if hasKey $overrides "terminationGracePeriodSeconds" -}}
+{{- $grace = $overrides.terminationGracePeriodSeconds -}}
+{{- end -}}
+{{- if and (not (kindIs "invalid" $seconds)) (gt (int $seconds) 0) -}}
+{{- /* The pre-stop sleep is spent INSIDE the termination budget, so a pause at
+or above it means the kubelet SIGKILLs the container before the app is ever
+signalled — every in-flight request reset, and the app's own drain never runs.
+Fail the render rather than ship that silently. */ -}}
+{{- if and (not (kindIs "invalid" $grace)) (ge (int $seconds) (int $grace)) -}}
+{{- fail (printf "preStopDrainSeconds (%d) must be less than terminationGracePeriodSeconds (%d): the pre-stop pause is spent inside the termination budget, so the container would be SIGKILLed before it is ever sent SIGTERM" (int $seconds) (int $grace)) -}}
+{{- end -}}
+{{- /* The pause is only half the budget: after SIGTERM the app drains its own
+in-flight requests. The gateway does that for ANYRAY_SHUTDOWN_DRAIN_MS, which an
+operator raises through extraEnv for long streaming completions — and raising it
+past the remaining budget puts SIGKILL back in the middle of the drain, which is
+the very thing terminationGracePeriodSeconds was set to prevent. Read the
+override back out of extraEnv and check the SUM. */ -}}
+{{- $drainMs := 0 -}}
+{{- range $env := ($overrides.extraEnv | default list) -}}
+{{- if eq (toString $env.name) "ANYRAY_SHUTDOWN_DRAIN_MS" -}}
+{{- $drainMs = int (toString $env.value) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (gt $drainMs 0) (not (kindIs "invalid" $grace)) -}}
+{{- $needed := add (int $seconds) (div (add $drainMs 999) 1000) -}}
+{{- if ge $needed (int $grace) -}}
+{{- fail (printf "preStopDrainSeconds (%ds) plus ANYRAY_SHUTDOWN_DRAIN_MS (%dms) needs %ds, which leaves no headroom under terminationGracePeriodSeconds (%ds): the kubelet would SIGKILL as the drain ends, or during it, resetting in-flight streams. Raise terminationGracePeriodSeconds above %d" (int $seconds) $drainMs $needed (int $grace) $needed) -}}
+{{- end -}}
+{{- end -}}
+lifecycle:
+  preStop:
+    exec:
+      command: ["sleep", "{{ int $seconds }}"]
+{{- end -}}
+{{- end }}
+
+{{/*
+Deployment minReadySeconds — how long a new pod must stay Ready before the
+rollout treats it as available, so a pod that passes one probe and then crashes
+cannot retire the previous version. Per-component overridable; explicit 0 is
+honoured (hasKey, not truthiness).
+*/}}
+{{- define "anyray.minReadySeconds" -}}
+{{- $context := . -}}
+{{- $overrides := dict -}}
+{{- if hasKey . "context" -}}
+{{- $context = .context -}}
+{{- $overrides = (index $context.Values .component | default dict) -}}
+{{- end -}}
+{{- $seconds := $context.Values.minReadySeconds -}}
+{{- if hasKey $overrides "minReadySeconds" -}}
+{{- $seconds = $overrides.minReadySeconds -}}
+{{- end -}}
+{{- if not (kindIs "invalid" $seconds) -}}
+minReadySeconds: {{ int $seconds }}
+{{- end -}}
 {{- end }}
 
 {{/*

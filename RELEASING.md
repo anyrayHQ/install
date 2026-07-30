@@ -84,14 +84,23 @@ blocks hosted runners:
 
 | Job | Runner | CodeBuild project (eu-central-1) |
 | --- | --- | --- |
-| build, package-linux, release | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`, MEDIUM) | `anyray-install-runner` |
+| build, sign-macos, package-linux, release | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`, MEDIUM) | `anyray-install-runner` |
 | sign-windows | Windows Server 2022 (`windows-base:2022-1.0`, MEDIUM) | `anyray-install-runner-win` |
-| sign-macos | **GitHub-hosted `macos-latest`** — the one exception | — |
 
 Both projects are webhook-driven (`WORKFLOW_JOB_QUEUED`), authenticate through the account's
 CodeConnections GitHub connection, and share the `anyray-gha-runner-codebuild` service role.
-macOS cannot run on CodeBuild without a reserved EC2 Mac fleet (24-hour-minimum billing per
-host under Apple's licensing) — a standing cost decision, deliberately not taken. Until org
-GitHub billing is restored, dispatch releases with `skip_macos_signing: true` to publish
-unsigned darwin binaries (the pre-signing status quo); signed darwin releases resume the
-moment hosted macOS runners can start again.
+
+**macOS signing needs no Mac.** `sign-macos` runs on the Linux runner using
+[`rcodesign`](https://github.com/indygreg/apple-platform-rs) — a Rust reimplementation of Apple
+code signing and the Notary REST API. It Developer-ID-signs the darwin binaries and submits them
+to Apple's notary service entirely from Linux; the result validates under Apple's own
+`codesign --verify --strict` and notarizes to `Accepted` (verified end to end with the real cert
+and notary key). So the nightly signs darwin binaries automatically with no GitHub-hosted macOS
+runner, no reserved EC2 Mac fleet, and no dependency on GitHub billing.
+
+Apple signing secrets (all set):
+- `APPLE_SIGNING_CERT_PEM` — base64 of one PEM bundle: signing key + Developer ID leaf +
+  Developer ID G2 intermediate. (Replaces the old `APPLE_SIGNING_CERT_P12` +
+  `APPLE_SIGNING_CERT_PASSWORD`, which rcodesign's Rust PKCS#12 reader can't decrypt —
+  OpenSSL-3 AES-256 PBES2; the p12 secrets are now unused and can be deleted.)
+- `APPLE_NOTARY_KEY` (base64 `.p8`), `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID` — unchanged.

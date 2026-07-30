@@ -27,8 +27,17 @@ is the one workload covered out of the box.
 eviction API would be free to take every serving pod at once, which is exactly
 the outage this file exists to prevent. Fail loudly rather than render a
 reassuring no-op. */ -}}
-{{- if ge (int $.Values.podDisruptionBudget.maxUnavailable) $floor }}
-{{- fail (printf "podDisruptionBudget.maxUnavailable (%d) must be less than the %s replica floor (%d), or a voluntary disruption may evict every serving pod at once" (int $.Values.podDisruptionBudget.maxUnavailable) $component $floor) }}
+{{- $mu := $.Values.podDisruptionBudget.maxUnavailable }}
+{{- if hasSuffix "%" (toString $mu) }}
+{{- /* Kubernetes accepts a percentage here, and `int` on "100%" parses to 0 —
+which would sail past a numeric comparison and then be emitted verbatim. Compare
+the percentage on its own terms. */ -}}
+{{- $pct := int (trimSuffix "%" (toString $mu)) }}
+{{- if ge $pct 100 }}
+{{- fail (printf "podDisruptionBudget.maxUnavailable (%s) must be under 100%%, or a voluntary disruption may evict every serving %s pod at once" (toString $mu) $component) }}
+{{- end }}
+{{- else if ge (int $mu) $floor }}
+{{- fail (printf "podDisruptionBudget.maxUnavailable (%d) must be less than the %s replica floor (%d), or a voluntary disruption may evict every serving pod at once" (int $mu) $component $floor) }}
 {{- end }}
 ---
 apiVersion: policy/v1

@@ -270,8 +270,8 @@ override back out of extraEnv and check the SUM. */ -}}
 {{- end -}}
 {{- if and (gt $drainMs 0) (not (kindIs "invalid" $grace)) -}}
 {{- $needed := add (int $seconds) (div (add $drainMs 999) 1000) -}}
-{{- if gt $needed (int $grace) -}}
-{{- fail (printf "preStopDrainSeconds (%ds) plus ANYRAY_SHUTDOWN_DRAIN_MS (%dms) needs %ds, which exceeds terminationGracePeriodSeconds (%ds): the kubelet would SIGKILL mid-drain and reset in-flight streams. Raise terminationGracePeriodSeconds to at least %d" (int $seconds) $drainMs $needed (int $grace) $needed) -}}
+{{- if ge $needed (int $grace) -}}
+{{- fail (printf "preStopDrainSeconds (%ds) plus ANYRAY_SHUTDOWN_DRAIN_MS (%dms) needs %ds, which leaves no headroom under terminationGracePeriodSeconds (%ds): the kubelet would SIGKILL as the drain ends, or during it, resetting in-flight streams. Raise terminationGracePeriodSeconds above %d" (int $seconds) $drainMs $needed (int $grace) $needed) -}}
 {{- end -}}
 {{- end -}}
 lifecycle:

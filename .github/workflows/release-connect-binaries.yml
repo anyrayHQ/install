@@ -29,11 +29,6 @@ on:
         description: 'MANDATORY release: install on machines below this version even if they opted out (blank = normal release)'
         required: false
         default: ''
-      skip_macos_signing:
-        description: 'Skip the macOS sign+notarize job (publishes unsigned darwin binaries — the pre-signing status quo). Escape hatch while GitHub-hosted macOS runners are unavailable (org billing): every other job runs on self-hosted CodeBuild.'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -106,16 +101,32 @@ jobs:
   # Developer ID-signs + notarizes the two darwin binaries when the Apple
   # secrets are configured; with them unset every step below no-ops and the
   # binaries pass through byte-identical.
-  sign-macos:
+  # Allocate a macOS signing runner ON DEMAND: create the MAC_ARM CodeBuild
+  # fleet + ephemeral runner project, used only for this release, torn down in
+  # teardown-mac. Runs on the Linux runner and assumes a scoped GitHub-OIDC role
+  # to drive the fleet lifecycle (scripts/mac-fleet.sh). Net cost is one
+  # 24h-minimum EC2 Mac charge per release (~$15-16), never a standing bill.
+  provision-mac:
     needs: build
-    # Deliberately the one job left on a GitHub-HOSTED runner: codesign +
-    # notarytool need macOS, and CodeBuild only offers macOS via a reserved
-    # EC2 Mac fleet (24h-minimum billing per Apple's licensing — a standing
-    # cost, not taken unilaterally). While org billing blocks hosted runners,
-    # dispatch with skip_macos_signing=true to release unsigned darwin
-    # binaries (the pre-signing status quo).
-    if: ${{ !inputs.skip_macos_signing }}
-    runs-on: macos-latest
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the fleet-lifecycle role via OIDC
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          aws-region: eu-central-1
+      - run: ./scripts/mac-fleet.sh up
+
+  # Developer ID-signs + notarizes the two darwin binaries on the on-demand Mac
+  # using Apple's own codesign + notarytool — the only tooling that correctly
+  # signs Bun-compiled binaries (rcodesign/quill mishandle the x64 Mach-O and
+  # produce a signature that verifies but won't launch; proven by E2E).
+  sign-macos:
+    needs: provision-mac
+    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
     env:
       # GitHub Actions can't read `secrets.*` in a step `if:` — map the secrets
       # into job env and gate each step on `env.X != ''` instead.
@@ -231,6 +242,23 @@ jobs:
           name: binaries-darwin
           path: out/anyray-connect-darwin-*
           if-no-files-found: error
+
+  # Always release the Mac, even if signing failed — an orphaned fleet bills a
+  # standing Mac. Runs on the Linux runner with the same OIDC lifecycle role.
+  teardown-mac:
+    needs: sign-macos
+    if: ${{ always() }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          aws-region: eu-central-1
+      - run: ./scripts/mac-fleet.sh down
 
   # Authenticode-signs the windows binary when the cert secrets are
   # configured; otherwise it passes through byte-identical.

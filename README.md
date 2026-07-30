@@ -176,3 +176,8 @@ Adding or materially changing an artifact? Add/extend its live lane in the same 
 
 Paste [AGENT.md](./AGENT.md) into Claude Code / Codex on a machine with your infra
 access and it will drive the install for you.
+
+## Releasing (maintainers)
+
+The `anyray-connect` binary release + code-signing pipeline (and the signing
+secrets an admin must provision) is documented in [RELEASING.md](./RELEASING.md).

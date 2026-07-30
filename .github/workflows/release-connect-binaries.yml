@@ -9,6 +9,15 @@ name: Release anyray-connect binaries
 # Source of truth is the PUBLIC npm package (anyray-connect), so this workflow
 # never needs access to the private monorepo. Run it after publishing a new
 # anyray-connect version to npm.
+#
+# Code signing (RFC 0010 §6, secret names in RELEASING.md): the darwin
+# binaries are Developer ID-signed + notarized, the windows binary is
+# Authenticode-signed, and the linux binaries are additionally packaged as
+# .deb/.rpm (GPG detach-signed once the release key exists). Every signing
+# step is conditional on its secrets being configured — with no secrets set
+# the binaries publish byte-identical to an unsigned run; the .deb/.rpm are
+# additive assets either way. SHA256SUMS is generated in the release job,
+# AFTER signing, because signing rewrites the binaries.
 on:
   workflow_dispatch:
     inputs:
@@ -22,15 +31,15 @@ on:
         default: ''
 
 permissions:
-  contents: write # create the release + upload assets
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pkg.outputs.version }}
     steps:
-      # gh release create needs a git checkout to resolve the repo + create the tag.
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: '1.3.5'
 
@@ -78,9 +87,303 @@ jobs:
           build bun-linux-x64     anyray-connect-linux-x64
           build bun-linux-arm64   anyray-connect-linux-arm64
           build bun-windows-x64   anyray-connect-windows-x64.exe
-          # Checksums so the installers can verify integrity before running.
-          ( cd out && sha256sum * > SHA256SUMS )
+          # SHA256SUMS is generated in the release job, after the signing jobs
+          # — codesign/signtool rewrite the binaries, so a checksum taken here
+          # would not match the released bytes.
           ls -lh out
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binaries-unsigned
+          path: out/
+          if-no-files-found: error
+
+  # Developer ID-signs + notarizes the two darwin binaries when the Apple
+  # secrets are configured; with them unset every step below no-ops and the
+  # binaries pass through byte-identical.
+  sign-macos:
+    needs: build
+    runs-on: macos-latest
+    env:
+      # GitHub Actions can't read `secrets.*` in a step `if:` — map the secrets
+      # into job env and gate each step on `env.X != ''` instead.
+      APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
+      APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+      APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: binaries-unsigned
+          path: out
+
+      - name: Sign the darwin binaries (Developer ID)
+        if: env.APPLE_SIGNING_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          # Throwaway keychain: the cert never touches the login keychain and
+          # the always() step below destroys it even when signing fails.
+          KEYCHAIN="$RUNNER_TEMP/anyray-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 1800 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/signing-cert.p12"
+          security import "$RUNNER_TEMP/signing-cert.p12" -k "$KEYCHAIN" -f pkcs12 \
+            -P "$APPLE_SIGNING_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/signing-cert.p12"
+          # Allow codesign to use the imported key non-interactively; the
+          # command dumps key attributes on success, so discard its stdout.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::APPLE_SIGNING_CERT_P12 holds no Developer ID Application identity"
+            exit 1
+          fi
+          # Bun-compiled binaries embed JavaScriptCore, which allocates JIT
+          # pages at startup; the hardened runtime (mandatory for notarization)
+          # forbids that without the allow-jit entitlement, and the signed
+          # binary then dies on EVERY machine with "Ran out of executable
+          # memory" the moment it launches. Caught by the local E2E rehearsal
+          # (signed + notarized real v0.11.81 binaries; allow-jit alone is the
+          # minimal sufficient set — keep it minimal, each extra entitlement
+          # weakens the hardening story the EDR/transparency docs sell).
+          cat > "$RUNNER_TEMP/entitlements.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-jit</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          # Artifact transfer strips file modes (actions/upload-artifact v4
+          # documents this) — the post-sign smoke run below would otherwise die
+          # with "Permission denied". Harmless for the published assets: both
+          # consumers (connect.sh, selfUpdate.ts) chmod after download.
+          chmod +x out/anyray-connect-darwin-*
+          for bin in out/anyray-connect-darwin-*; do
+            codesign --force --options runtime --timestamp \
+              --entitlements "$RUNNER_TEMP/entitlements.plist" \
+              --identifier ai.anyray.connect --sign "$IDENTITY" "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+            # The signed binary must still RUN — a signature that verifies but
+            # aborts at launch is exactly the failure the entitlement fixes.
+            # Only the arm64 slice can execute on the arm64 runner.
+            case "$bin" in
+              *darwin-arm64) "$bin" --help > /dev/null ;;
+            esac
+          done
+
+      - name: Notarize the darwin binaries
+        # Needs the Developer ID signature from the step above plus the App
+        # Store Connect API key. A bare mach-o binary CANNOT be stapled —
+        # `xcrun stapler staple` only applies to bundles/dmg/pkg — so the
+        # notarized binary ships as-is and Gatekeeper fetches the ticket online.
+        # SEAM (RFC 0010 tray .app): when the desktop tray ships as a .app
+        # bundle, extend this job to sign the bundle, notarize its zip, then
+        # `xcrun stapler staple` the .app so first launch verifies offline.
+        if: env.APPLE_SIGNING_CERT_P12 != '' && env.APPLE_NOTARY_KEY != ''
+        run: |
+          set -euo pipefail
+          printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/notary-key.p8"
+          for bin in out/anyray-connect-darwin-*; do
+            zip="$RUNNER_TEMP/$(basename "$bin").zip"
+            ditto -c -k "$bin" "$zip"
+            status="$(xcrun notarytool submit "$zip" \
+              --key "$RUNNER_TEMP/notary-key.p8" \
+              --key-id "$APPLE_NOTARY_KEY_ID" \
+              --issuer "$APPLE_NOTARY_ISSUER_ID" \
+              --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
+            if [ "$status" != "Accepted" ]; then
+              echo "::error::notarization failed for $(basename "$bin") (status: $status)"
+              exit 1
+            fi
+          done
+
+      - name: Delete the throwaway keychain
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/signing-cert.p12" "$RUNNER_TEMP/notary-key.p8"
+          if [ -f "$RUNNER_TEMP/anyray-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/anyray-signing.keychain-db"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binaries-darwin
+          path: out/anyray-connect-darwin-*
+          if-no-files-found: error
+
+  # Authenticode-signs the windows binary when the cert secrets are
+  # configured; otherwise it passes through byte-identical.
+  sign-windows:
+    needs: build
+    runs-on: windows-latest
+    env:
+      # Same pattern as sign-macos: secrets into env, gate on `env.X != ''`.
+      WINDOWS_SIGNING_CERT_PFX: ${{ secrets.WINDOWS_SIGNING_CERT_PFX }}
+      WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: binaries-unsigned
+          path: out
+
+      - name: Sign the windows binary (Authenticode)
+        if: env.WINDOWS_SIGNING_CERT_PFX != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing-cert.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT_PFX))
+          # signtool ships with the Windows SDK on the hosted runners; take the
+          # newest x64 build.
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -like '*\x64\*' } |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { Write-Error 'signtool.exe not found on the runner' }
+          & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+            /f $pfx /p $env:WINDOWS_SIGNING_CERT_PASSWORD out\anyray-connect-windows-x64.exe
+          if ($LASTEXITCODE -ne 0) { Write-Error "signtool sign failed ($LASTEXITCODE)" }
+          & $signtool verify /pa out\anyray-connect-windows-x64.exe
+          if ($LASTEXITCODE -ne 0) { Write-Error "signtool verify failed ($LASTEXITCODE)" }
+
+      - name: Remove the decoded certificate
+        if: always()
+        shell: pwsh
+        run: Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'signing-cert.pfx')
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binaries-windows
+          path: out/anyray-connect-windows-x64.exe
+          if-no-files-found: error
+
+  # Packages the linux binaries as .deb/.rpm — ADDITIVE assets; the bare
+  # binaries keep publishing exactly as before and stay untouched. Once the
+  # GPG release key is provisioned the packages are detach-signed and the
+  # public key ships alongside them.
+  package-linux:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      # Same pattern as sign-macos: secrets into env, gate on `env.X != ''`.
+      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
+      # nfpm is pinned by version AND tarball checksum; bump both together
+      # (checksums.txt on the nfpm release page).
+      NFPM_PIN: 2.47.0
+      NFPM_SHA256: 0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783
+    steps:
+      # For ci/nfpm.yaml.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: binaries-unsigned
+          path: out
+
+      - name: Fetch nfpm (pinned by version + checksum)
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/nfpm.tgz" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_PIN}/nfpm_${NFPM_PIN}_Linux_x86_64.tar.gz"
+          echo "${NFPM_SHA256}  ${RUNNER_TEMP}/nfpm.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/nfpm.tgz" -C "$RUNNER_TEMP" nfpm
+
+      - name: Build .deb/.rpm packages
+        env:
+          NFPM_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p pkgs
+          for arch in x64 arm64; do
+            case "$arch" in
+              x64)   export NFPM_ARCH=amd64 ;;
+              arm64) export NFPM_ARCH=arm64 ;;
+            esac
+            export NFPM_BIN="out/anyray-connect-linux-${arch}"
+            "$RUNNER_TEMP/nfpm" package -f ci/nfpm.yaml -p deb -t pkgs/
+            "$RUNNER_TEMP/nfpm" package -f ci/nfpm.yaml -p rpm -t pkgs/
+          done
+          ls -lh pkgs
+
+      - name: GPG-sign the packages and export the public key
+        if: env.LINUX_SIGNING_GPG_KEY != ''
+        run: |
+          set -euo pipefail
+          # Isolated GNUPGHOME; the always() step below removes it.
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s' "$LINUX_SIGNING_GPG_KEY" | gpg --batch --quiet --import
+          KEYID="$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')"
+          if [ -z "$KEYID" ]; then
+            echo "::error::LINUX_SIGNING_GPG_KEY contains no secret key"
+            exit 1
+          fi
+          for pkg in pkgs/*.deb pkgs/*.rpm; do
+            # Passphrase over fd 0, never argv.
+            printf '%s' "$LINUX_SIGNING_GPG_PASSPHRASE" | gpg --batch --yes \
+              --pinentry-mode loopback --passphrase-fd 0 --local-user "$KEYID" \
+              --armor --detach-sign --output "${pkg}.asc" "$pkg"
+            gpg --batch --verify "${pkg}.asc" "$pkg"
+          done
+          gpg --batch --armor --export "$KEYID" > pkgs/anyray-connect-signing-key.asc
+
+      - name: Delete the imported GPG key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/gnupg"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-packages
+          path: pkgs/
+          if-no-files-found: error
+
+  release:
+    needs: [build, sign-macos, sign-windows, package-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release + upload assets
+    steps:
+      # gh release create needs a git checkout to resolve the repo + create the tag.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Assemble the release assets: unsigned set first, then the signed
+      # darwin/windows binaries overwrite their unsigned copies (a no-op when
+      # the signing steps were skipped), then the linux packages.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: binaries-unsigned
+          path: assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: binaries-darwin
+          path: assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: binaries-windows
+          path: assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-packages
+          path: assets
+
+      - name: Generate SHA256SUMS (after signing — signing rewrites the binaries)
+        run: |
+          set -euo pipefail
+          # Name-keyed lookups on both consumers — connect.sh (awk '$2==asset')
+          # and the self-updater (parseSha256Sums) — so the package/signature
+          # lines are additive and harmless; the binary lines are what they
+          # always were. connect-update.json is written AFTER this on purpose:
+          # the mandatory-release marker never appears in SHA256SUMS.
+          ( cd assets && sha256sum -- * > SHA256SUMS )
+          cat assets/SHA256SUMS
 
       - name: Mark the release mandatory (optional)
         # anyray-connect self-updates on a ~30 min tick and reads this asset ONLY
@@ -88,13 +391,11 @@ jobs:
         # minVersion above their installed version overrides that opt-out — the
         # lever for a security or correctness fix, not for ordinary releases.
         # Absent asset (the normal case) = the opt-out stands.
-        # Written after SHA256SUMS on purpose: that file stays a list of binaries,
-        # which is what connect.sh and the updater parse.
         if: ${{ github.event.inputs.min_version != '' }}
         env:
           # Via env (not inline) so the dispatch input can't be shell-injected.
           MIN_VERSION: ${{ github.event.inputs.min_version }}
-          VERSION: ${{ steps.pkg.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           if [[ ! "$MIN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -109,13 +410,13 @@ jobs:
             echo "::error::min_version ($MIN_VERSION) is above the version being released ($VERSION); no machine could satisfy it."
             exit 1
           fi
-          jq -n --arg min "$MIN_VERSION" '{minVersion: $min}' > out/connect-update.json
-          cat out/connect-update.json
+          jq -n --arg min "$MIN_VERSION" '{minVersion: $min}' > assets/connect-update.json
+          cat assets/connect-update.json
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.pkg.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           TAG="connect-v${VERSION}"
@@ -124,4 +425,4 @@ jobs:
           gh release create "$TAG" \
             --title "anyray-connect ${VERSION} (binaries)" \
             --notes "Standalone \`anyray-connect\` ${VERSION} executables for the zero-install \`connect.sh\` / \`connect.ps1\` installers. No Node required. Built from the public npm package." \
-            out/*
+            assets/*

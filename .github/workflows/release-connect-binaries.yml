@@ -155,8 +155,17 @@ jobs:
           KEYCHAIN="$RUNNER_TEMP/anyray-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 1800 "$KEYCHAIN"
+          # No inactivity auto-lock — a long notarization wait must not lock the
+          # key out mid-build.
+          security set-keychain-settings "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # codesign resolves signing identities through the DEFAULT keychain and
+          # the SESSION search list — not the `-d user` list. On a fresh CI Mac
+          # those point at an empty login keychain, so `find-identity` (which
+          # takes an explicit keychain arg) sees the identity but `codesign
+          # --sign <hash>` reports "no identity found". Make the throwaway
+          # keychain the default and put it on the session search list.
+          security default-keychain -s "$KEYCHAIN"
           printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/signing-cert.p12"
           security import "$RUNNER_TEMP/signing-cert.p12" -k "$KEYCHAIN" -f pkcs12 \
             -P "$APPLE_SIGNING_CERT_PASSWORD" -A -T /usr/bin/codesign
@@ -165,7 +174,7 @@ jobs:
           # command dumps key attributes on success, so discard its stdout.
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security list-keychains -s "$KEYCHAIN"
           # Diagnostics: what actually landed in the throwaway keychain.
           echo "--- codesigning identities (all / valid-only) ---"
           security find-identity -p codesigning "$KEYCHAIN" || true

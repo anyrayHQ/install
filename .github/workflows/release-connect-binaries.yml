@@ -29,8 +29,8 @@ on:
         description: 'MANDATORY release: install on machines below this version even if they opted out (blank = normal release)'
         required: false
         default: ''
-      skip_macos_signing:
-        description: 'Skip the macOS sign+notarize job (publishes unsigned darwin binaries — the pre-signing status quo). Escape hatch while GitHub-hosted macOS runners are unavailable (org billing): every other job runs on self-hosted CodeBuild.'
+      dry_run:
+        description: 'Test run: build + sign + notarize + exercise the on-demand Mac fleet, but do NOT publish a GitHub release (no customer-facing change). Signed binaries are uploaded as a workflow artifact for inspection.'
         required: false
         type: boolean
         default: false
@@ -106,16 +106,32 @@ jobs:
   # Developer ID-signs + notarizes the two darwin binaries when the Apple
   # secrets are configured; with them unset every step below no-ops and the
   # binaries pass through byte-identical.
-  sign-macos:
+  # Allocate a macOS signing runner ON DEMAND: create the MAC_ARM CodeBuild
+  # fleet + ephemeral runner project, used only for this release, torn down in
+  # teardown-mac. Runs on the Linux runner and assumes a scoped GitHub-OIDC role
+  # to drive the fleet lifecycle (scripts/mac-fleet.sh). Net cost is one
+  # 24h-minimum EC2 Mac charge per release (~$15-16), never a standing bill.
+  provision-mac:
     needs: build
-    # Deliberately the one job left on a GitHub-HOSTED runner: codesign +
-    # notarytool need macOS, and CodeBuild only offers macOS via a reserved
-    # EC2 Mac fleet (24h-minimum billing per Apple's licensing — a standing
-    # cost, not taken unilaterally). While org billing blocks hosted runners,
-    # dispatch with skip_macos_signing=true to release unsigned darwin
-    # binaries (the pre-signing status quo).
-    if: ${{ !inputs.skip_macos_signing }}
-    runs-on: macos-latest
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the fleet-lifecycle role via OIDC
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          aws-region: eu-central-1
+      - run: ./scripts/mac-fleet.sh up
+
+  # Developer ID-signs + notarizes the two darwin binaries on the on-demand Mac
+  # using Apple's own codesign + notarytool — the only tooling that correctly
+  # signs Bun-compiled binaries (rcodesign/quill mishandle the x64 Mach-O and
+  # produce a signature that verifies but won't launch; proven by E2E).
+  sign-macos:
+    needs: provision-mac
+    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
     env:
       # GitHub Actions can't read `secrets.*` in a step `if:` — map the secrets
       # into job env and gate each step on `env.X != ''` instead.
@@ -139,23 +155,42 @@ jobs:
           KEYCHAIN="$RUNNER_TEMP/anyray-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 1800 "$KEYCHAIN"
+          # No inactivity auto-lock — a long notarization wait must not lock the
+          # key out mid-build.
+          security set-keychain-settings "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # codesign resolves signing identities through the DEFAULT keychain and
+          # the SESSION search list — not the `-d user` list. On a fresh CI Mac
+          # those point at an empty login keychain, so `find-identity` (which
+          # takes an explicit keychain arg) sees the identity but `codesign
+          # --sign <hash>` reports "no identity found". Make the throwaway
+          # keychain the default and put it on the session search list.
+          security default-keychain -s "$KEYCHAIN"
           printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/signing-cert.p12"
           security import "$RUNNER_TEMP/signing-cert.p12" -k "$KEYCHAIN" -f pkcs12 \
-            -P "$APPLE_SIGNING_CERT_PASSWORD" -T /usr/bin/codesign
+            -P "$APPLE_SIGNING_CERT_PASSWORD" -A -T /usr/bin/codesign
           rm -f "$RUNNER_TEMP/signing-cert.p12"
           # Allow codesign to use the imported key non-interactively; the
           # command dumps key attributes on success, so discard its stdout.
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
-          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+          security list-keychains -s "$KEYCHAIN"
+          # Diagnostics: what actually landed in the throwaway keychain.
+          echo "--- codesigning identities (all / valid-only) ---"
+          security find-identity -p codesigning "$KEYCHAIN" || true
+          security find-identity -v -p codesigning "$KEYCHAIN" || true
+          # Select by name WITHOUT -v: on a fresh CI keychain the Developer ID
+          # chain often can't establish anchor trust for the `-v` validity
+          # filter (no login keychain, no OCSP), so `-v` hides an identity that
+          # signs perfectly well. The key + cert are ours; codesign validates
+          # the real signature afterwards.
+          IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" \
             | awk '/Developer ID Application/ {print $2; exit}')"
           if [ -z "$IDENTITY" ]; then
-            echo "::error::APPLE_SIGNING_CERT_P12 holds no Developer ID Application identity"
+            echo "::error::APPLE_SIGNING_CERT_P12 imported no Developer ID Application identity (see diagnostics above)"
             exit 1
           fi
+          echo "using signing identity $IDENTITY"
           # Bun-compiled binaries embed JavaScriptCore, which allocates JIT
           # pages at startup; the hardened runtime (mandatory for notarization)
           # forbids that without the allow-jit entitlement, and the signed
@@ -231,6 +266,23 @@ jobs:
           name: binaries-darwin
           path: out/anyray-connect-darwin-*
           if-no-files-found: error
+
+  # Always release the Mac, even if signing failed — an orphaned fleet bills a
+  # standing Mac. Runs on the Linux runner with the same OIDC lifecycle role.
+  teardown-mac:
+    needs: sign-macos
+    if: ${{ always() }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          aws-region: eu-central-1
+      - run: ./scripts/mac-fleet.sh down
 
   # Authenticode-signs the windows binary when the cert secrets are
   # configured; otherwise it passes through byte-identical.
@@ -361,9 +413,6 @@ jobs:
 
   release:
     needs: [build, sign-macos, sign-windows, package-linux]
-    # sign-macos may be legitimately SKIPPED (skip_macos_signing); a plain
-    # `needs` would skip this job too. Everything else must have succeeded.
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.sign-macos.result) }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: write # create the release + upload assets
@@ -444,6 +493,7 @@ jobs:
           cat assets/connect-update.json
 
       - name: Publish the release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
@@ -456,3 +506,13 @@ jobs:
             --title "anyray-connect ${VERSION} (binaries)" \
             --notes "Standalone \`anyray-connect\` ${VERSION} executables for the zero-install \`connect.sh\` / \`connect.ps1\` installers. No Node required. Built from the public npm package." \
             assets/*
+
+      # dry_run: prove the whole build->sign->notarize->fleet path without a
+      # customer-facing release. The signed, checksummed asset set is inspectable.
+      - name: Upload assembled assets (dry run — not published)
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dry-run-release-assets
+          path: assets/
+          if-no-files-found: error

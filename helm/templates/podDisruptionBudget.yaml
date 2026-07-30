@@ -32,9 +32,13 @@ reassuring no-op. */ -}}
 {{- /* Kubernetes accepts a percentage here, and `int` on "100%" parses to 0 —
 which would sail past a numeric comparison and then be emitted verbatim. Compare
 the percentage on its own terms. */ -}}
+{{- /* Kubernetes rounds a PDB maxUnavailable percentage UP, so a value well
+under 100% can still resolve to the entire floor — 99% of 2 replicas is 2. Check
+the effective pod count, not the percentage. */ -}}
 {{- $pct := int (trimSuffix "%" (toString $mu)) }}
-{{- if ge $pct 100 }}
-{{- fail (printf "podDisruptionBudget.maxUnavailable (%s) must be under 100%%, or a voluntary disruption may evict every serving %s pod at once" (toString $mu) $component) }}
+{{- $effective := int (ceil (divf (mulf $pct $floor) 100.0)) }}
+{{- if ge $effective $floor }}
+{{- fail (printf "podDisruptionBudget.maxUnavailable (%s) resolves to %d of the %s replica floor (%d) — Kubernetes rounds the percentage up — so a voluntary disruption may evict every serving pod at once" (toString $mu) $effective $component $floor) }}
 {{- end }}
 {{- else if ge (int $mu) $floor }}
 {{- fail (printf "podDisruptionBudget.maxUnavailable (%d) must be less than the %s replica floor (%d), or a voluntary disruption may evict every serving pod at once" (int $mu) $component $floor) }}

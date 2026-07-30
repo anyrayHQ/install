@@ -29,11 +29,6 @@ on:
         description: 'MANDATORY release: install on machines below this version even if they opted out (blank = normal release)'
         required: false
         default: ''
-      skip_macos_signing:
-        description: 'Skip the macOS sign+notarize job (publishes unsigned darwin binaries — the pre-signing status quo). Escape hatch while GitHub-hosted macOS runners are unavailable (org billing): every other job runs on self-hosted CodeBuild.'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -106,21 +101,26 @@ jobs:
   # Developer ID-signs + notarizes the two darwin binaries when the Apple
   # secrets are configured; with them unset every step below no-ops and the
   # binaries pass through byte-identical.
+  #
+  # Runs on LINUX. rcodesign (github.com/indygreg/apple-platform-rs) is a Rust
+  # reimplementation of Apple code signing + the Notary REST API that needs no
+  # Apple tooling and no macOS host — so this job runs on the same self-hosted
+  # CodeBuild Linux runner as every other job, and the nightly signs darwin
+  # binaries automatically with no GitHub-hosted macOS runner, no reserved EC2
+  # Mac fleet, and no dependency on GitHub billing. Verified end to end against
+  # the real Developer ID cert + notary key: rcodesign's signature validates
+  # under Apple's own `codesign --verify --strict` (TeamIdentifier V53XMA78UF,
+  # hardened runtime, allow-jit) and Apple's Notary service returns Accepted.
   sign-macos:
     needs: build
-    # Deliberately the one job left on a GitHub-HOSTED runner: codesign +
-    # notarytool need macOS, and CodeBuild only offers macOS via a reserved
-    # EC2 Mac fleet (24h-minimum billing per Apple's licensing — a standing
-    # cost, not taken unilaterally). While org billing blocks hosted runners,
-    # dispatch with skip_macos_signing=true to release unsigned darwin
-    # binaries (the pre-signing status quo).
-    if: ${{ !inputs.skip_macos_signing }}
-    runs-on: macos-latest
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     env:
       # GitHub Actions can't read `secrets.*` in a step `if:` — map the secrets
-      # into job env and gate each step on `env.X != ''` instead.
-      APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
-      APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      # into job env and gate each step on `env.X != ''` instead. The signer is
+      # a PEM bundle (signing key + Developer ID leaf + G2 intermediate); the
+      # p12 the older macOS lane used can't be parsed by rcodesign's Rust
+      # PKCS#12 reader (OpenSSL-3 AES-256 PBES2), and PEM sidesteps it.
+      APPLE_SIGNING_CERT_PEM: ${{ secrets.APPLE_SIGNING_CERT_PEM }}
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
       APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
@@ -130,40 +130,34 @@ jobs:
           name: binaries-unsigned
           path: out
 
-      - name: Sign the darwin binaries (Developer ID)
-        if: env.APPLE_SIGNING_CERT_P12 != ''
+      - name: Install rcodesign
+        if: env.APPLE_SIGNING_CERT_PEM != ''
         run: |
           set -euo pipefail
-          # Throwaway keychain: the cert never touches the login keychain and
-          # the always() step below destroys it even when signing fails.
-          KEYCHAIN="$RUNNER_TEMP/anyray-signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 1800 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/signing-cert.p12"
-          security import "$RUNNER_TEMP/signing-cert.p12" -k "$KEYCHAIN" -f pkcs12 \
-            -P "$APPLE_SIGNING_CERT_PASSWORD" -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/signing-cert.p12"
-          # Allow codesign to use the imported key non-interactively; the
-          # command dumps key attributes on success, so discard its stdout.
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
-          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
-            | awk '/Developer ID Application/ {print $2; exit}')"
-          if [ -z "$IDENTITY" ]; then
-            echo "::error::APPLE_SIGNING_CERT_P12 holds no Developer ID Application identity"
-            exit 1
-          fi
+          # Pinned by version + sha256 (the release ships its own .sha256, but
+          # we assert our own copy so a moved tag can't swap the binary).
+          V=0.29.0
+          SHA=dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002
+          url="https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${V}/apple-codesign-${V}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o /tmp/rcodesign.tar.gz "$url"
+          echo "${SHA}  /tmp/rcodesign.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/rcodesign.tar.gz -C /tmp
+          install -m 0755 "/tmp/apple-codesign-${V}-x86_64-unknown-linux-musl/rcodesign" /usr/local/bin/rcodesign
+          rcodesign --version
+
+      - name: Sign the darwin binaries (Developer ID)
+        if: env.APPLE_SIGNING_CERT_PEM != ''
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$APPLE_SIGNING_CERT_PEM" | base64 -d > "$RUNNER_TEMP/signer.pem"
           # Bun-compiled binaries embed JavaScriptCore, which allocates JIT
           # pages at startup; the hardened runtime (mandatory for notarization)
           # forbids that without the allow-jit entitlement, and the signed
           # binary then dies on EVERY machine with "Ran out of executable
-          # memory" the moment it launches. Caught by the local E2E rehearsal
-          # (signed + notarized real v0.11.81 binaries; allow-jit alone is the
-          # minimal sufficient set — keep it minimal, each extra entitlement
-          # weakens the hardening story the EDR/transparency docs sell).
+          # memory" the moment it launches. allow-jit alone is the minimal
+          # sufficient set — keep it minimal, each extra entitlement weakens
+          # the hardening story the EDR/transparency docs sell.
           cat > "$RUNNER_TEMP/entitlements.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -174,57 +168,46 @@ jobs:
           </dict>
           </plist>
           PLIST
-          # Artifact transfer strips file modes (actions/upload-artifact v4
-          # documents this) — the post-sign smoke run below would otherwise die
-          # with "Permission denied". Harmless for the published assets: both
-          # consumers (connect.sh, selfUpdate.ts) chmod after download.
-          chmod +x out/anyray-connect-darwin-*
           for bin in out/anyray-connect-darwin-*; do
-            codesign --force --options runtime --timestamp \
-              --entitlements "$RUNNER_TEMP/entitlements.plist" \
-              --identifier ai.anyray.connect --sign "$IDENTITY" "$bin"
-            codesign --verify --strict --verbose=2 "$bin"
-            # The signed binary must still RUN — a signature that verifies but
-            # aborts at launch is exactly the failure the entitlement fixes.
-            # Only the arm64 slice can execute on the arm64 runner.
-            case "$bin" in
-              *darwin-arm64) "$bin" --help > /dev/null ;;
-            esac
+            rcodesign sign \
+              --pem-file "$RUNNER_TEMP/signer.pem" \
+              --code-signature-flags runtime \
+              --entitlements-xml-file "$RUNNER_TEMP/entitlements.plist" \
+              --binary-identifier ai.anyray.connect \
+              "$bin"
+            # Verify the signature and the embedded chain without Apple tooling.
+            rcodesign verify "$bin"
           done
+          rm -f "$RUNNER_TEMP/signer.pem"
 
       - name: Notarize the darwin binaries
-        # Needs the Developer ID signature from the step above plus the App
-        # Store Connect API key. A bare mach-o binary CANNOT be stapled —
-        # `xcrun stapler staple` only applies to bundles/dmg/pkg — so the
-        # notarized binary ships as-is and Gatekeeper fetches the ticket online.
+        # Needs the signature from the step above plus the App Store Connect API
+        # key. rcodesign submits to Apple's Notary REST API and waits for the
+        # verdict. A bare mach-o binary CANNOT be stapled (`stapler`/ticket
+        # embedding only applies to bundles/dmg/pkg), so the notarized binary
+        # ships as-is and Gatekeeper fetches the ticket online.
         # SEAM (RFC 0010 tray .app): when the desktop tray ships as a .app
         # bundle, extend this job to sign the bundle, notarize its zip, then
-        # `xcrun stapler staple` the .app so first launch verifies offline.
-        if: env.APPLE_SIGNING_CERT_P12 != '' && env.APPLE_NOTARY_KEY != ''
+        # staple the ticket into the .app so first launch verifies offline —
+        # rcodesign notary-submit --staple does this on Linux too.
+        if: env.APPLE_SIGNING_CERT_PEM != '' && env.APPLE_NOTARY_KEY != ''
         run: |
           set -euo pipefail
-          printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/notary-key.p8"
+          umask 077
+          printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/notary.p8"
+          rcodesign encode-app-store-connect-api-key \
+            -o "$RUNNER_TEMP/notary-key.json" \
+            "$APPLE_NOTARY_ISSUER_ID" "$APPLE_NOTARY_KEY_ID" "$RUNNER_TEMP/notary.p8"
+          rm -f "$RUNNER_TEMP/notary.p8"
           for bin in out/anyray-connect-darwin-*; do
             zip="$RUNNER_TEMP/$(basename "$bin").zip"
-            ditto -c -k "$bin" "$zip"
-            status="$(xcrun notarytool submit "$zip" \
-              --key "$RUNNER_TEMP/notary-key.p8" \
-              --key-id "$APPLE_NOTARY_KEY_ID" \
-              --issuer "$APPLE_NOTARY_ISSUER_ID" \
-              --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
-            if [ "$status" != "Accepted" ]; then
-              echo "::error::notarization failed for $(basename "$bin") (status: $status)"
-              exit 1
-            fi
+            # rcodesign reads a zip and submits the contained signed asset.
+            ( cd out && zip -q -X "$zip" "$(basename "$bin")" )
+            # --wait exits non-zero unless Apple returns Accepted, so the job
+            # fails loudly on a rejected notarization.
+            rcodesign notary-submit --api-key-path "$RUNNER_TEMP/notary-key.json" --wait "$zip"
           done
-
-      - name: Delete the throwaway keychain
-        if: always()
-        run: |
-          rm -f "$RUNNER_TEMP/signing-cert.p12" "$RUNNER_TEMP/notary-key.p8"
-          if [ -f "$RUNNER_TEMP/anyray-signing.keychain-db" ]; then
-            security delete-keychain "$RUNNER_TEMP/anyray-signing.keychain-db"
-          fi
+          rm -f "$RUNNER_TEMP/notary-key.json"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -361,9 +344,6 @@ jobs:
 
   release:
     needs: [build, sign-macos, sign-windows, package-linux]
-    # sign-macos may be legitimately SKIPPED (skip_macos_signing); a plain
-    # `needs` would skip this job too. Everything else must have succeeded.
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.sign-macos.result) }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: write # create the release + upload assets

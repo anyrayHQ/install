@@ -88,7 +88,8 @@ https://app.anyray.ai within a minute.
 - NEVER ask for, read, or handle provider API keys (OpenAI/Anthropic/etc.) —
   the operator enters them in the console themselves.
 - NEVER expose ports 3000/8787 publicly.
-- NEVER set ANYRAY_CONTENT_MODE to `plaintext` or ANYRAY_ALLOW_PLAINTEXT=true.
+- NEVER set the content mode to `plaintext` (console Privacy page, or
+  ANYRAY_CONTENT_MODE for the optimizer-only paths) or ANYRAY_ALLOW_PLAINTEXT=true.
 - NEVER print the contents of `.env` or `anyray-secrets.yaml` into your
   conversation beyond confirming it exists. In particular
   ANYRAY_PSEUDONYM_SALT is privacy-critical and must never leave the machine —

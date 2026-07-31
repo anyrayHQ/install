@@ -67,7 +67,7 @@ installer. The data disk and generated secrets stay unchanged.
 | gateway | host `:8787` (firewall-scoped to your CIDR) | OpenAI-compatible multi-provider API |
 | proxy (console) | host `:3000` (firewall-scoped to your CIDR) | Admin console (Spend, Traces, Optimizer, Privacy) |
 | optimizer | in-VM only | Request/response optimization hook |
-| postgres | in-VM only | Spend store (content-free) + trace store (content per `ANYRAY_CONTENT_MODE`) |
+| postgres | in-VM only | Spend store (content-free) + trace store (content per the deployment's content mode) |
 
 All container state — the gateway/optimizer `/data` volumes **and** Postgres —
 lives on a dedicated persistent disk (Docker's `data-root`) that is **not**

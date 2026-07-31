@@ -68,7 +68,6 @@ services:
       # your configured provider serves (a bare model is read under `anthropic`).
       ANYRAY_DEFAULT_MODEL: ${ANYRAY_DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:?run ./setup.sh first}
-      ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
       ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
       ANYRAY_PROVIDER_KEY_OPENAI: ${ANYRAY_PROVIDER_KEY_OPENAI:-}
@@ -152,6 +151,10 @@ services:
       # to in-memory-only when the key is absent or the content mode is off.
       ANYRAY_SPEND_DB_URL: ${ANYRAY_SPEND_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:-}
+      # Governs ONLY the paths that run without a gateway — BYO /v1/record writes
+      # and attach mode, both of which execute in the optimizer process. The
+      # gateway's own content mode is set in the console and stored in the shared
+      # database, and it pushes that mode here on every optimize call.
       ANYRAY_CONTENT_MODE: ${ANYRAY_CONTENT_MODE:-encrypted}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
       # Must match the gateway's value or the optimizer's trace sweep reverts to the 90-day default.

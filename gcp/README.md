@@ -58,7 +58,7 @@ export DEPLOYMENT_TOKEN="adt_..."        # from app.anyray.ai → Deployments
 | gateway | LoadBalancer `:8787` (CIDR-scoped) | OpenAI-compatible multi-provider API |
 | proxy (console) | LoadBalancer `:3000` (CIDR-scoped) | Admin console (Spend, Traces, Optimizer, Privacy) |
 | optimizer | ClusterIP (internal) | Request/response optimization hook |
-| postgres | ClusterIP + PVC (internal) | Spend store (content-free) + trace store (content per `ANYRAY_CONTENT_MODE`) |
+| postgres | ClusterIP + PVC (internal) | Spend store (content-free) + trace store (content per the deployment's content mode) |
 
 The bundled Postgres and the gateway/optimizer `/data` PVCs bind GKE Autopilot's
 default `standard-rwo` StorageClass — nothing to pre-create. Secrets (admin

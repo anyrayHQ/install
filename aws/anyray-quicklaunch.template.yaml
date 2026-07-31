@@ -43,7 +43,7 @@ Metadata:
       - Label: { default: Optimizer }
         Parameters: [OptimizerTimeoutMs, OptimizerVisionTimeoutMs]
       - Label: { default: Database }
-        Parameters: [DbInstanceClass, DbAllocatedStorage]
+        Parameters: [DbInstanceClass, DbAllocatedStorage, DbMaxAllocatedStorage]
     ParameterLabels:
       AllowedCidr: { default: "Allowed CIDR(s) (your office/VPN range, comma-separated)" }
       SubnetA: { default: "Public subnet in AZ 1" }
@@ -223,6 +223,15 @@ Parameters:
     Default: 20
     MinValue: 20
     Description: RDS allocated storage in GiB.
+  DbMaxAllocatedStorage:
+    Type: Number
+    Default: 100
+    MinValue: 21
+    Description: >-
+      Upper bound for RDS storage autoscaling in GiB (must exceed allocated
+      storage). Trace content accumulates until the 90-day retention window
+      fills, so the database grows for its first three months; without
+      autoscaling it goes storage-full and stops accepting writes.
 
 Rules:
   AllowedCidrMustNotBePublic:
@@ -510,6 +519,7 @@ Resources:
       EngineVersion: '17.5'
       DBInstanceClass: !Ref DbInstanceClass
       AllocatedStorage: !Ref DbAllocatedStorage
+      MaxAllocatedStorage: !Ref DbMaxAllocatedStorage
       StorageType: gp3
       StorageEncrypted: true
       MasterUsername: postgres

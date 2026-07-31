@@ -43,7 +43,7 @@ deployment. The deployment should show as **Connected** at
 | `ANYRAY_CONTENT_KEY`           | `${{secret(64, "0123456789abcdef")}}` on gateway | 32-byte hex AES-256-GCM at-rest encryption key.                             |
 | `ANYRAY_OBSERVABILITY_DB_URL`  | `${{Postgres.*}}` refs          | Postgres URL for the content-free trace store (falls back to spend DB URL). |
 | `POSTGRES_PASSWORD`            | `${{secret()}}` on Postgres     | Never leaves Railway's environment.                                         |
-| `ANYRAY_CONTENT_MODE`          | `encrypted` on **optimizer**    | See "Content privacy" below. A default, not a lock — edit it at deploy time or after. |
+| `ANYRAY_CONTENT_MODE`          | `encrypted` on gateway          | Read by the OPTIMIZER (which inherits it); the gateway ignores it. See "Content privacy". A default, not a lock. |
 | `ANYRAY_ALLOW_PLAINTEXT`       | `false` on gateway              | Deploy gate for `plaintext`. The optimizer inherits it.                     |
 
 ### Content privacy
@@ -53,20 +53,21 @@ in the shared database — there is no environment variable for it, so a change
 applies to every replica and there is one place to audit it. New deployments start
 on `encrypted`.
 
-`ANYRAY_CONTENT_MODE` on the **optimizer** service governs only the paths that run
-without a gateway in the loop: BYO `/v1/record` writes and attach-style use. The
-template ships `encrypted` as the default; it is an ordinary editable variable, not
-a fixed value.
+`ANYRAY_CONTENT_MODE` governs only the paths that run without a gateway in the
+loop: BYO `/v1/record` writes and attach-style use, both of which execute in the
+optimizer process. The template sets it on the **gateway** service and the
+optimizer inherits it by reference, so there is one place to edit — the gateway
+itself no longer reads it. The template ships `encrypted` as the default; it is an
+ordinary editable variable, not a fixed value.
 
 To capture content in plaintext (debugging only — it stores raw prompts and
 responses), BOTH are required, because plaintext is deliberately deploy-gated:
 
 ```bash
-# on the gateway service
-ANYRAY_ALLOW_PLAINTEXT=true          # the optimizer inherits this
-# then, for the gateway: set the mode to plaintext on the console Privacy page
-# and, for the optimizer's gateway-less paths:
-ANYRAY_CONTENT_MODE=plaintext        # on the optimizer service
+# both on the gateway service; the optimizer inherits both
+ANYRAY_ALLOW_PLAINTEXT=true
+ANYRAY_CONTENT_MODE=plaintext        # the optimizer's gateway-less paths
+# and for the gateway itself: set the mode to plaintext on the console Privacy page
 ```
 
 Without the gate, a `plaintext` mode degrades to `encrypted` (or to `off` when no

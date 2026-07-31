@@ -34,6 +34,7 @@
         "ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS": "10000",
         "ANYRAY_DEFAULT_MODEL": "anthropic/claude-sonnet-4-5",
         "ANYRAY_CONTENT_KEY": "${{secret(64, \"0123456789abcdef\")}}",
+        "ANYRAY_CONTENT_MODE": "encrypted",
         "ANYRAY_ALLOW_PLAINTEXT": "false",
         "ANYRAY_ADMIN_TOKEN": "${{secret()}}",
         "ANYRAY_METERING_ENABLED": "true",
@@ -69,7 +70,7 @@
         "ANYRAY_DATA_DIR": "/data",
         "ANYRAY_SPEND_DB_URL": "${{Postgres.DATABASE_URL}}",
         "ANYRAY_CONTENT_KEY": "${{gateway.ANYRAY_CONTENT_KEY}}",
-        "ANYRAY_CONTENT_MODE": "encrypted",
+        "ANYRAY_CONTENT_MODE": "${{gateway.ANYRAY_CONTENT_MODE}}",
         "ANYRAY_ALLOW_PLAINTEXT": "${{gateway.ANYRAY_ALLOW_PLAINTEXT}}",
         "ANYRAY_SPEND_RETENTION_DAYS": "${{gateway.ANYRAY_SPEND_RETENTION_DAYS}}"
       }

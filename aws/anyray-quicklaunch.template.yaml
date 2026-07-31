@@ -816,7 +816,6 @@ Resources:
             - { Name: ANYRAY_OPTIMIZER_TIMEOUT_MS, Value: !Ref OptimizerTimeoutMs }
             - { Name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS, Value: !Ref OptimizerVisionTimeoutMs }
             - { Name: ANYRAY_DEFAULT_MODEL, Value: !Ref DefaultModel }
-            - { Name: ANYRAY_CONTENT_MODE, Value: !Ref ContentMode }
             - { Name: ANYRAY_ALLOW_PLAINTEXT, Value: !Ref AllowPlaintext }
             - { Name: ANYRAY_DATA_DIR, Value: /data }
             - { Name: ANYRAY_TRUST_PROXY, Value: 'true' }

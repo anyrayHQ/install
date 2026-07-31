@@ -157,8 +157,15 @@ gateway:
     limits:
       cpu: "1000m"
       memory: "1Gi"
-  # Content privacy: encrypted | off
-  # Never set to plaintext in production.
+  # Content privacy: encrypted | off. Never set to plaintext in production.
+  #
+  # NOTE the gateway no longer reads this. Its content mode is set in the console
+  # (Privacy page) and stored in the shared database, so a change applies to every
+  # replica and there is one place to audit it. This value now feeds only the
+  # OPTIMIZER, which governs the paths that run without a gateway — BYO
+  # /v1/record writes and attach mode. The key keeps its gateway.* name so
+  # existing my-values.yaml files keep working; it is also what the
+  # optimizer.replicas guards below check, since those are about the CCR stash.
   contentMode: encrypted
   allowPlaintext: "false"
   optimizerTimeoutMs: "800"

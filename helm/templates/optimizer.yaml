@@ -75,6 +75,11 @@ spec:
             - name: ANYRAY_CONTENT_KEY
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_CONTENT_KEY" "context" .) | nindent 16 }}
+            # Governs ONLY the paths that run without a gateway — BYO
+            # /v1/record writes and attach mode, both in the optimizer process.
+            # The gateway's own mode is console-set and stored in the DB, and it
+            # pushes that mode here on every optimize call. The value key keeps
+            # its gateway.* name so existing my-values.yaml files keep working.
             - name: ANYRAY_CONTENT_MODE
               value: {{ .Values.gateway.contentMode | quote }}
             - name: ANYRAY_ALLOW_PLAINTEXT

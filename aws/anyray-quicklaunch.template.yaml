@@ -47,23 +47,31 @@ Metadata:
     ParameterLabels:
       AllowedCidr: { default: "Allowed CIDR(s) (your office/VPN range, comma-separated)" }
       EnableRdsDeletionProtection: { default: "Protect the database from deletion (production)" }
-      SubnetA: { default: "Public subnet in AZ 1" }
-      SubnetB: { default: "Public subnet in AZ 2 (different AZ)" }
+      VpcId: { default: "VPC (leave blank = account default VPC)" }
+      SubnetA: { default: "Public subnet in AZ 1 (leave blank)" }
+      SubnetB: { default: "Public subnet in AZ 2 (leave blank)" }
 
 Parameters:
   VpcId:
-    Type: AWS::EC2::VPC::Id
-    Description: VPC to launch Anyray into.
+    Type: String
+    Default: ''
+    Description: >-
+      LEAVE BLANK to use this account's default VPC — that is the normal choice
+      and needs no networking knowledge. Only set this (together with SubnetA
+      and SubnetB) to place Anyray in a specific VPC.
   SubnetA:
-    Type: AWS::EC2::Subnet::Id
+    Type: String
+    Default: ''
     Description: >-
-      A PUBLIC subnet that auto-assigns a public IPv4. Tasks pull images from
-      GHCR and reach the Portal/providers directly (no NAT gateway).
+      Leave blank unless you set VpcId. A PUBLIC subnet that auto-assigns a
+      public IPv4 — tasks pull images from GHCR and reach the Portal/providers
+      directly (no NAT gateway). Validated before anything is created.
   SubnetB:
-    Type: AWS::EC2::Subnet::Id
+    Type: String
+    Default: ''
     Description: >-
-      A second PUBLIC subnet in a DIFFERENT AZ — the load balancer and RDS both
-      require two AZs.
+      Leave blank unless you set VpcId. A second PUBLIC subnet in a DIFFERENT AZ
+      — the load balancer and RDS both require two AZs.
   AllowedCidr:
     Type: CommaDelimitedList
     Description: >-
@@ -262,6 +270,128 @@ Conditions:
   RdsDeletionProtection: !Equals [!Ref EnableRdsDeletionProtection, 'true']
 
 Resources:
+  # ---- Network resolution -----------------------------------------------------
+  # CloudFormation cannot discover the default VPC, so a tiny read-only Lambda
+  # does it. It ALWAYS runs: given blank inputs it picks the default VPC and two
+  # public subnets in different AZs; given explicit ones it validates them and
+  # echoes them back. That turns the classic failure of this template — a private
+  # or same-AZ subnet blowing up halfway through with an opaque ECS error — into
+  # an immediate, readable message, and lets a non-DevOps user deploy with no
+  # networking input at all.
+  NetFnRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: describe-network
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Describe* does not support resource-level permissions.
+              - Effect: Allow
+                Action: [ec2:DescribeVpcs, ec2:DescribeSubnets]
+                Resource: '*'
+
+  NetFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      Role: !GetAtt NetFnRole.Arn
+      Code:
+        ZipFile: |
+          import json, urllib.request, traceback, boto3
+          ec2 = boto3.client('ec2')
+
+          def send(event, context, status, data=None, reason=None):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason or ('See CloudWatch log stream ' + context.log_stream_name),
+                  'PhysicalResourceId': event.get('PhysicalResourceId') or context.log_stream_name,
+                  'StackId': event['StackId'], 'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data or {},
+              }).encode()
+              req = urllib.request.Request(event['ResponseURL'], data=body, method='PUT',
+                  headers={'content-type': '', 'content-length': str(len(body))})
+              urllib.request.urlopen(req)
+
+          def resolve(props):
+              vpc = (props.get('VpcId') or '').strip()
+              a = (props.get('SubnetA') or '').strip()
+              b = (props.get('SubnetB') or '').strip()
+              given = [x for x in (vpc, a, b) if x]
+
+              if given and len(given) != 3:
+                  raise Exception(
+                      'Set all three of VpcId, SubnetA and SubnetB, or leave all three '
+                      'blank to use this account default VPC.')
+
+              if not given:
+                  vpcs = ec2.describe_vpcs(
+                      Filters=[{'Name': 'isDefault', 'Values': ['true']}])['Vpcs']
+                  if not vpcs:
+                      raise Exception(
+                          'This account has no default VPC in this region. Either create one '
+                          '(VPC console > Actions > Create default VPC) or set VpcId, SubnetA '
+                          'and SubnetB explicitly.')
+                  vpc = vpcs[0]['VpcId']
+                  subs = ec2.describe_subnets(Filters=[
+                      {'Name': 'vpc-id', 'Values': [vpc]},
+                      {'Name': 'default-for-az', 'Values': ['true']}])['Subnets']
+                  by_az = {}
+                  for sn in sorted(subs, key=lambda x: x['SubnetId']):
+                      if sn.get('MapPublicIpOnLaunch'):
+                          by_az.setdefault(sn['AvailabilityZone'], sn['SubnetId'])
+                  if len(by_az) < 2:
+                      raise Exception(
+                          'The default VPC has public subnets in fewer than two availability '
+                          'zones, but the load balancer and RDS both need two. Set SubnetA and '
+                          'SubnetB explicitly.')
+                  azs = sorted(by_az)
+                  a, b = by_az[azs[0]], by_az[azs[1]]
+              else:
+                  found = ec2.describe_subnets(SubnetIds=[a, b])['Subnets']
+                  for sn in found:
+                      if sn['VpcId'] != vpc:
+                          raise Exception('Subnet %s is not in %s.' % (sn['SubnetId'], vpc))
+                      if not sn.get('MapPublicIpOnLaunch'):
+                          raise Exception(
+                              'Subnet %s does not auto-assign a public IPv4. Tasks pull images '
+                              'from GHCR with no NAT gateway, so both subnets must be public.'
+                              % sn['SubnetId'])
+                  if len(found) == 2 and found[0]['AvailabilityZone'] == found[1]['AvailabilityZone']:
+                      raise Exception(
+                          'SubnetA and SubnetB must be in different availability zones (both '
+                          'are in %s).' % found[0]['AvailabilityZone'])
+
+              return {'VpcId': vpc, 'SubnetA': a, 'SubnetB': b}
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      return send(event, context, 'SUCCESS')
+                  return send(event, context, 'SUCCESS', resolve(event['ResourceProperties']))
+              except Exception as e:
+                  print('NetFn FAILED:', traceback.format_exc())
+                  return send(event, context, 'FAILED', None, str(e))
+
+  Net:
+    Type: Custom::AnyrayNetwork
+    Properties:
+      ServiceToken: !GetAtt NetFn.Arn
+      VpcId: !Ref VpcId
+      SubnetA: !Ref SubnetA
+      SubnetB: !Ref SubnetB
+
   # ---- Secret generation (no setup.sh) --------------------------------------
   SecretFnRole:
     Type: AWS::IAM::Role
@@ -406,7 +536,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Anyray ALB - console (:3000) and gateway (:8787) from a scoped CIDR.
-      VpcId: !Ref VpcId
+      VpcId: !GetAtt Net.VpcId
       # Ingress is attached below as standalone SecurityGroupIngress resources,
       # fanned out over every value in the AllowedCidr list (Fn::ForEach).
       Tags: [{ Key: Name, Value: anyray-alb }]
@@ -455,7 +585,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Anyray Fargate tasks.
-      VpcId: !Ref VpcId
+      VpcId: !GetAtt Net.VpcId
       Tags: [{ Key: Name, Value: anyray-tasks }]
 
   TasksFromAlbGateway:
@@ -502,7 +632,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Anyray RDS - Postgres from the Fargate tasks only.
-      VpcId: !Ref VpcId
+      VpcId: !GetAtt Net.VpcId
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref TasksSg, Description: Postgres from tasks }
       Tags: [{ Key: Name, Value: anyray-rds }]
@@ -511,7 +641,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Anyray EFS - NFS from the Fargate tasks only.
-      VpcId: !Ref VpcId
+      VpcId: !GetAtt Net.VpcId
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 2049, ToPort: 2049, SourceSecurityGroupId: !Ref TasksSg, Description: NFS from tasks }
       Tags: [{ Key: Name, Value: anyray-efs }]
@@ -521,7 +651,7 @@ Resources:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
       DBSubnetGroupDescription: Anyray RDS subnet group.
-      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SubnetIds: [!GetAtt Net.SubnetA, !GetAtt Net.SubnetB]
 
   Db:
     Type: AWS::RDS::DBInstance
@@ -556,14 +686,14 @@ Resources:
     Type: AWS::EFS::MountTarget
     Properties:
       FileSystemId: !Ref Efs
-      SubnetId: !Ref SubnetA
+      SubnetId: !GetAtt Net.SubnetA
       SecurityGroups: [!Ref EfsSg]
 
   EfsMountB:
     Type: AWS::EFS::MountTarget
     Properties:
       FileSystemId: !Ref Efs
-      SubnetId: !Ref SubnetB
+      SubnetId: !GetAtt Net.SubnetB
       SecurityGroups: [!Ref EfsSg]
 
   GatewayAp:
@@ -593,7 +723,7 @@ Resources:
     Properties:
       # Stack-scoped: one VPC can't hold two hosted zones with the same domain.
       Name: !Sub '${AWS::StackName}.anyray.internal'
-      Vpc: !Ref VpcId
+      Vpc: !GetAtt Net.VpcId
 
   # Cloud Map service discovery with REAL Route 53 A records — not ECS Service
   # Connect. The console proxy is nginx resolving its gateway upstream at
@@ -695,13 +825,13 @@ Resources:
     Properties:
       Type: application
       Scheme: internet-facing
-      Subnets: [!Ref SubnetA, !Ref SubnetB]
+      Subnets: [!GetAtt Net.SubnetA, !GetAtt Net.SubnetB]
       SecurityGroups: [!Ref AlbSg]
 
   GatewayTg:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !GetAtt Net.VpcId
       TargetType: ip
       Port: 8787
       Protocol: HTTP
@@ -713,7 +843,7 @@ Resources:
   ProxyTg:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      VpcId: !Ref VpcId
+      VpcId: !GetAtt Net.VpcId
       TargetType: ip
       Port: 80
       Protocol: HTTP
@@ -945,7 +1075,7 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
-          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          Subnets: [!GetAtt Net.SubnetA, !GetAtt Net.SubnetB]
           SecurityGroups: [!Ref TasksSg]
       ServiceRegistries:
         - RegistryArn: !GetAtt OptimizerDiscovery.Arn
@@ -967,7 +1097,7 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
-          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          Subnets: [!GetAtt Net.SubnetA, !GetAtt Net.SubnetB]
           SecurityGroups: [!Ref TasksSg]
       LoadBalancers:
         - { TargetGroupArn: !Ref GatewayTg, ContainerName: gateway, ContainerPort: 8787 }
@@ -991,7 +1121,7 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
-          Subnets: [!Ref SubnetA, !Ref SubnetB]
+          Subnets: [!GetAtt Net.SubnetA, !GetAtt Net.SubnetB]
           SecurityGroups: [!Ref TasksSg]
       LoadBalancers:
         - { TargetGroupArn: !Ref ProxyTg, ContainerName: proxy, ContainerPort: 80 }

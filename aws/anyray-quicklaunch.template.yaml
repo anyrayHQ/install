@@ -43,9 +43,10 @@ Metadata:
       - Label: { default: Optimizer }
         Parameters: [OptimizerTimeoutMs, OptimizerVisionTimeoutMs]
       - Label: { default: Database }
-        Parameters: [DbInstanceClass, DbAllocatedStorage, DbMaxAllocatedStorage]
+        Parameters: [DbInstanceClass, DbAllocatedStorage, DbMaxAllocatedStorage, EnableRdsDeletionProtection]
     ParameterLabels:
       AllowedCidr: { default: "Allowed CIDR(s) (your office/VPN range, comma-separated)" }
+      EnableRdsDeletionProtection: { default: "Protect the database from deletion (production)" }
       SubnetA: { default: "Public subnet in AZ 1" }
       SubnetB: { default: "Public subnet in AZ 2 (different AZ)" }
 
@@ -232,6 +233,17 @@ Parameters:
       storage). Trace content accumulates until the 90-day retention window
       fills, so the database grows for its first three months; without
       autoscaling it goes storage-full and stops accepting writes.
+  EnableRdsDeletionProtection:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Block deletion of the database instance. Recommended for production: it
+      guards against an accidental console or CLI delete, which DeletionPolicy
+      Snapshot does not cover (that only applies to deletion through this
+      stack). Left off by default so the stack stays one-click removable. NOTE:
+      while this is true, deleting the stack FAILS — set it back to false and
+      update the stack first, then delete.
 
 Rules:
   AllowedCidrMustNotBePublic:
@@ -247,6 +259,7 @@ Conditions:
   HasCert: !Not [!Equals [!Ref CertificateArn, '']]
   HasGatewayUrl: !Not [!Equals [!Ref GatewayPublicUrl, '']]
   HasConsoleUrl: !Not [!Equals [!Ref ConsolePublicUrl, '']]
+  RdsDeletionProtection: !Equals [!Ref EnableRdsDeletionProtection, 'true']
 
 Resources:
   # ---- Secret generation (no setup.sh) --------------------------------------
@@ -529,6 +542,7 @@ Resources:
       PubliclyAccessible: false
       MultiAZ: false
       BackupRetentionPeriod: 7
+      DeletionProtection: !If [RdsDeletionProtection, true, false]
       Tags: [{ Key: Name, Value: anyray }]
 
   # ---- EFS for gateway + optimizer /data -------------------------------------

@@ -16,14 +16,14 @@ Description: >-
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
-      - Label: { default: Networking }
-        Parameters: [VpcId, SubnetA, SubnetB, AllowedCidr]
+      - Label: { default: Start here }
+        Parameters: [AllowedCidr, DeploymentToken]
       - Label: { default: Images }
         Parameters: [ImageTag, DefaultModel]
       - Label: { default: Ingress / TLS }
         Parameters: [CertificateArn, GatewayPublicUrl, ConsolePublicUrl]
       - Label: { default: Anyray Cloud (metering) }
-        Parameters: [DeploymentToken, SeatExclude, MeteringIntervalMs, EntitlementGraceMs]
+        Parameters: [SeatExclude, MeteringIntervalMs, EntitlementGraceMs]
       - Label: { default: Content privacy }
         Parameters: [ContentMode, AllowPlaintext, SpendRetentionDays]
       - Label: { default: Gateway hardening }
@@ -44,6 +44,8 @@ Metadata:
         Parameters: [OptimizerTimeoutMs, OptimizerVisionTimeoutMs]
       - Label: { default: Database }
         Parameters: [DbInstanceClass, DbAllocatedStorage, DbMaxAllocatedStorage, EnableRdsDeletionProtection]
+      - Label: { default: Advanced networking (leave blank) }
+        Parameters: [VpcId, SubnetA, SubnetB]
     ParameterLabels:
       AllowedCidr: { default: "Allowed CIDR(s) (your office/VPN range, comma-separated)" }
       EnableRdsDeletionProtection: { default: "Protect the database from deletion (production)" }

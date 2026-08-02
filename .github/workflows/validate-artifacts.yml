@@ -197,6 +197,25 @@ jobs:
         run: |
           pipx install cfn-lint
           cfn-lint aws/anyray-quicklaunch.template.yaml
+      - name: Template stays within CloudFormation size limits
+        run: |
+          set -euo pipefail
+          template=aws/anyray-quicklaunch.template.yaml
+          bytes="$(wc -c < "$template" | tr -d ' ')"
+          # CloudFormation caps a template at 51,200 bytes when passed inline
+          # (--template-body) and 460,800 when fetched from S3 (--template-url).
+          # Everything documented uses the S3 URL, so the S3 cap is the one that
+          # would actually break a customer deploy. cfn-lint checks neither.
+          inline=51200
+          s3=460800
+          echo "template is ${bytes} bytes (inline cap ${inline}, S3 cap ${s3})"
+          if [ "$bytes" -ge "$s3" ]; then
+            echo "::error::Template is ${bytes} bytes, at or over the ${s3}-byte S3 limit — deploys will fail."
+            exit 1
+          fi
+          if [ "$bytes" -ge "$inline" ]; then
+            echo "::notice::Template is ${bytes} bytes, over the ${inline}-byte inline limit. Deploys are unaffected (they use --template-url), but 'aws cloudformation validate-template/create-stack --template-body' no longer works on this file."
+          fi
       - name: CloudFormation image pin stays immutable across release stamps
         run: |
           set -euo pipefail

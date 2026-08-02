@@ -57,6 +57,8 @@ Parameters:
   VpcId:
     Type: String
     Default: ''
+    AllowedPattern: '^$|^vpc-[0-9a-f]{8,17}$'
+    ConstraintDescription: Leave blank, or give a VPC id like vpc-0a1b2c3d.
     Description: >-
       LEAVE BLANK to use this account's default VPC — that is the normal choice
       and needs no networking knowledge. Only set this (together with SubnetA
@@ -64,6 +66,8 @@ Parameters:
   SubnetA:
     Type: String
     Default: ''
+    AllowedPattern: '^$|^subnet-[0-9a-f]{8,17}$'
+    ConstraintDescription: Leave blank, or give a subnet id like subnet-0a1b2c3d.
     Description: >-
       Leave blank unless you set VpcId. A PUBLIC subnet that auto-assigns a
       public IPv4 — tasks pull images from GHCR and reach the Portal/providers
@@ -71,6 +75,8 @@ Parameters:
   SubnetB:
     Type: String
     Default: ''
+    AllowedPattern: '^$|^subnet-[0-9a-f]{8,17}$'
+    ConstraintDescription: Leave blank, or give a subnet id like subnet-0a1b2c3d.
     Description: >-
       Leave blank unless you set VpcId. A second PUBLIC subnet in a DIFFERENT AZ
       — the load balancer and RDS both require two AZs.
@@ -264,6 +270,21 @@ Rules:
                 - !Ref AllowedCidr
                 - '0.0.0.0/0'
         AssertDescription: AllowedCidr must be scoped to your org or VPN, not 0.0.0.0/0.
+  VpcTrioAllOrNothing:
+    Assertions:
+      - Assert:
+          Fn::Or:
+            - Fn::And:
+                - Fn::Equals: [!Ref VpcId, '']
+                - Fn::Equals: [!Ref SubnetA, '']
+                - Fn::Equals: [!Ref SubnetB, '']
+            - Fn::And:
+                - Fn::Not: [Fn::Equals: [!Ref VpcId, '']]
+                - Fn::Not: [Fn::Equals: [!Ref SubnetA, '']]
+                - Fn::Not: [Fn::Equals: [!Ref SubnetB, '']]
+        AssertDescription: >-
+          Leave VpcId, SubnetA and SubnetB ALL blank to use this account's default
+          VPC, or set all three. Setting only some of them is not valid.
 
 Conditions:
   HasCert: !Not [!Equals [!Ref CertificateArn, '']]
@@ -298,7 +319,7 @@ Resources:
             Statement:
               # Describe* does not support resource-level permissions.
               - Effect: Allow
-                Action: [ec2:DescribeVpcs, ec2:DescribeSubnets]
+                Action: [ec2:DescribeVpcs, ec2:DescribeSubnets, ec2:DescribeRouteTables]
                 Resource: '*'
 
   NetFn:
@@ -326,6 +347,23 @@ Resources:
                   headers={'content-type': '', 'content-length': str(len(body))})
               urllib.request.urlopen(req)
 
+          def routes_to_igw(subnet_id, vpc):
+              # MapPublicIpOnLaunch only assigns an address; without a default
+              # route to an internet gateway the task still cannot reach GHCR.
+              rts = ec2.describe_route_tables(Filters=[
+                  {'Name': 'association.subnet-id', 'Values': [subnet_id]}])['RouteTables']
+              if not rts:
+                  # No explicit association means the subnet uses the VPC main table.
+                  rts = ec2.describe_route_tables(Filters=[
+                      {'Name': 'vpc-id', 'Values': [vpc]},
+                      {'Name': 'association.main', 'Values': ['true']}])['RouteTables']
+              for rt in rts:
+                  for r in rt.get('Routes', []):
+                      if (r.get('DestinationCidrBlock') == '0.0.0.0/0'
+                              and (r.get('GatewayId') or '').startswith('igw-')):
+                          return True
+              return False
+
           def resolve(props):
               vpc = (props.get('VpcId') or '').strip()
               a = (props.get('SubnetA') or '').strip()
@@ -351,7 +389,8 @@ Resources:
                       {'Name': 'default-for-az', 'Values': ['true']}])['Subnets']
                   by_az = {}
                   for sn in sorted(subs, key=lambda x: x['SubnetId']):
-                      if sn.get('MapPublicIpOnLaunch'):
+                      if (sn.get('MapPublicIpOnLaunch')
+                              and routes_to_igw(sn['SubnetId'], vpc)):
                           by_az.setdefault(sn['AvailabilityZone'], sn['SubnetId'])
                   if len(by_az) < 2:
                       raise Exception(
@@ -361,6 +400,13 @@ Resources:
                   azs = sorted(by_az)
                   a, b = by_az[azs[0]], by_az[azs[1]]
               else:
+                  # Check this before DescribeSubnets: the API de-duplicates ids, so
+                  # passing the same subnet twice comes back as a single result and
+                  # would slip past the availability-zone comparison below.
+                  if a == b:
+                      raise Exception(
+                          'SubnetA and SubnetB are the same subnet (%s). The load balancer '
+                          'and RDS both need two subnets in different availability zones.' % a)
                   found = ec2.describe_subnets(SubnetIds=[a, b])['Subnets']
                   for sn in found:
                       if sn['VpcId'] != vpc:
@@ -370,7 +416,13 @@ Resources:
                               'Subnet %s does not auto-assign a public IPv4. Tasks pull images '
                               'from GHCR with no NAT gateway, so both subnets must be public.'
                               % sn['SubnetId'])
-                  if len(found) == 2 and found[0]['AvailabilityZone'] == found[1]['AvailabilityZone']:
+                      if not routes_to_igw(sn['SubnetId'], vpc):
+                          raise Exception(
+                              'Subnet %s has no default route to an internet gateway, so tasks '
+                              'in it cannot reach GHCR to pull images. Use a public subnet.'
+                              % sn['SubnetId'])
+                  azs = {sn['AvailabilityZone'] for sn in found}
+                  if len(azs) < 2:
                       raise Exception(
                           'SubnetA and SubnetB must be in different availability zones (both '
                           'are in %s).' % found[0]['AvailabilityZone'])

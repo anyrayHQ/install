@@ -1031,6 +1031,28 @@ Resources:
       Principal: '*'
       FunctionUrlAuthType: NONE
 
+  # BOTH grants are required. Lambda's URL front door now authorises
+  # `lambda:InvokeFunction` as well as `lambda:InvokeFunctionUrl`, so with only
+  # the statement above EVERY caller gets a service-layer 403 ("Forbidden",
+  # from the front door) before the function's own bearer check ever runs — the
+  # gateway's auto-update trigger then fails on every attempt, and logs it
+  # misleadingly as a token mismatch. Verified against a live Function URL:
+  # InvokeFunctionUrl alone → 403, both → 200.
+  #
+  # This one carries no FunctionUrlAuthType condition — Lambda rejects the
+  # property outright on any action other than InvokeFunctionUrl ("only
+  # supported for lambda:InvokeFunctionUrl"), which fails the stack. It widens
+  # nothing in practice: the URL above is already AuthType NONE, so the
+  # endpoint is public by design and the handler's bearer check against the
+  # admin token is the actual gate, on both paths.
+  UpdaterInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: AutoUpdate
+    Properties:
+      FunctionName: !GetAtt UpdaterFn.Arn
+      Action: lambda:InvokeFunction
+      Principal: '*'
+
   GatewayLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:

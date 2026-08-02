@@ -19,7 +19,7 @@ Metadata:
       - Label: { default: Start here }
         Parameters: [AllowedCidr, DeploymentToken]
       - Label: { default: Images }
-        Parameters: [ImageTag, DefaultModel]
+        Parameters: [ImageTag, EnableAutoUpdate, DefaultModel]
       - Label: { default: Ingress / TLS }
         Parameters: [CertificateArn, GatewayPublicUrl, ConsolePublicUrl]
       - Label: { default: Anyray Cloud (metering) }
@@ -100,6 +100,18 @@ Parameters:
       Immutable Anyray release tag deployed by all three services. This default
       is stamped by the release workflow; mutable latest/stable channels are not
       accepted because independently rolled ECS tasks must stay compatible.
+  EnableAutoUpdate:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Let this deployment apply compatible ("soft") releases on its own. The
+      gateway already decides WHETHER an update is safe — it evaluates the
+      release manifest against this install and never applies one needing
+      operator action. This only gives it the arm it lacks on ECS: a Lambda
+      that rolls all three services together. Turning it off removes that arm;
+      the gateway keeps notifying in the console either way. The operator can
+      also flip it at runtime via PUT /admin/update/settings.
   DefaultModel:
     Type: String
     Default: 'anthropic/claude-sonnet-4-5'
@@ -291,6 +303,7 @@ Conditions:
   HasGatewayUrl: !Not [!Equals [!Ref GatewayPublicUrl, '']]
   HasConsoleUrl: !Not [!Equals [!Ref ConsolePublicUrl, '']]
   RdsDeletionProtection: !Equals [!Ref EnableRdsDeletionProtection, 'true']
+  AutoUpdate: !Equals [!Ref EnableAutoUpdate, 'true']
 
 Resources:
   # ---- Network resolution -----------------------------------------------------
@@ -857,6 +870,167 @@ Resources:
                   - elasticfilesystem:ClientWrite
                 Resource: !GetAtt Efs.Arn
 
+  # ---- Soft-update applier ----------------------------------------------------
+  # The gateway owns the DECISION: it polls the release manifest, evaluates it
+  # against this deployment (updatePreflight.classifyUpdate) and only triggers
+  # for a `soft` release — image swap only, preflight green, no breaking notes.
+  # Schema migrations self-apply on boot, so they never make a release hard.
+  # Hard releases are never applied unattended and stay on the notify path.
+  #
+  # Compose bundles Watchtower to execute that decision. ECS has no equivalent,
+  # so this is it: same contract Watchtower speaks (POST + bearer token), and it
+  # rolls all three services together so they can never land on different
+  # versions. The services already run a deployment circuit breaker with
+  # rollback, so a release that fails its health checks reverts itself.
+  UpdaterRole:
+    Type: AWS::IAM::Role
+    Condition: AutoUpdate
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: roll-services
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scoped to this stack's cluster. Deliberately NOT the individual
+              # service ARNs: the gateway task definition consumes this
+              # function's URL, so depending on the services would make the
+              # stack circular.
+              - Effect: Allow
+                Action: [ecs:ListServices, ecs:DescribeServices, ecs:UpdateService]
+                Resource: '*'
+                Condition:
+                  ArnEquals:
+                    ecs:cluster: !GetAtt Cluster.Arn
+              # Task-definition APIs are not resource-scopable.
+              - Effect: Allow
+                Action: [ecs:DescribeTaskDefinition, ecs:RegisterTaskDefinition]
+                Resource: '*'
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: [!GetAtt ExecutionRole.Arn, !GetAtt TaskRole.Arn]
+              # Verifies the caller's bearer token against the admin token.
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !GetAtt AppSecrets.AdminTokenArn
+
+  UpdaterFn:
+    Type: AWS::Lambda::Function
+    Condition: AutoUpdate
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 120
+      Role: !GetAtt UpdaterRole.Arn
+      Environment:
+        Variables:
+          CLUSTER: !Ref Cluster
+          FAMILY_PREFIX: !Sub '${AWS::StackName}-'
+          TOKEN_SECRET_ARN: !GetAtt AppSecrets.AdminTokenArn
+          INDEX_URL: https://charts.anyray.ai/index.yaml
+      Code:
+        ZipFile: |
+          import hmac, json, os, re, urllib.request, traceback, boto3
+          ecs = boto3.client('ecs')
+          sm = boto3.client('secretsmanager')
+          SEMVER = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
+          FAMILIES = ('gateway', 'optimizer', 'proxy')
+
+          def reply(code, body):
+              return {'statusCode': code,
+                      'headers': {'content-type': 'application/json'},
+                      'body': json.dumps(body)}
+
+          def authorised(event):
+              hdrs = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
+              presented = (hdrs.get('authorization') or '')[len('Bearer '):]
+              expected = sm.get_secret_value(
+                  SecretId=os.environ['TOKEN_SECRET_ARN'])['SecretString']
+              return bool(presented) and hmac.compare_digest(presented, expected)
+
+          def latest_release():
+              with urllib.request.urlopen(os.environ['INDEX_URL'], timeout=20) as r:
+                  body = r.read().decode('utf-8', 'replace')
+              tags = set(re.findall(r'appVersion:\s*(v\d+\.\d+\.\d+)\s*$', body, re.M))
+              if not tags:
+                  raise Exception('no appVersion entries in the release index')
+              return max(tags, key=lambda t: tuple(int(x) for x in SEMVER.match(t).groups()))
+
+          def services_for(cluster, prefix):
+              """This stack's three services, found by task-definition family."""
+              out, token = [], None
+              while True:
+                  page = ecs.list_services(cluster=cluster, maxResults=100,
+                                           **({'nextToken': token} if token else {}))
+                  arns = page.get('serviceArns') or []
+                  if arns:
+                      for svc in ecs.describe_services(
+                              cluster=cluster, services=arns)['services']:
+                          family = svc['taskDefinition'].split('/')[-1].split(':')[0]
+                          if family in [prefix + f for f in FAMILIES]:
+                              out.append((svc['serviceName'], family))
+                  token = page.get('nextToken')
+                  if not token:
+                      break
+              return out
+
+          def handler(event, context):
+              try:
+                  if not authorised(event):
+                      return reply(403, {'status': 'failure',
+                                         'message': 'bad or missing bearer token'})
+                  tag = latest_release()
+                  cluster = os.environ['CLUSTER']
+                  updated, current = [], []
+                  for service, family in services_for(cluster, os.environ['FAMILY_PREFIX']):
+                      td = ecs.describe_task_definition(taskDefinition=family)['taskDefinition']
+                      if all(c['image'].rsplit(':', 1)[-1] == tag
+                             for c in td['containerDefinitions']):
+                          current.append(service)
+                          continue
+                      for k in ('taskDefinitionArn', 'revision', 'status',
+                                'requiresAttributes', 'compatibilities',
+                                'registeredAt', 'registeredBy', 'deregisteredAt'):
+                          td.pop(k, None)
+                      for c in td['containerDefinitions']:
+                          c['image'] = c['image'].rsplit(':', 1)[0] + ':' + tag
+                      arn = ecs.register_task_definition(**td)['taskDefinition']['taskDefinitionArn']
+                      ecs.update_service(cluster=cluster, service=service, taskDefinition=arn)
+                      updated.append(service)
+                  result = {'status': 'ok', 'tag': tag,
+                            'updated': updated, 'alreadyCurrent': current}
+                  print(json.dumps(result))
+                  return reply(200, result)
+              except Exception as e:
+                  print('updater FAILED:', traceback.format_exc())
+                  return reply(500, {'status': 'failure', 'message': str(e)})
+
+  # AuthType NONE because the caller is the gateway container, which has no AWS
+  # credentials to sign with — the bearer check above is the gate, exactly as
+  # Watchtower's HTTP API works on compose.
+  UpdaterUrl:
+    Type: AWS::Lambda::Url
+    Condition: AutoUpdate
+    Properties:
+      TargetFunctionArn: !GetAtt UpdaterFn.Arn
+      AuthType: NONE
+
+  UpdaterUrlPermission:
+    Type: AWS::Lambda::Permission
+    Condition: AutoUpdate
+    Properties:
+      FunctionName: !GetAtt UpdaterFn.Arn
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
   GatewayLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -1011,6 +1185,13 @@ Resources:
             - { SourceVolume: data, ContainerPath: /data }
           Environment:
             - { Name: ANYRAY_OPTIMIZER_URL, Value: !Sub 'http://optimizer-dns.${AWS::StackName}.anyray.internal:8088' }
+            # Gives the gateway's existing soft-update loop an applier on ECS.
+            # Unset (EnableAutoUpdate=false) => the loop no-ops and this install
+            # stays notify-only, exactly like Kubernetes and Railway.
+            - !If
+              - AutoUpdate
+              - { Name: ANYRAY_UPDATER_URL, Value: !GetAtt UpdaterUrl.FunctionUrl }
+              - !Ref 'AWS::NoValue'
             - { Name: ANYRAY_OPTIMIZER_TIMEOUT_MS, Value: !Ref OptimizerTimeoutMs }
             - { Name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS, Value: !Ref OptimizerVisionTimeoutMs }
             - { Name: ANYRAY_DEFAULT_MODEL, Value: !Ref DefaultModel }

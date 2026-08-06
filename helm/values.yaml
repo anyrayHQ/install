@@ -105,16 +105,19 @@ priorityClassName: ""
 #   which has to cover preStopDrainSeconds PLUS the application's own drain. On
 #   SIGTERM the gateway stops accepting connections and lets in-flight requests
 #   (notably long streaming completions) finish for up to
-#   ANYRAY_SHUTDOWN_DRAIN_MS, default 20000; if this budget runs out first the
-#   kubelet SIGKILLs mid-drain and resets every open stream. It is a ceiling and
-#   not a delay — a pod that exits sooner terminates sooner — so the default is
-#   set with headroom above the 20s drain plus the 5s pre-stop pause. Raise it
-#   whenever you raise ANYRAY_SHUTDOWN_DRAIN_MS for longer completions.
+#   ANYRAY_SHUTDOWN_DRAIN_MS, default 90000; if this budget runs out first the
+#   kubelet SIGKILLs mid-drain and resets every open stream — which a coding
+#   assistant reports as "Connection closed mid-response", blamed on the gateway
+#   rather than on the rollout that cut it. It is a ceiling and not a delay — a
+#   pod that exits sooner terminates sooner — so the default is set with headroom
+#   above the 90s drain plus the 5s pre-stop pause. Raise it whenever you raise
+#   ANYRAY_SHUTDOWN_DRAIN_MS for longer completions; the chart refuses to render
+#   if the sum no longer fits.
 # minReadySeconds — how long a new pod must stay Ready before the rollout counts
 #   it as available, so a pod that passes one probe and then crashes cannot take
 #   the previous version down with it.
 preStopDrainSeconds: 5
-terminationGracePeriodSeconds: 45
+terminationGracePeriodSeconds: 120
 minReadySeconds: 10
 
 # PodDisruptionBudget for the gateway, optimizer and proxy Deployments: caps how
@@ -321,6 +324,15 @@ postgres:
 ingress:
   enabled: false
   className: ""
+  # Streaming-safe ingress-nginx defaults for the /v1 path, applied unless you
+  # turn them off: proxy-read-timeout / proxy-send-timeout 3600 (stock 60s cuts
+  # a long completion mid-stream — the client then reports "Connection closed
+  # mid-response" and blames the gateway), proxy-body-size 32m (stock 1m 413s an
+  # ordinary coding request; mirrors the gateway's own ANYRAY_MAX_BODY_BYTES),
+  # proxy-buffering off (buffering defeats SSE). Anything you set in
+  # `annotations` below wins over these key by key, so set this to false only if
+  # your controller should carry none of them.
+  streamingDefaults: true
   annotations: {}
   hosts: []
   # Optional override for one or more hosts. Leave empty to use `host`.
@@ -346,6 +358,13 @@ ingress:
 # Gateway API CRDs (gateway.networking.k8s.io/v1) installed in the cluster.
 httpRoute:
   enabled: false
+  # Disable the request timeout on the two gateway rules (/v1, /connect), which
+  # carry streaming completions that run for minutes. Gateway API leaves an unset
+  # request timeout implementation-specific — Envoy Gateway applies 15s — and
+  # anything short cuts a turn mid-stream, which the developer's tool reports as
+  # "Connection closed mid-response". Set false to leave every rule on the
+  # implementation's own default.
+  streamingDefaults: true
   # The Gateway(s) this route attaches to. REQUIRED when enabled.
   parentRefs: []
   #  - name: my-gateway

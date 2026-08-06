@@ -1088,7 +1088,14 @@ Resources:
       HealthCheckPath: /
       Matcher: { HttpCode: 200-399 }
       TargetGroupAttributes:
-        - { Key: deregistration_delay.timeout_seconds, Value: '15' }
+        # How long the ALB lets in-flight requests finish on a target it is
+        # deregistering (every deploy). /v1 streams run for minutes, so the
+        # stock-ish 15s used to close them from the LOAD BALANCER side while the
+        # task was still draining happily — a bare transport close the gateway
+        # never sees and the developer's tool reports as "Connection closed
+        # mid-response". Kept at/above the task's StopTimeout so the ALB is never
+        # the first to give up.
+        - { Key: deregistration_delay.timeout_seconds, Value: '120' }
 
   ProxyTg:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -1201,6 +1208,13 @@ Resources:
         - Name: gateway
           Image: !Sub 'public.ecr.aws/anyray/gateway:${ImageTag}'
           Essential: true
+          # Seconds ECS waits after SIGTERM before SIGKILL. Must exceed the
+          # gateway's own drain (ANYRAY_SHUTDOWN_DRAIN_MS, default 90000), or
+          # every deploy kills the streaming turns it was in the middle of
+          # finishing. ECS's own default is 30s — short enough to cut an ordinary
+          # coding request — and 120 is the Fargate maximum. A ceiling, not a
+          # delay: a task with nothing in flight still stops at once.
+          StopTimeout: 120
           PortMappings:
             - { Name: gateway, ContainerPort: 8787, Protocol: tcp }
           MountPoints:

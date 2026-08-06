@@ -1,11 +1,34 @@
 {{- if .Values.ingress.enabled }}
+{{- /* /v1 carries streaming LLM responses that run for MINUTES and request
+bodies of a megabyte or more, and this Ingress is the only hop between the
+developer's tool and the gateway. ingress-nginx's stock defaults are sized for
+ordinary web traffic and break both: proxy-read-timeout/proxy-send-timeout are
+60s, so nginx tears down a stream during any longer gap between SSE events —
+the client gets a bare transport close and reports "Connection closed
+mid-response" against the gateway, which never saw a failure — and
+proxy-body-size is 1m, which 413s an ordinary coding request.
+
+So the chart ships streaming-safe values instead of leaving every operator to
+rediscover them. Merged UNDER .Values.ingress.annotations (merge favours the
+destination), so setting any of these keys yourself still wins, and
+ingress.streamingDefaults=false drops them entirely for a controller that wants
+none of it. Keys are ingress-nginx-specific; other controllers ignore
+annotations they do not recognise. */ -}}
+{{- $annotations := deepCopy (default (dict) .Values.ingress.annotations) }}
+{{- if .Values.ingress.streamingDefaults }}
+{{- $annotations = merge $annotations (dict
+      "nginx.ingress.kubernetes.io/proxy-read-timeout" "3600"
+      "nginx.ingress.kubernetes.io/proxy-send-timeout" "3600"
+      "nginx.ingress.kubernetes.io/proxy-body-size" "32m"
+      "nginx.ingress.kubernetes.io/proxy-buffering" "off") }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "anyray.fullname" . }}
   labels:
     {{- include "anyray.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- with $annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

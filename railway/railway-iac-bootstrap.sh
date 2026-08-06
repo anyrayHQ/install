@@ -65,6 +65,14 @@ set_if_empty gateway ANYRAY_ADMIN_TOKEN "$(hex 24)"
 set_if_empty gateway ANYRAY_CONTENT_KEY "$(hex 32)"      # 32-byte AES-256-GCM key
 set_if_empty gateway ANYRAY_OPTIMIZER_TOKEN "$(hex 24)"
 set_if_empty gateway ANYRAY_PSEUDONYM_SALT "$(hex 16)"
+# Not a secret, but it belongs to the same "must exist before the first deploy"
+# set. Railway's SIGTERM-to-SIGKILL buffer defaults to 0, so without this the
+# gateway is killed the instant a deploy starts and its own drain
+# (ANYRAY_SHUTDOWN_DRAIN_MS, 90s) never runs at all: every streaming turn in
+# flight is cut, which the developer's tool reports as "Connection closed
+# mid-response". Seeded here as well as in railway.template.json so a re-run
+# fixes a project that predates the template change.
+set_if_empty gateway RAILWAY_DEPLOYMENT_DRAINING_SECONDS "120"
 set_if_empty proxy   ANYRAY_UPDATER_TOKEN "$(hex 16)"
 
 # A re-run may omit the token only when the gateway already has one.

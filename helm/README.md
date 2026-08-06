@@ -169,7 +169,7 @@ each is overridable per component:
 | Value | Default | What it does |
 | --- | --- | --- |
 | `preStopDrainSeconds` | `5` | Keeps a pod serving after termination starts but before SIGTERM, so requests stop arriving before the process stops listening. On the `Recreate` path this also lengthens the gap, since nothing starts until the old pod is gone — set `0` to trade in-flight requests for a shorter window. |
-| `terminationGracePeriodSeconds` | `45` | Budget from "terminating" to SIGKILL. Must exceed `preStopDrainSeconds` plus the gateway's own drain of in-flight requests (`ANYRAY_SHUTDOWN_DRAIN_MS`, default 20000), or streams are cut mid-response. A ceiling, not a delay. |
+| `terminationGracePeriodSeconds` | `120` | Budget from "terminating" to SIGKILL. Must exceed `preStopDrainSeconds` plus the gateway's own drain of in-flight requests (`ANYRAY_SHUTDOWN_DRAIN_MS`, default 90000), or streams are cut mid-response and the developer's tool reports "Connection closed mid-response". A ceiling, not a delay; the chart refuses to render if the sum no longer fits. |
 | `minReadySeconds` | `10` | How long a new pod must stay Ready before the rollout counts it available, so a pod that passes one probe and then crashes cannot retire the previous version. |
 
 A `PodDisruptionBudget` (`podDisruptionBudget.maxUnavailable`, default `1`) is
@@ -231,6 +231,15 @@ gateway:
 
 **Ingress:** Set `ingress.enabled: true` in your values file and fill in `ingress.className`
 and any cert-manager annotations. See the commented example in `values.yaml`.
+
+The `/v1` path carries streaming completions that run for minutes and request bodies over a
+megabyte, which ingress-nginx's stock 60s `proxy-read-timeout` and 1 MB `proxy-body-size` both cut
+short. `ingress.streamingDefaults` (default `true`) therefore adds `proxy-read-timeout` and
+`proxy-send-timeout` `3600`, `proxy-body-size` `32m`, and `proxy-buffering` `off`. Anything you set
+in `ingress.annotations` wins over these key by key; set `streamingDefaults: false` to drop them
+entirely. On the Gateway API path, `httpRoute.streamingDefaults` (default `true`) disables the
+request timeout on the `/v1` and `/connect` rules, because an unset Gateway API request timeout is
+implementation-specific and some implementations apply a value far below one completion.
 
 For TLS / Ingress installs, set the gateway and console public URLs explicitly so
 links and auth callbacks use the externally reachable scheme and host:

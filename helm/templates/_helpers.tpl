@@ -236,8 +236,10 @@ copy one in from their assemble stage — so /bin/sleep is present in each.
 {{- define "anyray.preStopDrain" -}}
 {{- $context := . -}}
 {{- $overrides := dict -}}
+{{- $component := "" -}}
 {{- if hasKey . "context" -}}
 {{- $context = .context -}}
+{{- $component = toString .component -}}
 {{- $overrides = (index $context.Values .component | default dict) -}}
 {{- end -}}
 {{- $seconds := $context.Values.preStopDrainSeconds -}}
@@ -257,12 +259,22 @@ Fail the render rather than ship that silently. */ -}}
 {{- fail (printf "preStopDrainSeconds (%d) must be less than terminationGracePeriodSeconds (%d): the pre-stop pause is spent inside the termination budget, so the container would be SIGKILLed before it is ever sent SIGTERM" (int $seconds) (int $grace)) -}}
 {{- end -}}
 {{- /* The pause is only half the budget: after SIGTERM the app drains its own
-in-flight requests. The gateway does that for ANYRAY_SHUTDOWN_DRAIN_MS, which an
-operator raises through extraEnv for long streaming completions — and raising it
-past the remaining budget puts SIGKILL back in the middle of the drain, which is
-the very thing terminationGracePeriodSeconds was set to prevent. Read the
-override back out of extraEnv and check the SUM. */ -}}
-{{- $drainMs := 0 -}}
+in-flight requests. The gateway does that for ANYRAY_SHUTDOWN_DRAIN_MS — and a
+drain running past the remaining budget puts SIGKILL back in the middle of it,
+which is the very thing terminationGracePeriodSeconds was set to prevent.
+
+Seed the GATEWAY's compiled-in default (90000, gateway/src/start-server.ts) so
+the check covers the path nobody configures, then let an extraEnv override
+replace it, and check the SUM. Seeding it only for the gateway is deliberate:
+the optimizer installs no SIGTERM handler at all and the proxy drains on
+nginx's own SIGQUIT, so charging either of them a 90s drain would fail renders
+over a wait they never perform.
+
+CHANGE-BOTH-TOGETHER: this constant mirrors SHUTDOWN_DRAIN_MS in the monorepo
+(gateway/src/start-server.ts). Lower it here and the guard stops protecting the
+real default; raise the app's without raising this and a stock install is
+SIGKILLed mid-drain again. */ -}}
+{{- $drainMs := ternary 90000 0 (eq $component "gateway") -}}
 {{- range $env := ($overrides.extraEnv | default list) -}}
 {{- if eq (toString $env.name) "ANYRAY_SHUTDOWN_DRAIN_MS" -}}
 {{- $drainMs = int (toString $env.value) -}}

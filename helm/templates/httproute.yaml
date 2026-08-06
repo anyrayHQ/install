@@ -29,11 +29,26 @@ spec:
   # Same split as the Ingress: /v1 + /connect -> gateway, / + /admin -> console
   # proxy. Gateway API resolves matches by longest path prefix, so the catch-all
   # "/" never shadows the more-specific routes regardless of rule order.
+  #
+  # The gateway rules pin `timeouts.request: 0s` (disabled) for the same reason
+  # the Ingress carries proxy-read-timeout: a streaming completion runs for
+  # minutes, and the spec leaves an unset request timeout
+  # IMPLEMENTATION-SPECIFIC — Envoy Gateway, for one, applies 15s, which would
+  # cut nearly every turn mid-stream and surface to the developer as a bare
+  # "Connection closed mid-response" blamed on the gateway. Console/admin rules
+  # are left on the implementation's default; they serve ordinary short
+  # requests. `timeouts` is Gateway API >= v1.1; an older CRD prunes the unknown
+  # field rather than rejecting the route. Set httpRoute.streamingDefaults=false
+  # to leave every rule on the implementation default.
   rules:
     - matches:
         - path:
             type: PathPrefix
             value: /v1
+      {{- if .Values.httpRoute.streamingDefaults }}
+      timeouts:
+        request: 0s
+      {{- end }}
       backendRefs:
         - name: gateway
           port: 8787
@@ -41,6 +56,10 @@ spec:
         - path:
             type: PathPrefix
             value: /connect
+      {{- if .Values.httpRoute.streamingDefaults }}
+      timeouts:
+        request: 0s
+      {{- end }}
       backendRefs:
         - name: gateway
           port: 8787

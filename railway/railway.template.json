@@ -46,7 +46,8 @@
         "ANYRAY_HSTS": "true",
         "ANYRAY_TRUST_PROXY": "true",
         "ANYRAY_SEAT_EXCLUDE": "",
-        "ANYRAY_SPEND_RETENTION_DAYS": ""
+        "ANYRAY_SPEND_RETENTION_DAYS": "",
+        "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "120"
       }
     },
     {

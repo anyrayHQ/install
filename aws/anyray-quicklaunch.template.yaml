@@ -21,7 +21,7 @@ Metadata:
       - Label: { default: Images }
         Parameters: [ImageTag, EnableAutoUpdate, DefaultModel]
       - Label: { default: Ingress / TLS }
-        Parameters: [CertificateArn, GatewayPublicUrl, ConsolePublicUrl]
+        Parameters: [LoadBalancerScheme, CertificateArn, GatewayPublicUrl, ConsolePublicUrl]
       - Label: { default: Anyray Cloud (metering) }
         Parameters: [SeatExclude, MeteringIntervalMs, EntitlementGraceMs]
       - Label: { default: Content privacy }
@@ -48,6 +48,7 @@ Metadata:
         Parameters: [VpcId, SubnetA, SubnetB]
     ParameterLabels:
       AllowedCidr: { default: "Allowed CIDR(s) (your office/VPN range, comma-separated)" }
+      LoadBalancerScheme: { default: "Load balancer reachability (internal = private, VPC-only)" }
       EnableRdsDeletionProtection: { default: "Protect the database from deletion (production)" }
       VpcId: { default: "VPC (leave blank = account default VPC)" }
       SubnetA: { default: "Public subnet in AZ 1 (leave blank)" }
@@ -118,6 +119,19 @@ Parameters:
     Description: >-
       Model the `anyray-default` routing sentinel resolves to. Set it to a model
       your configured provider serves (a bare model is read under `anthropic`).
+  LoadBalancerScheme:
+    Type: String
+    Default: internet-facing
+    AllowedValues: [internet-facing, internal]
+    Description: >-
+      Whether the load balancer gets public IPs. Choose "internal" to keep Anyray
+      entirely inside your VPC, reachable only over VPN, Direct Connect, or a peered
+      network - its DNS name then resolves to private addresses and there is no
+      public entry point at all. The ECS tasks keep their own egress either way, so
+      the gateway still reaches your model providers. With "internal" also set
+      AllowedCidr to the ranges that should reach it (your VPC or corporate CIDR,
+      not 0.0.0.0/0), and expect the ConsoleURL and GatewayURL outputs to be
+      resolvable only from inside the network.
   CertificateArn:
     Type: String
     Default: ''
@@ -304,6 +318,7 @@ Conditions:
   HasConsoleUrl: !Not [!Equals [!Ref ConsolePublicUrl, '']]
   RdsDeletionProtection: !Equals [!Ref EnableRdsDeletionProtection, 'true']
   AutoUpdate: !Equals [!Ref EnableAutoUpdate, 'true']
+  InternalLb: !Equals [!Ref LoadBalancerScheme, 'internal']
 
 Resources:
   # ---- Network resolution -----------------------------------------------------
@@ -1074,7 +1089,13 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Type: application
-      Scheme: internet-facing
+      # internet-facing (default) or internal, per LoadBalancerScheme. "internal"
+      # gives the load balancer private addresses only, so the whole deployment is
+      # reachable only from inside the VPC or a network joined to it. The ECS tasks
+      # are unaffected: they run with their own public IP for egress, so the gateway
+      # still reaches model providers and Anyray Cloud with no NAT gateway. The
+      # subnets are shared by both schemes, which AWS allows.
+      Scheme: !Ref LoadBalancerScheme
       Subnets: [!GetAtt Net.SubnetA, !GetAtt Net.SubnetB]
       SecurityGroups: [!Ref AlbSg]
 
@@ -1413,6 +1434,12 @@ Outputs:
   AdminTokenCmd:
     Description: Fetch the generated admin key from Secrets Manager (it is NOT printed in stack outputs).
     Value: !Sub 'aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${AppSecrets.AdminTokenArn} --query SecretString --output text'
+  Reachability:
+    Description: Where the two URLs above can be opened from.
+    Value: !If
+      - InternalLb
+      - 'PRIVATE: the load balancer is internal, so its DNS name resolves only inside the VPC. Reach it over VPN, Direct Connect, or a peered/attached network - there is no public entry point. Developer machines running anyray-connect need that same access.'
+      - 'PUBLIC: the load balancer has public IPs, restricted to AllowedCidr. Set LoadBalancerScheme=internal to keep it entirely inside your VPC.'
   FirstBootNote:
     Description: First boot pulls images, provisions RDS, and seeds prices; allow ~5-10 min. The gateway restarts until RDS is reachable.
     Value: 'Watch the ECS services in the console; the gateway + console go healthy once RDS is up.'

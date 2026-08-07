@@ -18,6 +18,19 @@ name: Release anyray-connect binaries
 # the binaries publish byte-identical to an unsigned run; the .deb/.rpm are
 # additive assets either way. SHA256SUMS is generated in the release job,
 # AFTER signing, because signing rewrites the binaries.
+#
+# Release integrity (two independent paths, both in the release job):
+#   - SHA256SUMS is GPG detach-signed to SHA256SUMS.asc with the same release
+#     key, so the checksum file the installers fetch is not merely self-
+#     consistent with a release an attacker could have rewritten end to end.
+#     Secret-gated like the package signing above.
+#   - actions/attest-build-provenance records signed build provenance for every
+#     shipped executable and package. Not secret-gated — it runs off the
+#     workflow's OIDC identity — so `gh attestation verify` works from the next
+#     release onwards.
+# connect.sh / connect.ps1 verify checksums today but do NOT yet require either
+# signature; making that mandatory is a deliberate follow-up, and it can only
+# land after a real release has actually published these assets.
 on:
   workflow_dispatch:
     inputs:
@@ -416,6 +429,16 @@ jobs:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: write # create the release + upload assets
+      id-token: write # attest-build-provenance: mint the short-lived Sigstore signing certificate
+      attestations: write # attest-build-provenance: record the provenance bundle on this repo
+    env:
+      # Same pattern as package-linux (a step `if:` cannot read `secrets.*`, so
+      # the secrets are mapped into job env and each step gates on `env.X != ''`).
+      # The key is imported HERE as well as in package-linux on purpose: jobs run
+      # on different runners and share no GNUPGHOME, and SHA256SUMS is generated
+      # in THIS job — after the signing jobs, because signing rewrites the bytes.
+      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
       # The CodeBuild AL2 runner image ships no gh CLI (hosted ubuntu does) —
       # install it pinned by version + sha256, same discipline as nfpm below.
@@ -464,6 +487,91 @@ jobs:
           ( cd assets && sha256sum -- * > SHA256SUMS )
           cat assets/SHA256SUMS
 
+      - name: GPG-sign SHA256SUMS
+        # Closes the loop the checksums alone leave open. connect.sh /
+        # connect.ps1 verify a downloaded binary against SHA256SUMS, but an
+        # UNSIGNED SHA256SUMS fetched from the same release is only an integrity
+        # check against corruption: whoever can alter the release can alter the
+        # binary and its checksum line together. A detached signature makes the
+        # checksum file verifiable against a key that never lives in the release.
+        #
+        # The import is repeated here rather than reused from package-linux:
+        # that job runs on a different runner, its GNUPGHOME is $RUNNER_TEMP on
+        # ITS machine, and it is torn down when the job ends. Same key, same
+        # import mechanism, same passphrase handling (loopback pinentry,
+        # passphrase over fd 0, never argv) — deliberately not a second pattern.
+        #
+        # Secret-gated exactly like every other signing step in this workflow
+        # (RELEASING.md: signing is strictly conditional on the secrets being
+        # configured), so a release cut before the key is provisioned publishes
+        # what it does today. Once the key IS set there is no soft failure: the
+        # step runs under `set -euo pipefail` with no `|| true` and no
+        # continue-on-error, so a signing or verification failure fails the job
+        # before anything is published.
+        if: env.LINUX_SIGNING_GPG_KEY != ''
+        run: |
+          set -euo pipefail
+          # Isolated GNUPGHOME; the always() step below removes it.
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s' "$LINUX_SIGNING_GPG_KEY" | gpg --batch --quiet --import
+          KEYID="$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')"
+          if [ -z "$KEYID" ]; then
+            echo "::error::LINUX_SIGNING_GPG_KEY contains no secret key"
+            exit 1
+          fi
+          # Passphrase over fd 0, never argv.
+          printf '%s' "$LINUX_SIGNING_GPG_PASSPHRASE" | gpg --batch --yes \
+            --pinentry-mode loopback --passphrase-fd 0 --local-user "$KEYID" \
+            --armor --detach-sign --output assets/SHA256SUMS.asc assets/SHA256SUMS
+          # Verify against the bytes that will actually be uploaded.
+          gpg --batch --verify assets/SHA256SUMS.asc assets/SHA256SUMS
+          # The public key ships from package-linux as anyray-connect-signing-key.asc
+          # and is already listed in SHA256SUMS (it was in assets/ when the sums
+          # were taken). Both steps gate on the same secret, so it is present
+          # whenever this step runs — assert rather than silently publish a
+          # signature nobody can check.
+          if [ ! -f assets/anyray-connect-signing-key.asc ]; then
+            echo "::error::SHA256SUMS.asc was produced but the public key asset is missing; the release would be unverifiable"
+            exit 1
+          fi
+          # Fingerprint is public data. Logged so a release can be checked
+          # against the fingerprint recorded in RELEASING.md.
+          gpg --batch --with-colons --fingerprint "$KEYID" \
+            | awk -F: '/^fpr/ {print "signing key fingerprint: " $10; exit}'
+
+      - name: Delete the imported GPG key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/gnupg"
+
+      - name: Attest build provenance for the released binaries
+        # Independent of the GPG lane and NOT secret-gated: provenance is minted
+        # from this workflow's own OIDC identity, so it works on the very next
+        # release. `gh attestation verify` then proves a downloaded binary was
+        # built by THIS workflow, from THIS repo, at THIS commit — which a
+        # checksum published beside the binary can never establish.
+        #
+        # Skipped on dry_run: an attestation is a permanent, publicly queryable
+        # record, and dry_run is defined as making no customer-facing change.
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          # Explicit list rather than `assets/*`: that would also sweep in
+          # SHA256SUMS, the detached .asc signatures and the public key (whose
+          # integrity the GPG signature already carries) and, on a mandatory
+          # release, connect-update.json. Every entry here is a shipped
+          # executable or package, and each is always produced — the .deb/.rpm
+          # are built unconditionally by package-linux — so no glob can go empty
+          # and silently attest less than the release contains.
+          subject-path: |
+            assets/anyray-connect-darwin-arm64
+            assets/anyray-connect-darwin-x64
+            assets/anyray-connect-linux-arm64
+            assets/anyray-connect-linux-x64
+            assets/anyray-connect-windows-x64.exe
+            assets/*.deb
+            assets/*.rpm
+
       - name: Mark the release mandatory (optional)
         # anyray-connect self-updates on a ~30 min tick and reads this asset ONLY
         # when the developer opted out (`anyray-connect update --auto off`). A
@@ -497,14 +605,50 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           TAG="connect-v${VERSION}"
+          # Notes go through a file rather than an inline --notes string: the
+          # verification section is multi-line. Static prose lives in QUOTED
+          # heredocs (nothing expands, so no shell metacharacter in the markdown
+          # can ever be interpreted); the two dynamic values are printf'd
+          # separately. Code samples are 4-space-indented blocks, not fenced —
+          # keeps backticks out of the shell entirely.
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          {
+            printf '%s\n\n' "Standalone \`anyray-connect\` ${VERSION} executables for the zero-install \`connect.sh\` / \`connect.ps1\` installers. No Node required. Built from the public npm package."
+            cat <<'NOTESHEAD'
+          ## Verifying what you downloaded
+          NOTESHEAD
+            # Only advertise the OpenPGP path when the signature is really
+            # here. Until the release key is provisioned it is not, and notes
+            # promising an asset that does not exist are worse than silence.
+            if [ -f assets/SHA256SUMS.asc ]; then
+              cat <<'NOTESGPG'
+
+          SHA256SUMS carries a detached OpenPGP signature, SHA256SUMS.asc, made with the Anyray release key published here as anyray-connect-signing-key.asc. Check the checksum file before you trust any checksum in it:
+
+              gpg --import anyray-connect-signing-key.asc
+              gpg --verify SHA256SUMS.asc SHA256SUMS
+              sha256sum --ignore-missing --check SHA256SUMS
+
+          Compare the fingerprint gpg reports on import against the one recorded in RELEASING.md before trusting the key.
+          NOTESGPG
+            fi
+            cat <<'NOTESPROV'
+
+          Every executable and package here also carries build provenance, attested to the workflow, repository and commit that produced it. This is independent of the checksums, and lets you establish where a file came from without trusting this page:
+
+          NOTESPROV
+            printf '    gh attestation verify anyray-connect-linux-x64 --repo %s\n' "$REPO"
+          } > "$NOTES"
+          cat "$NOTES"
           # Idempotent: replace an existing release for this version.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" \
             --title "anyray-connect ${VERSION} (binaries)" \
-            --notes "Standalone \`anyray-connect\` ${VERSION} executables for the zero-install \`connect.sh\` / \`connect.ps1\` installers. No Node required. Built from the public npm package." \
+            --notes-file "$NOTES" \
             assets/*
 
       # dry_run: prove the whole build->sign->notarize->fleet path without a

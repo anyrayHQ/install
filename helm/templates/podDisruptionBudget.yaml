@@ -53,6 +53,16 @@ metadata:
     app.kubernetes.io/component: {{ $component }}
 spec:
   maxUnavailable: {{ $.Values.podDisruptionBudget.maxUnavailable }}
+  {{- /* Without this, Kubernetes defaults to IfHealthyBudget: pods that are
+         running but NOT Ready cannot be evicted unless the workload is already
+         at full health. A workload whose pods are broken is then permanently
+         undrainable, and a node upgrade blocks forever on exactly the pods that
+         are serving no traffic. AlwaysAllow still protects every Ready pod via
+         maxUnavailable above — it can only remove capacity that was already not
+         serving. Ignored by clusters older than 1.26. */}}
+  {{- with $.Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ . }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" $component "context" $) | nindent 6 }}

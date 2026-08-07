@@ -171,6 +171,30 @@ each is overridable per component:
 | `preStopDrainSeconds` | `5` | Keeps a pod serving after termination starts but before SIGTERM, so requests stop arriving before the process stops listening. On the `Recreate` path this also lengthens the gap, since nothing starts until the old pod is gone — set `0` to trade in-flight requests for a shorter window. |
 | `terminationGracePeriodSeconds` | `120` | Budget from "terminating" to SIGKILL. Must exceed `preStopDrainSeconds` plus the gateway's own drain of in-flight requests (`ANYRAY_SHUTDOWN_DRAIN_MS`, default 90000), or streams are cut mid-response and the developer's tool reports "Connection closed mid-response". A ceiling, not a delay; the chart refuses to render if the sum no longer fits. |
 | `minReadySeconds` | `10` | How long a new pod must stay Ready before the rollout counts it available, so a pod that passes one probe and then crashes cannot retire the previous version. |
+| `progressDeadlineSeconds` | `300` | How long a rollout may make no progress before it is marked failed. Unset, Kubernetes waits 600s, so a rollout whose pods never pass their probes stalls silently for ten minutes. Since `maxUnavailable` is 0 the outgoing pods serve throughout, so a shorter deadline costs no traffic — it is what makes `helm upgrade --atomic` roll back promptly. Must exceed `minReadySeconds`. |
+| `revisionHistoryLimit` | `3` | Retired ReplicaSets kept per Deployment for rollback (Kubernetes default 10). |
+
+### Probes
+
+Each workload has a **readiness** probe (is this pod fit to receive traffic?) and,
+from appVersion `v1.10.224`, a **liveness** and **startup** probe (should the
+kubelet restart this pod?).
+
+The liveness probe exists for one failure that readiness cannot fix: a *wedged*
+process — an exhausted connection pool, a hung await — is up, gets pulled from the
+Service by readiness, and is then never restarted. At `replicas: 1` that is a
+silent permanent outage.
+
+| Value | Default | What it does |
+| --- | --- | --- |
+| `livenessProbe.enabled` | `true` | Restarts a wedged pod. Targets `/livez` (gateway) or `/health` (optimizer) — deliberately **not** the readiness route, which turns 503 while draining; a liveness probe there would restart the pod mid-drain and reset every in-flight stream. Neither route checks a dependency, so a database blip cannot crashloop the fleet. |
+| `livenessProbe.failureThreshold` x `periodSeconds` | `6` x `10s` | A full minute of failure before a restart. Slack on purpose: restarting a merely-slow pod is itself an outage. |
+| `startupProbe.enabled` | `true` | Holds liveness off until the process answers once, so the liveness budget above need not cover a cold start. 60 x 5s, sized for a replica applying the migration ledger under an advisory lock. |
+| `postgres.livenessProbe.enabled` | `true` | `pg_isready` against the bundled Postgres, with slack thresholds — interrupting crash recovery is worse than waiting it out. |
+
+The gateway's probes render **only for an image that serves `/livez`** (appVersion
+`v1.10.224` or later, or the `policy-stable` channel). Pinned to an earlier tag the
+chart omits them rather than 404 every check and crashloop the deployment.
 
 A `PodDisruptionBudget` (`podDisruptionBudget.maxUnavailable`, default `1`) is
 created for each Deployment that runs two or more pods, capping how many pods a
@@ -178,6 +202,23 @@ node drain or autoscaler scale-down may remove at once. It is deliberately not
 created for a single-replica workload: such a budget could never allow its only
 pod to be evicted, and `kubectl drain` would block indefinitely on a node upgrade.
 At the default `replicas: 1` that means only the proxy is covered.
+
+`podDisruptionBudget.unhealthyPodEvictionPolicy` defaults to `AlwaysAllow`.
+Kubernetes' own default (`IfHealthyBudget`) refuses to evict pods that are running
+but not Ready unless the workload is already at full health, which makes a broken
+workload permanently undrainable — a node upgrade then blocks forever on exactly
+the pods serving no traffic. `AlwaysAllow` still protects every Ready pod through
+`maxUnavailable`. Requires Kubernetes 1.26+; older clusters ignore the field.
+
+### Spreading replicas across nodes
+
+With no `affinity` set, the chart applies **soft** (preferred) pod anti-affinity
+per component: replicas separate by `kubernetes.io/hostname` first, then by
+`topology.kubernetes.io/zone`. Without it, two replicas routinely land on one
+node, and a single node drain takes out the whole workload the second replica
+exists to protect. Soft rather than required is deliberate — a required rule on a
+single-node or capacity-tight cluster leaves pods `Pending` forever. Setting
+`affinity` (globally or per component) replaces this wholesale.
 
 ## Billing
 

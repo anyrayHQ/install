@@ -19,6 +19,7 @@ spec:
       maxUnavailable: 0
       maxSurge: 1
   {{- include "anyray.minReadySeconds" (dict "component" "proxy" "context" .) | nindent 2 }}
+  {{- include "anyray.rolloutMeta" (dict "component" "proxy" "context" .) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" "proxy" "context" .) | nindent 6 }}

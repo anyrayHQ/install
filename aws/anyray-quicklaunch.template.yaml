@@ -42,6 +42,8 @@ Metadata:
           ]
       - Label: { default: Optimizer }
         Parameters: [OptimizerTimeoutMs, OptimizerVisionTimeoutMs]
+      - Label: { default: Availability }
+        Parameters: [HighAvailability]
       - Label: { default: Database }
         Parameters: [DbInstanceClass, DbAllocatedStorage, DbMaxAllocatedStorage, EnableRdsDeletionProtection]
       - Label: { default: Advanced networking (leave blank) }
@@ -50,6 +52,7 @@ Metadata:
       AllowedCidr: { default: "Allowed CIDR(s) (your office/VPN range, comma-separated)" }
       LoadBalancerScheme: { default: "Load balancer reachability (internal = private, VPC-only)" }
       EnableRdsDeletionProtection: { default: "Protect the database from deletion (production)" }
+      HighAvailability: { default: "Run redundant tasks and a Multi-AZ database (production)" }
       VpcId: { default: "VPC (leave blank = account default VPC)" }
       SubnetA: { default: "Public subnet in AZ 1 (leave blank)" }
       SubnetB: { default: "Public subnet in AZ 2 (leave blank)" }
@@ -275,6 +278,20 @@ Parameters:
       storage). Trace content accumulates until the 90-day retention window
       fills, so the database grows for its first three months; without
       autoscaling it goes storage-full and stops accepting writes.
+  HighAvailability:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Remove the single points of failure. Off, this stack runs ONE Fargate task
+      per service and a single-AZ database, so any task or AZ loss is a full
+      outage until AWS replaces it (typically minutes) — fine for an evaluation,
+      not for traffic anyone depends on. On, each service runs two tasks spread
+      across the stack's two AZs and the database becomes Multi-AZ with automatic
+      failover. Both halves matter: redundant tasks in front of a single-AZ
+      database still go down with that AZ. This roughly doubles the compute and
+      database cost of the stack, which is why it is off by default. Safe to turn
+      on later — it is a rolling change, not a rebuild.
   EnableRdsDeletionProtection:
     Type: String
     Default: 'false'
@@ -319,6 +336,7 @@ Conditions:
   RdsDeletionProtection: !Equals [!Ref EnableRdsDeletionProtection, 'true']
   AutoUpdate: !Equals [!Ref EnableAutoUpdate, 'true']
   InternalLb: !Equals [!Ref LoadBalancerScheme, 'internal']
+  Ha: !Equals [!Ref HighAvailability, 'true']
 
 Resources:
   # ---- Network resolution -----------------------------------------------------
@@ -752,7 +770,7 @@ Resources:
       DBSubnetGroupName: !Ref DbSubnetGroup
       VPCSecurityGroups: [!Ref RdsSg]
       PubliclyAccessible: false
-      MultiAZ: false
+      MultiAZ: !If [Ha, true, false]
       BackupRetentionPeriod: 7
       DeletionProtection: !If [RdsDeletionProtection, true, false]
       Tags: [{ Key: Name, Value: anyray }]
@@ -1357,11 +1375,17 @@ Resources:
     Properties:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
-      DesiredCount: 1
+      DesiredCount: !If [Ha, 2, 1]
       # Same hardening the production stack runs: a deployment whose tasks keep
       # failing rolls back automatically instead of hanging the service (and the
       # CloudFormation update fails fast instead of waiting out the full timeout).
+      # MinimumHealthyPercent/MaximumPercent are stated rather than left to the
+      # ECS default so a rolling deploy provably never dips below the current
+      # task count: surge to 200%, wait for the new tasks to pass their target
+      # group health check, then retire the old ones.
       DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
         DeploymentCircuitBreaker: { Enable: true, Rollback: true }
       TaskDefinition: !Ref OptimizerTask
       NetworkConfiguration:
@@ -1378,11 +1402,17 @@ Resources:
     Properties:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
-      DesiredCount: 1
+      DesiredCount: !If [Ha, 2, 1]
       # Same hardening the production stack runs: a deployment whose tasks keep
       # failing rolls back automatically instead of hanging the service (and the
       # CloudFormation update fails fast instead of waiting out the full timeout).
+      # MinimumHealthyPercent/MaximumPercent are stated rather than left to the
+      # ECS default so a rolling deploy provably never dips below the current
+      # task count: surge to 200%, wait for the new tasks to pass their target
+      # group health check, then retire the old ones.
       DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
         DeploymentCircuitBreaker: { Enable: true, Rollback: true }
       TaskDefinition: !Ref GatewayTask
       HealthCheckGracePeriodSeconds: 300
@@ -1402,11 +1432,17 @@ Resources:
     Properties:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
-      DesiredCount: 1
+      DesiredCount: !If [Ha, 2, 1]
       # Same hardening the production stack runs: a deployment whose tasks keep
       # failing rolls back automatically instead of hanging the service (and the
       # CloudFormation update fails fast instead of waiting out the full timeout).
+      # MinimumHealthyPercent/MaximumPercent are stated rather than left to the
+      # ECS default so a rolling deploy provably never dips below the current
+      # task count: surge to 200%, wait for the new tasks to pass their target
+      # group health check, then retire the old ones.
       DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
         DeploymentCircuitBreaker: { Enable: true, Rollback: true }
       TaskDefinition: !Ref ProxyTask
       HealthCheckGracePeriodSeconds: 120

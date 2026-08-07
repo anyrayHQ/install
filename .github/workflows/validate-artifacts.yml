@@ -189,6 +189,33 @@ jobs:
           app="$(sed -nE 's/^appVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' helm/Chart.yaml | head -1)"
           grep -q "public.ecr.aws/anyray/gateway:$app" <<<"$image_bom"
 
+          # An image the chart ALREADY digest-pins must pass through verbatim.
+          # This only matters on the crane path, which the render above cannot
+          # reach (crane is deliberately off that PATH), so it needs its own
+          # run: with crane present, gen-image-bom.sh rebuilt every ref as
+          # "${ref%:*}@$digest", cutting at the LAST colon — for
+          # "name:tag@sha256:…" that is the one inside the digest, emitting an
+          # unpullable "docker.io/postgres:17@sha256@sha256:…" and silently
+          # breaking the private-registry mirror this BOM exists to drive.
+          # Stub crane so the branch runs hermetically, with no registry calls.
+          stub_bin="$(mktemp -d)"
+          ln -s "$(command -v helm)" "$stub_bin/helm"
+          printf '#!/bin/sh\necho "sha256:%064d"\n' 0 >"$stub_bin/crane"
+          chmod +x "$stub_bin/crane"
+          bom_crane="$(PATH="$stub_bin:/usr/bin:/bin" scripts/gen-image-bom.sh)"
+          if grep -q '@sha256.*@sha256' <<<"$bom_crane"; then
+            echo "::error::gen-image-bom.sh mangled an already-digest-pinned ref (doubled digest):"
+            grep '@sha256.*@sha256' <<<"$bom_crane"
+            exit 1
+          fi
+          # ...and it must come through untouched: no re-resolution, so no
+          # trailing "  # <tag>" comment the crane path appends.
+          if ! grep -qE '^docker\.io/postgres:[^[:space:]@]+@sha256:[0-9a-f]{64}$' <<<"$bom_crane"; then
+            echo "::error::the chart digest-pins postgres, but the BOM did not emit it verbatim:"
+            echo "$bom_crane"
+            exit 1
+          fi
+
   cloudformation:
     runs-on: ubuntu-latest
     steps:

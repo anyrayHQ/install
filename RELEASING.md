@@ -15,13 +15,23 @@ switch that turns its signing on. The `.deb`/`.rpm` packages are built either
 way as additive assets; their GPG signatures appear once the release key
 exists.
 
-Two invariants the workflow encodes — keep them if you touch it:
+**Build provenance is the exception**: `actions/attest-build-provenance` is
+*not* secret-gated. It signs through the workflow's own OIDC identity, so every
+release carries verifiable provenance whether or not any signing secret exists.
+
+Three invariants the workflow encodes — keep them if you touch it:
 
 - **`SHA256SUMS` is generated in the `release` job, AFTER the signing jobs.**
   `codesign` and `signtool` rewrite the binaries, so a checksum taken at
   compile time would not match the released bytes. `connect-update.json` (the
   mandatory-release marker) is still written after `SHA256SUMS` and never
   appears in it.
+- **`SHA256SUMS` is GPG-signed in the `release` job too, not in
+  `package-linux`.** The checksum file is created in `release`, so that is the
+  only job that can sign it, and jobs share no GNUPGHOME — the release key is
+  imported a second time there on purpose. Both import steps use the identical
+  mechanism (isolated `GNUPGHOME` under `$RUNNER_TEMP`, loopback pinentry,
+  passphrase over fd 0, `always()` cleanup); if you change one, change both.
 - **A bare mach-o binary cannot be stapled.** `xcrun stapler staple` only
   applies to bundles/dmg/pkg, so the notarized CLI binaries ship as-is and
   Gatekeeper fetches the notarization ticket online. When the desktop tray
@@ -53,21 +63,65 @@ Two invariants the workflow encodes — keep them if you touch it:
 > the step needs reworking against a cloud signer (Azure Trusted Signing /
 > DigiCert KeyLocker) instead of `signtool /f`.
 
-### Linux — GPG-signed `.deb`/`.rpm`
+### Linux — GPG-signed `.deb`/`.rpm` **and `SHA256SUMS`**
 
 | Secret | What it is | Where to get it |
 | --- | --- | --- |
 | `LINUX_SIGNING_GPG_KEY` | ASCII-armored **secret** signing key | `gpg --full-generate-key` (RSA 4096 or Ed25519, e.g. `Anyray Release Signing <support@anyray.ai>`), then `gpg --armor --export-secret-keys <keyid>` |
 | `LINUX_SIGNING_GPG_PASSPHRASE` | Its passphrase | Chosen at key generation |
 
-The workflow publishes the **public** key as the release asset
-`anyray-connect-signing-key.asc` and a detached `.asc` signature next to each
-package. Verify with:
+One key, two consumers. `package-linux` publishes the **public** key as the
+release asset `anyray-connect-signing-key.asc` plus a detached `.asc` next to
+each package; the `release` job additionally detach-signs the checksum file to
+`SHA256SUMS.asc`.
+
+**After provisioning the key, record its fingerprint below.** The release job
+prints `signing key fingerprint: <40 hex>` in its log, and the release notes
+tell users to compare what they import against this file — a fingerprint nobody
+publishes out-of-band is a fingerprint nobody can check.
+
+> Current fingerprint: **not yet provisioned.** No release to date carries a
+> `.asc` asset, so the key does not exist yet and its fingerprint cannot be
+> derived from anything public. Fill this in from the release log the first time
+> the workflow runs with `LINUX_SIGNING_GPG_KEY` set.
+
+## Verifying a download
+
+Two independent paths, both available from the first release cut after this
+landed. Release notes link back here for the key fingerprint.
+
+**The checksums are signed** (once the release key above exists). Verify the
+checksum file first, then the binary against it — checking a binary against an
+unsigned checksum file from the same release only proves the download was not
+corrupted, not that the release is genuine:
 
 ```bash
-gpg --import anyray-connect-signing-key.asc
+gpg --import anyray-connect-signing-key.asc   # compare against the fingerprint above
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --ignore-missing --check SHA256SUMS
 gpg --verify anyray-connect_<version>_amd64.deb.asc anyray-connect_<version>_amd64.deb
 ```
+
+**Every binary and package carries build provenance**, signed through Sigstore
+from the workflow's OIDC identity. This needs no key distribution at all, and
+unlike the GPG path it does not wait on a secret being provisioned — it covers
+every release cut from this workflow onwards. Releases published before this
+change have no attestation and cannot retroactively gain one:
+
+```bash
+gh attestation verify anyray-connect-linux-x64 --repo anyrayHQ/install
+```
+
+That confirms the file was produced by this workflow, in this repository, at a
+specific commit. Note it authenticates the *build*, not the release page: it
+answers "did our CI make this file", which is exactly the question a swapped
+release asset would otherwise leave open.
+
+**Installer enforcement is a separate, later step.** `connect.sh` and
+`connect.ps1` verify checksums fail-closed today but do **not** yet require
+`SHA256SUMS.asc` or an attestation. Making either mandatory can only land after
+a real release has actually published them — flipping it earlier breaks every
+install immediately.
 
 ## Mandatory releases
 

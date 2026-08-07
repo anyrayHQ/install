@@ -39,20 +39,29 @@ echo "anyray-connect: downloading ${ASSET}…" >&2
 curl -fSL --proto '=https' "${BASE}/${ASSET}" -o "$dl" \
   || err "download failed (${BASE}/${ASSET}) — check your connection or use: npx anyray-connect <url>"
 
-# Verify the checksum from the same release (best-effort: skip only if absent).
-if curl -fsSL --proto '=https' "${BASE}/SHA256SUMS" -o "${tmp}/SHA256SUMS" 2>/dev/null; then
-  want="$(awk -v a="$ASSET" '$2==a || $2=="*"a {print $1}' "${tmp}/SHA256SUMS" | head -n1)"
-  if [ -n "$want" ]; then
-    if command -v sha256sum >/dev/null 2>&1; then
-      got="$(sha256sum "$dl" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then
-      got="$(shasum -a 256 "$dl" | awk '{print $1}')"
-    else
-      got=""
-    fi
-    [ -z "$got" ] || [ "$got" = "$want" ] || err "checksum mismatch for ${ASSET} — refusing to run"
-  fi
+# Verify the checksum from the same release. Every step here fails CLOSED, with
+# no bypass flag or env var: the binary below installs a Claude Code PostToolUse
+# hook that then runs on every tool call, so an unverified download is a
+# persistent code-execution foothold, not a one-off. Skipping verification when
+# something is merely *missing* hands that foothold to anyone who can make one
+# request fail — dropping just the SHA256SUMS fetch used to disable the check
+# entirely. A missing sums file, a missing entry, or a missing hash tool are all
+# hard errors; npm (npx) is the fallback, and it verifies via the registry.
+curl -fsSL --proto '=https' "${BASE}/SHA256SUMS" -o "${tmp}/SHA256SUMS" \
+  || err "could not fetch the checksums (${BASE}/SHA256SUMS) — refusing to run an unverified ${ASSET}; retry, or use: npx anyray-connect <url>"
+
+want="$(awk -v a="$ASSET" '$2==a || $2=="*"a {print $1}' "${tmp}/SHA256SUMS" | head -n1)"
+[ -n "$want" ] || err "no SHA256SUMS entry for ${ASSET} — refusing to run an unverified binary; use: npx anyray-connect <url>"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  got="$(sha256sum "$dl" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  got="$(shasum -a 256 "$dl" | awk '{print $1}')"
+else
+  err "no SHA-256 tool found (install coreutils for sha256sum, or perl for shasum) — cannot verify ${ASSET}; use: npx anyray-connect <url>"
 fi
+[ -n "$got" ] || err "could not compute the SHA-256 of ${ASSET} — refusing to run an unverified binary; use: npx anyray-connect <url>"
+[ "$got" = "$want" ] || err "checksum mismatch for ${ASSET} — refusing to run"
 
 # Install to a PERSISTENT location, then run from there. anyray-connect installs
 # a Claude Code PostToolUse hook that references this binary by absolute path on

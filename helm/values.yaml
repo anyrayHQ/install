@@ -120,6 +120,52 @@ preStopDrainSeconds: 5
 terminationGracePeriodSeconds: 120
 minReadySeconds: 10
 
+# Retired ReplicaSets kept per Deployment for rollback (Kubernetes default 10).
+revisionHistoryLimit: 3
+# How long a rollout may make no progress before it is marked failed. Left unset
+# Kubernetes waits 600s, so a rollout whose new pods never pass their probes
+# stalls silently for ten minutes. Every rolling workload here holds
+# maxUnavailable at 0, so the outgoing pods serve throughout and a short deadline
+# costs no traffic — it just makes a stuck upgrade report itself, which is what
+# `helm upgrade --atomic` needs to trigger its rollback. Must exceed
+# minReadySeconds; the chart refuses to render otherwise.
+progressDeadlineSeconds: 300
+
+# Liveness and startup probes for the gateway and optimizer.
+#
+# Readiness alone cannot recover a WEDGED process: an exhausted connection pool
+# or a hung await leaves a pod that is up, pulled from the Service by readiness,
+# and never restarted — at replicas: 1 a silent permanent outage. The liveness
+# probe is the only thing that restarts it.
+#
+# Both target `/livez`, which is deliberately NOT the readiness route: `/` turns
+# 503 while draining, and a liveness probe there would kill the container
+# mid-drain and reset every in-flight stream. `/livez` also checks no
+# dependency — a probe that touched Postgres would turn a database blip into a
+# fleet-wide crashloop.
+#
+# `/livez` ships from appVersion v1.10.224. Against an older image the probes are
+# NOT rendered (they would 404 and crashloop the deployment), so an install
+# pinned to an earlier tag keeps today's behaviour until it upgrades.
+livenessProbe:
+  enabled: true
+  # 6 x 10s = a full minute of failure before a restart. Slack on purpose:
+  # restarting a merely-slow pod is itself an outage, so liveness must fire well
+  # after readiness has already taken the pod out of the Service.
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+startupProbe:
+  # Holds liveness off until the process answers once, so the liveness budget
+  # above can stay tight without having to cover a cold start. 60 x 5s = 5
+  # minutes, sized for the case where one replica applies the migration ledger
+  # under an advisory lock while its peers wait on it.
+  enabled: true
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 60
+
 # PodDisruptionBudget for the gateway, optimizer and proxy Deployments: caps how
 # many of a workload's pods VOLUNTARY disruption — a node drain, a cluster
 # upgrade, an autoscaler scale-down — may take out at once. It does not apply to
@@ -136,6 +182,17 @@ minReadySeconds: 10
 podDisruptionBudget:
   enabled: true
   maxUnavailable: 1
+  # What the eviction API may do with pods that are RUNNING BUT NOT READY.
+  # Kubernetes defaults to IfHealthyBudget, which refuses to evict them unless
+  # the workload is already at full health — so a workload whose pods are broken
+  # (the wedge the liveness probe exists to catch, a bad image) becomes
+  # permanently undrainable, and a node upgrade blocks forever on exactly the
+  # pods that are serving nothing. AlwaysAllow lets an unready pod be evicted
+  # while still protecting every READY one, which is the behaviour you want when
+  # the goal is to stay up: it can only ever remove capacity that was already not
+  # serving. Needs Kubernetes >= 1.26 (GA in 1.31); on older clusters the field
+  # is ignored and the default applies. Set to "" to omit it entirely.
+  unhealthyPodEvictionPolicy: AlwaysAllow
 
 # Gateway
 gateway:
@@ -294,6 +351,26 @@ proxy:
 # and reads them in-process.
 postgres:
   enabled: true
+  # The bundled Postgres is a SINGLE pod on a ReadWriteOnce volume. It is sized
+  # for a small team and it is the stack's one unavoidable single point of
+  # failure: the gateway's auth hot path reads client keys from it, so while it
+  # is down `/v1/*` fails closed. Nothing in this chart can make one pod highly
+  # available — for an install that must not go down, run Postgres OUTSIDE this
+  # chart (managed RDS/Cloud SQL, or an in-cluster operator such as CloudNativePG
+  # that does real streaming replication and failover) and point
+  # postgres.external.* at it with postgres.enabled=false. The settings below
+  # only bound how BADLY the single pod fails, they do not make it redundant.
+  #
+  # A liveness probe restarts a Postgres that is up but no longer answering.
+  # `pg_isready` is a local socket check, so it cannot be fooled by a busy
+  # server, and the thresholds are slack — a restart mid-recovery is worse than
+  # waiting, and crash recovery on a large volume legitimately takes minutes.
+  livenessProbe:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 8
   # Size for the steady state: encrypted trace content accumulates until the
   # 90-day retention window fills (roughly 90 x your daily request-content
   # volume; ANYRAY_SPEND_RETENTION_DAYS shortens the window). 10Gi suits a

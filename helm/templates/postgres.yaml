@@ -48,6 +48,22 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 3
             failureThreshold: 10
+          {{- /* Readiness alone only stops traffic being routed here; nothing
+                 restarts a Postgres that is up but wedged, and while it is down
+                 the gateway's client-key verify fails closed, so every /v1/*
+                 request 401s. Thresholds are deliberately slack: interrupting
+                 crash recovery is worse than waiting it out. */}}
+          {{- with .Values.postgres.livenessProbe }}
+          {{- if .enabled }}
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: {{ .initialDelaySeconds | default 30 }}
+            periodSeconds: {{ .periodSeconds | default 15 }}
+            timeoutSeconds: {{ .timeoutSeconds | default 5 }}
+            failureThreshold: {{ .failureThreshold | default 8 }}
+          {{- end }}
+          {{- end }}
           resources:
             {{- toYaml .Values.postgres.resources | nindent 12 }}
           volumeMounts:

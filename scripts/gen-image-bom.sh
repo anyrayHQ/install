@@ -40,6 +40,13 @@ command -v crane >/dev/null 2>&1 && have_crane=1 || \
 
 while IFS= read -r ref; do
   [ -n "$ref" ] || continue
+  # Already digest-pinned in the chart (the third-party images are, so the
+  # mirror is immutable at the source) — emit it verbatim. Falling through would
+  # strip at the LAST colon, which is the one inside "@sha256:…", and emit a
+  # mangled "name:tag@sha256@sha256:…".
+  case "$ref" in
+    *@sha256:*) printf '%s\n' "$ref"; continue ;;
+  esac
   if [ "$have_crane" = 1 ]; then
     digest="$(crane digest "$ref" 2>/dev/null || true)"
     if [ -n "$digest" ]; then

@@ -15,7 +15,11 @@ name: anyray-litellm-verify
 
 services:
   mock-provider:
-    image: python:3.11-slim
+    # Pinned to the multi-arch index digest of python 3.11.15 (`3.11-slim` floats,
+    # and a tag can be re-pushed). Same pin on all three python services below —
+    # bump the tag and the digest TOGETHER, in all of them. Refresh with:
+    #   docker buildx imagetools inspect python:3.11-slim
+    image: python:3.11-slim@sha256:94c50be2dc994b873b55bc123e95e6dbade08095b3dfd790f51c34de3f08cbb7
     command: python /app/mock_provider.py
     volumes:
       - .:/app:ro
@@ -28,7 +32,8 @@ services:
       start_period: 3s
 
   mock-optimizer:
-    image: python:3.11-slim
+    # python 3.11.15 index digest — keep identical to mock-provider above.
+    image: python:3.11-slim@sha256:94c50be2dc994b873b55bc123e95e6dbade08095b3dfd790f51c34de3f08cbb7
     command: python /app/mock_optimizer.py
     volumes:
       - .:/app:ro
@@ -72,7 +77,8 @@ services:
       start_period: 30s
 
   test-runner:
-    image: python:3.11-slim
+    # python 3.11.15 index digest — keep identical to mock-provider above.
+    image: python:3.11-slim@sha256:94c50be2dc994b873b55bc123e95e6dbade08095b3dfd790f51c34de3f08cbb7
     depends_on:
       litellm:
         condition: service_healthy

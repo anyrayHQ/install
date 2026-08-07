@@ -43,6 +43,7 @@ spec:
       maxSurge: 1
   {{- end }}
   {{- include "anyray.minReadySeconds" (dict "component" "gateway" "context" .) | nindent 2 }}
+  {{- include "anyray.rolloutMeta" (dict "component" "gateway" "context" .) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 6 }}
@@ -188,6 +189,12 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 10
+          {{- /* Liveness targets /livez, NOT the readiness route above: `/` 503s
+                 while draining, so a liveness probe there would restart the pod
+                 mid-drain and reset every in-flight stream. Rendered only for an
+                 image that serves /livez (see anyray.livezFloor). */}}
+          {{- include "anyray.startupProbe" (dict "component" "gateway" "port" 8787 "context" .) | nindent 10 }}
+          {{- include "anyray.livenessProbe" (dict "component" "gateway" "port" 8787 "context" .) | nindent 10 }}
           # Runs BEFORE SIGTERM, so the pod is still serving while its removal
           # from the Service endpoints propagates. Once SIGTERM lands the gateway
           # marks itself down on `/` (503) and drains in-flight requests for

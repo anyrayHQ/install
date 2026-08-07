@@ -148,8 +148,10 @@ back to the global (Go templates treat 0 as empty).
 {{- define "anyray.podSpecCommonNoSecurity" -}}
 {{- $context := . -}}
 {{- $overrides := dict -}}
+{{- $component := "" -}}
 {{- if hasKey . "context" -}}
 {{- $context = .context -}}
+{{- $component = toString .component -}}
 {{- $overrides = (index $context.Values .component | default dict) -}}
 {{- end -}}
 {{- $nodeSelector := $overrides.nodeSelector | default $context.Values.nodeSelector -}}
@@ -173,9 +175,14 @@ imagePullSecrets:
 nodeSelector:
   {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- with $affinity }}
+{{- if $affinity }}
 affinity:
-  {{- toYaml . | nindent 2 }}
+  {{- toYaml $affinity | nindent 2 }}
+{{- else if $component }}
+{{- /* No affinity configured: fall back to soft per-component anti-affinity so
+       replicas separate by node (then zone) instead of stacking on one. */}}
+affinity:
+  {{- include "anyray.defaultAffinity" (dict "component" $component "context" $context) | nindent 2 }}
 {{- end }}
 {{- with $tolerations }}
 tolerations:
@@ -313,6 +320,190 @@ honoured (hasKey, not truthiness).
 {{- if not (kindIs "invalid" $seconds) -}}
 minReadySeconds: {{ int $seconds }}
 {{- end -}}
+{{- end }}
+
+{{/*
+Rollout bookkeeping shared by every Deployment.
+
+revisionHistoryLimit bounds the retired ReplicaSets kept for rollback. The
+Kubernetes default of 10 is not free here: each one pins its pod template, and on
+a chart this size that is the difference between a readable `kubectl get rs` and
+a wall. Ten is more rollback depth than anyone uses; three covers "roll back the
+bad release and the one before it".
+
+progressDeadlineSeconds is the one that matters for availability. Left unset,
+Kubernetes uses 600s: a rollout whose new pods never pass their probes sits
+"progressing" for ten minutes before it is marked failed, and nothing surfaces
+until then. Since maxUnavailable is 0 on every rolling workload the old pods keep
+serving throughout, so a shorter deadline costs no traffic — it only makes a
+stuck rollout say so, which is what a `helm upgrade --atomic` waits on to trigger
+its rollback.
+*/}}
+{{- define "anyray.rolloutMeta" -}}
+{{- $context := . -}}
+{{- $overrides := dict -}}
+{{- if hasKey . "context" -}}
+{{- $context = .context -}}
+{{- $overrides = (index $context.Values .component | default dict) -}}
+{{- end -}}
+{{- $history := $context.Values.revisionHistoryLimit -}}
+{{- if hasKey $overrides "revisionHistoryLimit" -}}
+{{- $history = $overrides.revisionHistoryLimit -}}
+{{- end -}}
+{{- $deadline := $context.Values.progressDeadlineSeconds -}}
+{{- if hasKey $overrides "progressDeadlineSeconds" -}}
+{{- $deadline = $overrides.progressDeadlineSeconds -}}
+{{- end -}}
+{{- if not (kindIs "invalid" $history) }}
+revisionHistoryLimit: {{ int $history }}
+{{- end }}
+{{- if not (kindIs "invalid" $deadline) }}
+{{- /* progressDeadlineSeconds must exceed minReadySeconds or the rollout is
+declared failed before a healthy pod can ever be counted available. */ -}}
+{{- $ready := $context.Values.minReadySeconds -}}
+{{- if hasKey $overrides "minReadySeconds" -}}
+{{- $ready = $overrides.minReadySeconds -}}
+{{- end -}}
+{{- if and (not (kindIs "invalid" $ready)) (le (int $deadline) (int $ready)) -}}
+{{- fail (printf "progressDeadlineSeconds (%d) must be greater than minReadySeconds (%d), or the rollout is marked failed before a healthy pod can be counted available" (int $deadline) (int $ready)) -}}
+{{- end }}
+progressDeadlineSeconds: {{ int $deadline }}
+{{- end }}
+{{- end }}
+
+{{/*
+Liveness probe — "should the kubelet kill this pod?", and nothing else.
+
+This is the failure a readiness probe alone leaves running forever: a wedged
+event loop (an exhausted pg pool, a hung await). Readiness takes the pod out of
+the Service, and then nothing ever puts it back or restarts it — with one replica
+that is a silent, permanent outage. It cost a customer a fleet-dark window on
+2026-08-06.
+
+Two properties make it safe, and both are load-bearing:
+
+  * It targets `/livez`, NOT `/`. The readiness route turns 503 on SIGTERM so a
+    draining pod leaves the Service; a liveness probe pointed there would restart
+    the container mid-drain and reset every in-flight stream — the exact
+    "Connection closed mid-response" the drain budget exists to prevent.
+  * `/livez` checks no dependency. A probe that touched Postgres would turn a
+    database blip into a fleet-wide crashloop: every replica killed at once for a
+    fault restarting cannot fix. Dependency health is the admin-gated
+    `/admin/health`, a diagnostic, not a probe.
+
+`failureThreshold` x `periodSeconds` is deliberately slack (60s). Liveness is the
+blunt instrument — restarting a pod that was merely slow is itself an outage, so
+it must fire well after readiness has already pulled the pod from the Service.
+
+VERSION GUARD: `/livez` ships from the appVersion named below. Rendering this
+probe against an older image would 404 every check and crashloop the whole
+deployment on `helm upgrade` — a self-inflicted outage far worse than the wedge
+it prevents. So it renders only when the effective tag is a release known to
+serve the route; anything unrecognised (a custom tag, a private mirror tag)
+falls back to today's behaviour of no liveness probe. `policy-stable` is the
+moving newest-build channel and always carries it.
+*/}}
+{{- /* MUST name the release that actually ships `/livez`. v1.10.222 and .223 were
+       cut BEFORE it merged, so an earlier draft of this floor would have rendered
+       the probes against images that answer 404 and crashlooped every gateway pod
+       on upgrade. Verify against `git tag` before merging a change to it: too LOW
+       crashloops, too HIGH silently leaves the probes off. */ -}}
+{{- define "anyray.livezFloor" -}}v1.10.224{{- end }}
+
+{{- define "anyray.servesLivez" -}}
+{{- $tag := include "anyray.effectiveImageTag" . -}}
+{{- if eq $tag "policy-stable" -}}
+true
+{{- else if regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+$" $tag -}}
+{{- $floor := trimPrefix "v" (include "anyray.livezFloor" .context) -}}
+{{- if semverCompare (printf ">=%s-0" $floor) (trimPrefix "v" $tag) -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{- define "anyray.livenessProbe" -}}
+{{- $context := .context -}}
+{{- $overrides := (index $context.Values .component | default dict) -}}
+{{- $probe := $context.Values.livenessProbe -}}
+{{- if hasKey $overrides "livenessProbe" -}}
+{{- $probe = $overrides.livenessProbe -}}
+{{- end -}}
+{{- if and $probe $probe.enabled -}}
+{{- /* `unguarded` callers name a route that has existed in every released image
+       (the optimizer's static /health); everything else must clear the /livez
+       version floor or render nothing. */ -}}
+{{- if or .unguarded (include "anyray.servesLivez" (dict "component" .component "context" $context)) -}}
+livenessProbe:
+  httpGet:
+    path: {{ $probe.path | default .path | default "/livez" }}
+    port: {{ .port }}
+  initialDelaySeconds: {{ $probe.initialDelaySeconds | default 15 }}
+  periodSeconds: {{ $probe.periodSeconds | default 10 }}
+  timeoutSeconds: {{ $probe.timeoutSeconds | default 5 }}
+  failureThreshold: {{ $probe.failureThreshold | default 6 }}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Startup probe — decouples "slow to boot" from "wedged".
+
+Without one, a liveness probe has to be lenient enough to cover the worst-case
+cold start (image pull, migration ledger, onnxruntime warm-up), which makes it
+too slow to catch a wedge later. The startup probe holds liveness off entirely
+until the process answers once, so liveness can then be tight. Its budget is
+generous on purpose: the gateway applies the migration ledger under an advisory
+lock on first connect, so one replica in a cold cluster can legitimately take
+minutes while its peers wait on the lock.
+*/}}
+{{- define "anyray.startupProbe" -}}
+{{- $context := .context -}}
+{{- $overrides := (index $context.Values .component | default dict) -}}
+{{- $probe := $context.Values.startupProbe -}}
+{{- if hasKey $overrides "startupProbe" -}}
+{{- $probe = $overrides.startupProbe -}}
+{{- end -}}
+{{- if and $probe $probe.enabled -}}
+{{- if or .unguarded (include "anyray.servesLivez" (dict "component" .component "context" $context)) -}}
+startupProbe:
+  httpGet:
+    path: {{ $probe.path | default .path | default "/livez" }}
+    port: {{ .port }}
+  periodSeconds: {{ $probe.periodSeconds | default 5 }}
+  timeoutSeconds: {{ $probe.timeoutSeconds | default 5 }}
+  failureThreshold: {{ $probe.failureThreshold | default 60 }}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Scheduling spread.
+
+An unset `affinity` used to mean "put the pods anywhere", which at proxy
+replicas: 2 routinely lands both on one node — a single node drain then takes out
+the whole workload the second replica exists to protect. So an unset affinity now
+resolves to SOFT (preferred) pod anti-affinity per component: the scheduler
+separates replicas by hostname when it can, and still schedules when it cannot.
+Soft rather than required is the point — a required rule on a single-node or
+capacity-tight cluster leaves pods Pending forever, trading a rare correlated
+failure for a certain one. An explicit `affinity` still replaces this wholesale.
+*/}}
+{{- define "anyray.defaultAffinity" -}}
+podAntiAffinity:
+  preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        topologyKey: kubernetes.io/hostname
+        labelSelector:
+          matchLabels:
+            {{- include "anyray.selectorLabels" (dict "component" .component "context" .context) | nindent 12 }}
+    - weight: 50
+      podAffinityTerm:
+        topologyKey: topology.kubernetes.io/zone
+        labelSelector:
+          matchLabels:
+            {{- include "anyray.selectorLabels" (dict "component" .component "context" .context) | nindent 12 }}
 {{- end }}
 
 {{/*

@@ -41,6 +41,7 @@ spec:
       maxSurge: 1
   {{- end }}
   {{- include "anyray.minReadySeconds" (dict "component" "optimizer" "context" .) | nindent 2 }}
+  {{- include "anyray.rolloutMeta" (dict "component" "optimizer" "context" .) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 6 }}
@@ -101,6 +102,17 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 10
+          {{- /* The optimizer reuses /health for liveness rather than /livez, and
+                 needs no version guard for it: the route is a static
+                 dependency-free 200 present in every released image, and unlike
+                 the gateway's `/` it does not flip to 503 on drain (the optimizer
+                 installs no SIGTERM handler), so a liveness probe cannot cut a
+                 drain short. What it does catch is the case that matters here —
+                 an onnxruntime inference wedging the Node event loop, which
+                 leaves the pod up, un-Ready, and never restarted, so every
+                 request takes the fail-open path and busts the prompt cache. */}}
+          {{- include "anyray.startupProbe" (dict "component" "optimizer" "port" 8088 "path" "/health" "unguarded" true "context" .) | nindent 10 }}
+          {{- include "anyray.livenessProbe" (dict "component" "optimizer" "port" 8088 "path" "/health" "unguarded" true "context" .) | nindent 10 }}
           # The optimizer installs no SIGTERM handler, so it exits the moment the
           # signal lands and terminationGracePeriodSeconds is never consumed. This
           # pause is therefore the only thing standing between an upgrade and a

@@ -177,7 +177,7 @@ each is overridable per component:
 ### Probes
 
 Each workload has a **readiness** probe (is this pod fit to receive traffic?) and,
-from appVersion `v1.10.222`, a **liveness** and **startup** probe (should the
+from appVersion `v1.10.224`, a **liveness** and **startup** probe (should the
 kubelet restart this pod?).
 
 The liveness probe exists for one failure that readiness cannot fix: a *wedged*
@@ -193,7 +193,7 @@ silent permanent outage.
 | `postgres.livenessProbe.enabled` | `true` | `pg_isready` against the bundled Postgres, with slack thresholds — interrupting crash recovery is worse than waiting it out. |
 
 The gateway's probes render **only for an image that serves `/livez`** (appVersion
-`v1.10.222` or later, or the `policy-stable` channel). Pinned to an earlier tag the
+`v1.10.224` or later, or the `policy-stable` channel). Pinned to an earlier tag the
 chart omits them rather than 404 every check and crashloop the deployment.
 
 A `PodDisruptionBudget` (`podDisruptionBudget.maxUnavailable`, default `1`) is

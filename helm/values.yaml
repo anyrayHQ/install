@@ -144,7 +144,7 @@ progressDeadlineSeconds: 300
 # dependency — a probe that touched Postgres would turn a database blip into a
 # fleet-wide crashloop.
 #
-# `/livez` ships from appVersion v1.10.222. Against an older image the probes are
+# `/livez` ships from appVersion v1.10.224. Against an older image the probes are
 # NOT rendered (they would 404 and crashloop the deployment), so an install
 # pinned to an earlier tag keeps today's behaviour until it upgrades.
 livenessProbe:

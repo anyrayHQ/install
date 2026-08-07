@@ -403,7 +403,12 @@ serve the route; anything unrecognised (a custom tag, a private mirror tag)
 falls back to today's behaviour of no liveness probe. `policy-stable` is the
 moving newest-build channel and always carries it.
 */}}
-{{- define "anyray.livezFloor" -}}v1.10.222{{- end }}
+{{- /* MUST name the release that actually ships `/livez`. v1.10.222 and .223 were
+       cut BEFORE it merged, so an earlier draft of this floor would have rendered
+       the probes against images that answer 404 and crashlooped every gateway pod
+       on upgrade. Verify against `git tag` before merging a change to it: too LOW
+       crashloops, too HIGH silently leaves the probes off. */ -}}
+{{- define "anyray.livezFloor" -}}v1.10.224{{- end }}
 
 {{- define "anyray.servesLivez" -}}
 {{- $tag := include "anyray.effectiveImageTag" . -}}

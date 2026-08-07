@@ -157,7 +157,7 @@ optimizer:
 Note the optimizer's admin-edited runtime config is per pod, so above one replica
 a console change reaches only the pod that served the request.
 
-Running the gateway on `emptyDir` is lossless as of appVersion v1.10.222, and the
+Running the gateway on `emptyDir` is lossless as of appVersion v1.10.224, and the
 chart refuses to render an older image without the volume. Everything an operator
 sets now lives in the shared Postgres and is read identically by every replica:
 client keys, provider keys, per-user caps, model aliases, team policy, the audit

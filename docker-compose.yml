@@ -219,7 +219,11 @@ services:
   # only public entry is Caddy on 443; the Caddyfile 403s the admin surface.
   caddy:
     logging: *default-logging
-    image: "${ANYRAY_CADDY_IMAGE:-caddy:2-alpine}"
+    # Pinned to the multi-arch index digest of caddy 2.11.4 (the `2-alpine` tag
+    # floats, and a tag can be re-pushed). Bump the tag and the digest TOGETHER —
+    # a stale digest silently keeps serving the old build. Refresh with:
+    #   docker buildx imagetools inspect caddy:2-alpine
+    image: "${ANYRAY_CADDY_IMAGE:-caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648}"
     profiles: ["public"]
     restart: always
     # Caddy is the ONLY public entry in this profile, so it starting before the
@@ -253,7 +257,11 @@ services:
   # anyray_observations tables are auto-created on first use.
   postgres:
     logging: *default-logging
-    image: "${ANYRAY_POSTGRES_IMAGE:-docker.io/postgres:17}"
+    # Pinned to the multi-arch index digest of postgres 17.10 (`17` is a floating
+    # minor tag, and a tag can be re-pushed). Bump the tag and the digest
+    # TOGETHER — a stale digest silently keeps serving the old minor. Refresh with:
+    #   docker buildx imagetools inspect docker.io/postgres:17
+    image: "${ANYRAY_POSTGRES_IMAGE:-docker.io/postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317}"
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -295,7 +303,12 @@ services:
   # the Docker socket.
   docker-socket-proxy:
     logging: *default-logging
-    image: "${ANYRAY_DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:v0.4.2}"
+    # Digest-pinned: this container is the one thing here that mounts the real
+    # Docker socket, so a re-pushed tag would be root on the host. The digest is
+    # the multi-arch index for v0.4.2. Bump the tag and the digest TOGETHER.
+    # Refresh with:
+    #   docker buildx imagetools inspect tecnativa/docker-socket-proxy:v0.4.2
+    image: "${ANYRAY_DOCKER_SOCKET_PROXY_IMAGE:-tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476}"
     restart: always
     environment:
       CONTAINERS: 1
@@ -307,7 +320,14 @@ services:
 
   updater:
     logging: *default-logging
-    image: "${ANYRAY_UPDATER_IMAGE:-ghcr.io/nicholas-fedor/watchtower:1.18.1}"
+    # Digest-pinned, and the most important pin in this file: Watchtower reaches
+    # the Docker API (through the proxy above) and is what pulls + recreates the
+    # Anyray containers, so whoever controls this image controls every update
+    # that lands on the host. It ships from a single-maintainer GHCR namespace,
+    # where a re-pushed tag is the whole attack. The digest is the multi-arch
+    # index for 1.18.1. Bump the tag and the digest TOGETHER. Refresh with:
+    #   docker buildx imagetools inspect ghcr.io/nicholas-fedor/watchtower:1.18.1
+    image: "${ANYRAY_UPDATER_IMAGE:-ghcr.io/nicholas-fedor/watchtower:1.18.1@sha256:5a6262b7a66a353bd2cdb1e0cace6c5b7cb4d475d1080d6a57fe4ec82fe455b6}"
     restart: always
     depends_on:
       - docker-socket-proxy

@@ -120,34 +120,32 @@ generate-from-project strips literal defaults, and reading a published template
 is "Not Authorized"). So the literal defaults can only be restored in the
 dashboard's per-service **Raw Editor**.
 
-To make that deterministic — and to avoid rebuilding the variable blocks from
-memory each time — use the publish-assist helper:
+**The marketplace template is retired** (2026-08-07). Those API limits are exactly
+why: republishing was an irreducible dashboard paste, so the published template
+drifted to 56 releases behind v1.10.224 while `railway.template.json` stayed
+current, and the docs quietly promised a lag of "a version or two". A path that
+can only be kept correct by remembering to do it by hand is not one to keep
+offering. Installs now go through the IaC path (`IAC.md`), which reads
+`.railway/railway.ts`, is bumped by CI every release, and cannot drift.
 
-```bash
-railway/publish-template.sh          # prep: validate + regenerate + print the
-                                     #       ordered republish checklist (blocks inlined)
-railway/publish-template.sh test     # deploy the LIVE published template to a
-                                     #       throwaway project, health-check it, delete it
-```
+`railway.template.json` STAYS, and is still the spec for the four services. It is
+load-bearing beyond the marketplace: `deploy-prod.yml` reads its gateway tag as
+the current-version source for the release bump, and
+`ci/check-gateway-env-coverage.sh` validates every gateway env var against it.
 
-`prep` (the default) wraps `build-publish.sh` and prints the exact per-service
-Raw-Editor blocks in dashboard order, so the manual step is copy-paste. `test`
-deploys the *currently published* template and runs the health-check battery
-(gateway `/`, console `/anyray-login`, `/admin/health`, default-model routing),
-which catches boot regressions a static config review can't — e.g. a proxy
-crash-loop from a stripped env var. It needs a **workspace token**
-(`RAILWAY_WORKSPACE_TOKEN`) and the `railway` CLI logged in; see the script
-header.
+`build-publish.sh` also stays as its validator (called by `validate-artifacts.yml`
+to prove the deployment-token field is still required). It reads
+`railway.template.json` and writes, into the gitignored `railway/.publish/`:
 
-`build-publish.sh` is still the underlying generator (called by `prep`). It
-reads `railway.template.json` and writes (into the gitignored `railway/.publish/`):
+- `RUNBOOK.md` — the ordered procedure and publish metadata.
+- `<service>.vars` — the `KEY=VALUE` block per service.
 
-- `RUNBOOK.md` — the ordered dashboard procedure, the publish metadata, the
-  required README sections, and the cache-busted verify URL.
-- `<service>.vars` — the exact `KEY=VALUE` block to paste into each service's
-  Raw Editor.
+`publish-template.sh` and `check-template-drift.sh` were removed with the
+template, along with the nightly drift workflow that could only ever have gone
+red once nothing was published.
 
-**Re-run after every `railway.template.json` change** so the artifacts stay in sync.
+**Re-run `build-publish.sh` after every `railway.template.json` change** so the
+artifacts stay in sync.
 
 The template is **published** (Othentic workspace, category "AI / ML"). The
 "Deploy on Railway" button URL is `https://railway.com/deploy/anyray` — when

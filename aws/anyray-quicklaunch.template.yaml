@@ -1415,7 +1415,19 @@ Resources:
         MaximumPercent: 200
         DeploymentCircuitBreaker: { Enable: true, Rollback: true }
       TaskDefinition: !Ref GatewayTask
-      HealthCheckGracePeriodSeconds: 300
+      # Must cover a full migration run. The gateway applies the ordered
+      # migration ledger at boot and REFUSES TO SERVE on an unmigrated schema, so
+      # a task can sit RUNNING and not yet answering for as long as the
+      # migrations take; the ledger allows a single statement 30 minutes, and
+      # eight of its migrations are CREATE INDEX CONCURRENTLY over tables holding
+      # real rows. At 300s ECS killed and replaced the task mid-migration, the
+      # replacement restarted the same migration, and it never converged — the
+      # failure lands on the installs least able to absorb it (months of spend
+      # data, or a jump across several releases). Costs nothing in detection: the
+      # grace only suppresses health-check-driven REPLACEMENT, the ALB still
+      # refuses to route to a target that is not passing, and a genuinely broken
+      # gateway exits fatally, and a stopped container is replaced regardless.
+      HealthCheckGracePeriodSeconds: 1800
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED

@@ -131,37 +131,43 @@ kubectl rollout status deployment -n "$ANYRAY_NAMESPACE" \
 
 ### Rollout behaviour and downtime
 
-**With the default values an upgrade is not seamless, by construction.** Bundled
-persistence puts the gateway and optimizer on a `ReadWriteOnce` PVC, which one node
-must release before the replacement pod can mount it, so both Deployments use
-`strategy: Recreate`: every old pod stops, and only then does a new one start.
-Callers get connection failures through the proxy for as long as the replacement
-takes to boot and pass its readiness probe. No setting makes a rolling update
-possible while a single-attach volume is in play.
+**The gateway rolls without a gap by default.** Since chart 0.5.0
+`gateway.persistence.enabled` defaults to `false`, which is what allows
+`replicas: 2` and the `RollingUpdate` strategy with `maxUnavailable` held at zero:
+a replacement is Ready before any old pod is retired.
 
-For a genuinely gap-free roll, take the components off the PVC — the chart then
-switches them to `RollingUpdate` with `maxUnavailable` held at zero, so a
-replacement is Ready before any old pod is retired (this holds even at one
-replica, since the strategy surges a second pod first):
+That volume is `ReadWriteOnce`, so one node must release it before a replacement
+can mount it. Any component still on it uses `strategy: Recreate` (every old pod
+stops, and only then does a new one start) and is capped at one replica. No
+setting makes a rolling update possible while a single-attach volume is in play.
+
+The **optimizer** is still on its PVC by default, so it still rolls that way. The
+gateway fails open when the optimizer is unreachable, so this costs money rather
+than availability: the fail-open path forwards the original request, busting the
+provider prompt cache on every warm session for the length of the gap. Take it
+off the volume too if that matters more than its per-pod runtime config:
 
 ```yaml
-gateway:
-  persistence:
-    enabled: false
-  replicas: 2
 optimizer:
   persistence:
     enabled: false
   replicas: 2
 ```
 
-Read the trade-off in `## v1 limitations` below first: `emptyDir` means the gateway
-state still kept in files resets when a pod is replaced — the runtime settings JSON
-(content-capture mode, heartbeat tier), the entitlement-lease cache, the optimizer's
-runtime config, and for now the default routing config. Everything
-security-relevant — client keys, provider keys, per-user caps, model aliases, team
-policy, the audit trail — already lives in Postgres and is unaffected, as are spend
-and trace history.
+Note the optimizer's admin-edited runtime config is per pod, so above one replica
+a console change reaches only the pod that served the request.
+
+Running the gateway on `emptyDir` is lossless as of appVersion v1.10.222, and the
+chart refuses to render an older image without the volume. Everything an operator
+sets now lives in the shared Postgres and is read identically by every replica:
+client keys, provider keys, per-user caps, model aliases, team policy, the audit
+trail, the runtime settings (content-capture mode, heartbeat tier), the default
+routing config, the end-point fleet config, and the fleetd installers. Spend and
+trace history were always there.
+
+What still resets with the pod is the entitlement-lease cache, which is
+deliberately node-local and re-fetched, and the optimizer's own runtime config if
+you take the optimizer off its volume too.
 
 Independent of the strategy, three values shape how termination is handled, and
 each is overridable per component:
@@ -459,23 +465,16 @@ the gateway alone silently degrades the optimizer to in-memory stash
 
 ## v1 limitations to be aware of
 
-- **Gateway and optimizer state is on single-attach PVCs — but much less of it than
-  it used to be.** Everything security- or spend-relevant already lives in the shared
-  Postgres rather than on these volumes: provider keys, client keys, per-user caps,
-  model aliases, team policy, the admin/GDPR audit trail, and of course the spend and
-  trace history. **Disabling persistence loses none of that.** What is still
-  file-backed is the runtime settings JSON (content-capture mode, heartbeat tier), the
-  entitlement-lease cache, the optimizer's runtime config, and the default routing
-  config — the last of which moves to Postgres in the next gateway release. The PVCs
-  also survive `helm uninstall`, via a `helm.sh/resource-policy: keep` annotation.
-  The trade-off: the volumes are `ReadWriteOnce`, so these Deployments use a
-  `Recreate` strategy — downtime on every upgrade, not merely a risk of it — and
-  must stay at `replicas: 1`; the chart fails fast if you raise replicas with
-  persistence enabled. Scaling beyond one replica requires moving the rest of that
-  file-backed state into Postgres (in progress). Set
-  `gateway.persistence.enabled: false` to fall back to ephemeral `emptyDir` and get a
-  gap-free `RollingUpdate`, at the cost of resetting the state still held in files —
-  see [Rollout behaviour and downtime](#rollout-behaviour-and-downtime).
+- **The optimizer is still on a single-attach PVC.** The gateway is not, as of
+  chart 0.5.0: everything an operator sets moved to the shared Postgres, so it runs
+  on `emptyDir`, rolls without a gap, and scales past one replica. The optimizer's
+  runtime config is the one admin-mutable store still held per pod, so it keeps its
+  volume by default and therefore keeps the `Recreate` strategy and `replicas: 1`.
+  That costs money rather than availability: the gateway fails open when the
+  optimizer is unreachable, and the fail-open path busts the provider prompt cache
+  on warm sessions. Set `optimizer.persistence.enabled: false` to trade that config
+  for a gap-free roll. Both PVCs survive `helm uninstall` via a
+  `helm.sh/resource-policy: keep` annotation.
 - **Single-replica bundled Postgres.** The bundled Postgres is a `replicas: 1`
   StatefulSet — adequate for most orgs, but not HA. Use the external-Postgres
   values above for a managed cloud equivalent.

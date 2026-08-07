@@ -218,7 +218,10 @@ podDisruptionBudget:
 
 # Gateway
 gateway:
-  replicas: 1
+  # Two, so the gateway survives losing one. This is only possible because
+  # persistence is off below; with the ReadWriteOnce volume mounted the chart
+  # refuses anything above 1.
+  replicas: 2
   # Autoscaling needs gateway.persistence.enabled=false because the bundled data
   # PVC is ReadWriteOnce. Use an external/shared state backend before enabling.
   autoscaling:
@@ -305,10 +308,32 @@ gateway:
   # Extra env vars (provider-key fallbacks, rate limits, …)
   # in plain k8s env syntax: [{name: ANYRAY_RATE_LIMIT_RPM, value: "600"}]
   extraEnv: []
-  # Persist /data (provider keys, routing config, spend + audit logs) across
-  # pod restarts. Requires replicas: 1 — the PVC is ReadWriteOnce.
+  # OFF by default since chart 0.5.0, and that single value is the difference
+  # between a gateway that can stay up and one that cannot.
+  #
+  # The volume is ReadWriteOnce, so only one pod can ever mount it: it caps the
+  # gateway at replicas: 1 AND forces the Recreate rollout strategy, which makes
+  # every `helm upgrade` a downtime window by construction. With it off the chart
+  # takes the RollingUpdate path (maxUnavailable: 0) and scales out.
+  #
+  # Turning it off is safe because nothing authoritative lives here any more.
+  # Provider keys, user access keys, routing config, content settings, per-user
+  # caps, model aliases, team policy, the audit log, and (from appVersion
+  # v1.10.222) the end-point lane's fleetd installers are all in the shared
+  # Postgres, read identically by every replica. What remains on the volume is
+  # the entitlement-lease cache, which is re-fetched, and legacy off-Postgres
+  # fallbacks this chart never uses.
+  #
+  # UPGRADING AN EXISTING INSTALL: do it in two steps. The gateway copies
+  # anything still on the volume into the database on boot, and it can only do
+  # that while the volume is mounted. Upgrading the image and taking persistence
+  # away in the SAME `helm upgrade` starts the pod with an empty volume, so there
+  # is nothing to copy. Set `persistence.enabled: true` explicitly for the
+  # upgrade that first lands v1.10.222+, let the pod go Ready, then remove that
+  # override. The old PVC is retained either way ("helm.sh/resource-policy":
+  # keep), so the worst case is re-uploading fleetd installers.
   persistence:
-    enabled: true
+    enabled: false
     size: 1Gi
     storageClass: ""
 

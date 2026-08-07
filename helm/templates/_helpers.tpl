@@ -472,7 +472,7 @@ startupProbe:
     port: {{ .port }}
   periodSeconds: {{ $probe.periodSeconds | default 5 }}
   timeoutSeconds: {{ $probe.timeoutSeconds | default 5 }}
-  failureThreshold: {{ $probe.failureThreshold | default 60 }}
+  failureThreshold: {{ $probe.failureThreshold | default 360 }}
 {{- end -}}
 {{- end -}}
 {{- end }}

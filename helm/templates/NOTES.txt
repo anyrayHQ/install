@@ -47,9 +47,9 @@ Availability of this release:
   Postgres, which every replica reads.
 
   The one exception is the end-point lane's fleetd installers. They moved to the
-  database in appVersion v1.10.222, and the gateway copies any left on the volume
+  database in appVersion v1.10.224, and the gateway copies any left on the volume
   into the database on boot -- but it can only do that while the volume is still
-  mounted. If this upgrade both raised the image to v1.10.222 and dropped the
+  mounted. If this upgrade both raised the image to v1.10.224 and dropped the
   volume, that copy never ran.
 
   Note that a pod reporting Ready is NOT proof the copy finished: the import is

@@ -3,6 +3,17 @@
 {{- fail (printf "gateway.extraEnv must not override %s: Billing metering is mandatory" .name) }}
 {{- end }}
 {{- end }}
+{{- /* Running WITHOUT the data volume is only lossless once the image keeps the
+       fleetd installers in Postgres (0057, appVersion v1.10.224). On an older
+       image they are files, so an emptyDir means every installer is discarded on
+       each pod restart, silently — the console keeps offering a download that
+       404s. Refuse to render rather than ship that: the two ways out are pinning
+       a current image or keeping the volume, and both are named here. */}}
+{{- if not .Values.gateway.persistence.enabled }}
+{{- if not (include "anyray.atLeastAppVersion" (dict "component" "gateway" "floor" (include "anyray.haFloor" .) "context" .)) }}
+{{- fail (printf "gateway.persistence.enabled=false needs a gateway image of %s or newer (this renders %s): older images keep the end-point lane's fleetd installers as files on that volume, so running without it discards them on every restart. Either upgrade the image, or set gateway.persistence.enabled=true (which also caps gateway.replicas at 1)." (include "anyray.haFloor" .) (include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .))) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -158,13 +158,35 @@ livenessProbe:
   failureThreshold: 6
 startupProbe:
   # Holds liveness off until the process answers once, so the liveness budget
-  # above can stay tight without having to cover a cold start. 60 x 5s = 5
-  # minutes, sized for the case where one replica applies the migration ledger
-  # under an advisory lock while its peers wait on it.
+  # above can stay tight without having to cover a cold start.
+  #
+  # THIS BUDGET MUST COVER A FULL MIGRATION RUN. The gateway applies the ordered
+  # migration ledger at boot and refuses to serve on an unmigrated schema, so it
+  # opens no port (and cannot answer /livez) until every pending migration has
+  # converged. The ledger allows a single statement 30 minutes
+  # (MIGRATION_QUERY_TIMEOUT_MS), and eight of its migrations are
+  # CREATE INDEX CONCURRENTLY against tables that hold real customer rows.
+  #
+  # 360 x 5s = 30 minutes, matching that ceiling. A 5-minute budget was a latent
+  # boot loop for exactly the installs least able to absorb one: a self-hosted
+  # client with months of spend data, or one jumping several releases at once.
+  # The kubelet kills the pod mid-migration, the restart begins the same
+  # migration again, and it never converges. Worse for the concurrent ones: an
+  # interrupted CREATE INDEX CONCURRENTLY leaves an INVALID index that
+  # `IF NOT EXISTS` then skips forever (silent sequential scans), or that a bare
+  # re-CREATE errors on and wedges the boot outright.
+  #
+  # The long budget costs nothing. A startup probe only ever delays a RESTART,
+  # never traffic (readiness is a separate probe), and a genuinely misconfigured
+  # gateway exits fatally on its own rather than sitting unresponsive — so this
+  # can never mask a real failure.
+  #
+  # CHANGE-BOTH-TOGETHER with MIGRATION_QUERY_TIMEOUT_MS in
+  # packages/anyray-observability/src/spendStore/migrations.ts.
   enabled: true
   periodSeconds: 5
   timeoutSeconds: 5
-  failureThreshold: 60
+  failureThreshold: 360
 
 # PodDisruptionBudget for the gateway, optimizer and proxy Deployments: caps how
 # many of a workload's pods VOLUNTARY disruption — a node drain, a cluster

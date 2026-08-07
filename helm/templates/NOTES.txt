@@ -1,0 +1,76 @@
+Anyray {{ .Chart.AppVersion }} (chart {{ .Chart.Version }}) is installed as "{{ .Release.Name }}" in namespace {{ .Release.Namespace }}.
+
+Watch it come up:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "anyray.fullname" . }}-gateway
+{{- if .Values.host }}
+
+Console:  https://{{ .Values.host }}/
+Gateway:  https://{{ .Values.host }}/v1
+{{- else }}
+
+No `host` is set, so no Ingress or HTTPRoute host rule was generated. Reach the
+console with a port-forward:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "anyray.fullname" . }}-proxy 3000:3000
+{{- end }}
+
+Availability of this release:
+{{- if .Values.gateway.persistence.enabled }}
+  gateway    replicas {{ .Values.gateway.replicas }}, Recreate rollout (the ReadWriteOnce data
+             volume is enabled, so upgrades have a downtime window and replicas
+             cannot go above 1)
+{{- else }}
+  gateway    replicas {{ if .Values.gateway.autoscaling.enabled }}{{ .Values.gateway.autoscaling.minReplicas }}-{{ .Values.gateway.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.gateway.replicas }}{{ end }}, rolling update with maxUnavailable 0
+{{- end }}
+  optimizer  replicas {{ if .Values.optimizer.autoscaling.enabled }}{{ .Values.optimizer.autoscaling.minReplicas }}-{{ .Values.optimizer.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.optimizer.replicas }}{{ end }}{{ if .Values.optimizer.persistence.enabled }}, Recreate rollout{{ end }}
+  proxy      replicas {{ if .Values.proxy.autoscaling.enabled }}{{ .Values.proxy.autoscaling.minReplicas }}-{{ .Values.proxy.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.proxy.replicas }}{{ end }}
+{{- if .Values.postgres.enabled }}
+  postgres   BUNDLED, single pod. This is the one part of the stack that cannot
+             fail over, and the gateway reads client keys from it on the auth
+             hot path, so while it is down /v1/* fails closed. For an install
+             that must not go down, run Postgres outside the chart
+             (postgres.enabled=false + postgres.external.*) on a managed
+             instance or an operator such as CloudNativePG.
+{{- else }}
+  postgres   external
+{{- end }}
+
+{{- if and .Release.IsUpgrade (not .Values.gateway.persistence.enabled) }}
+
+  ────────────────────────────────────────────────────────────────────────────
+  CHECK THIS UPGRADE: the gateway is running WITHOUT its data volume.
+
+  Since chart 0.5.0 gateway.persistence.enabled defaults to false, which is what
+  allows more than one gateway pod and a rolling (no-downtime) upgrade. Nothing
+  authoritative lives on that volume any more; it all moved to the shared
+  Postgres, which every replica reads.
+
+  The one exception is the end-point lane's fleetd installers. They moved to the
+  database in appVersion v1.10.224, and the gateway copies any left on the volume
+  into the database on boot -- but it can only do that while the volume is still
+  mounted. If this upgrade both raised the image to v1.10.224 and dropped the
+  volume, that copy never ran.
+
+  Note that a pod reporting Ready is NOT proof the copy finished: the import is
+  best-effort so it can never hold up a boot, and readiness does not wait for it.
+  The check below is the real signal, because it reads the database.
+
+  If you use the end-point lane, confirm your installers are still listed:
+
+    kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "anyray.fullname" . }}-gateway -- \
+      wget -qO- --header "Authorization: Bearer $ANYRAY_ADMIN_TOKEN" \
+      localhost:8787/admin/endpoint-fleet/installers
+
+  If the list is empty, either re-upload them from the console, or roll back to
+  the volume for one release to let the copy run:
+
+    helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} \
+      --set gateway.persistence.enabled=true --set gateway.replicas=1
+
+  The old volume is retained ("helm.sh/resource-policy": keep), so nothing was
+  deleted in either case.
+  ────────────────────────────────────────────────────────────────────────────
+{{- end }}
+
+Docs: https://docs.anyray.ai

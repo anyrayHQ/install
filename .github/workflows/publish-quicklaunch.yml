@@ -40,7 +40,7 @@ jobs:
       KEY: anyray-quicklaunch.template.yaml
       URL: https://anyray-quicklaunch.s3.us-east-1.amazonaws.com/anyray-quicklaunch.template.yaml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Never publish a template that would break the one-click deploy. cfn-lint
       # expands the AWS::LanguageExtensions transform, so it catches errors that
@@ -60,7 +60,7 @@ jobs:
           fi
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ vars.AWS_QUICKLAUNCH_PUBLISH_ROLE_ARN }}
           aws-region: us-east-1

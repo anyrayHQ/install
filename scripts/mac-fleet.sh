@@ -13,7 +13,17 @@
 set -euo pipefail
 
 REGION="${AWS_REGION:-eu-central-1}"
-ACCOUNT="${AWS_ACCOUNT_ID:-637423459445}"
+# Never hardcode the account id: this repo is PUBLIC, and a literal id hands a
+# reader the other half of every role ARN below — enough to enumerate role names
+# and probe them for a permissive cross-account trust policy. Take it from the
+# environment when set, otherwise derive it from whoever is already
+# authenticated (the callers assume the fleet role via OIDC first, so this
+# resolves to the account that owns the fleet).
+ACCOUNT="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)}"
+case "$ACCOUNT" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) echo "::error::cannot determine the AWS account id (got '${ACCOUNT}'): set AWS_ACCOUNT_ID, or configure credentials so 'aws sts get-caller-identity' succeeds"; exit 1 ;;
+esac
 FLEET="anyray-install-mac-fleet"
 PROJECT="anyray-install-runner-mac"
 FLEET_SERVICE_ROLE="arn:aws:iam::${ACCOUNT}:role/anyray-mac-fleet-service"

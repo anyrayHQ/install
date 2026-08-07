@@ -4,7 +4,7 @@
 {{- end }}
 {{- end }}
 {{- /* Running WITHOUT the data volume is only lossless once the image keeps the
-       fleetd installers in Postgres (0057, appVersion v1.10.222). On an older
+       fleetd installers in Postgres (0057, appVersion v1.10.224). On an older
        image they are files, so an emptyDir means every installer is discarded on
        each pod restart, silently — the console keeps offering a download that
        404s. Refuse to render rather than ship that: the two ways out are pinning

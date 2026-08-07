@@ -403,23 +403,47 @@ serve the route; anything unrecognised (a custom tag, a private mirror tag)
 falls back to today's behaviour of no liveness probe. `policy-stable` is the
 moving newest-build channel and always carries it.
 */}}
-{{- /* MUST name the release that actually ships `/livez`. v1.10.222 and .223 were
-       cut BEFORE it merged, so an earlier draft of this floor would have rendered
-       the probes against images that answer 404 and crashlooped every gateway pod
-       on upgrade. Verify against `git tag` before merging a change to it: too LOW
-       crashloops, too HIGH silently leaves the probes off. */ -}}
-{{- define "anyray.livezFloor" -}}v1.10.224{{- end }}
+{{/*
+The appVersion floor for everything this chart's availability posture depends on
+the IMAGE to provide. One constant, because both features ship in the same
+release and splitting it would invite the two to drift:
 
-{{- define "anyray.servesLivez" -}}
-{{- $tag := include "anyray.effectiveImageTag" . -}}
+  * `GET /livez`, the liveness probe target (below);
+  * the fleetd installer store moving to Postgres (0057), which is what makes
+    gateway.persistence.enabled=false lossless.
+
+CHANGE-BOTH-TOGETHER: this must name the release that actually carries both. Set
+too low, the probes 404 and the deployment crashloops; set too high, the chart
+silently keeps the old single-replica posture.
+*/}}
+{{- /* v1.10.222 and .223 were cut BEFORE /livez and 0057 merged, so an earlier
+       draft of this floor named a release that has neither. Verify against
+       `git tag` before changing it. */ -}}
+{{- define "anyray.haFloor" -}}v1.10.224{{- end }}
+
+{{/*
+Whether the resolved image for a component is at least `floor`.
+
+Returns "" (falsey) for anything unrecognised — a private-mirror tag, a custom
+build, a channel name we do not know — so every caller degrades to the older,
+safer behaviour rather than assuming a capability the image may not have.
+`policy-stable` is the moving newest-build channel and always qualifies.
+
+Usage: include "anyray.atLeastAppVersion" (dict "component" "gateway" "floor" (include "anyray.haFloor" .) "context" .)
+*/}}
+{{- define "anyray.atLeastAppVersion" -}}
+{{- $tag := include "anyray.effectiveImageTag" (dict "component" .component "context" .context) -}}
 {{- if eq $tag "policy-stable" -}}
 true
 {{- else if regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+$" $tag -}}
-{{- $floor := trimPrefix "v" (include "anyray.livezFloor" .context) -}}
-{{- if semverCompare (printf ">=%s-0" $floor) (trimPrefix "v" $tag) -}}
+{{- if semverCompare (printf ">=%s-0" (trimPrefix "v" .floor)) (trimPrefix "v" $tag) -}}
 true
 {{- end -}}
 {{- end -}}
+{{- end }}
+
+{{- define "anyray.servesLivez" -}}
+{{- include "anyray.atLeastAppVersion" (dict "component" .component "floor" (include "anyray.haFloor" .context) "context" .context) -}}
 {{- end }}
 
 {{- define "anyray.livenessProbe" -}}

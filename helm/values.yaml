@@ -151,7 +151,7 @@ progressDeadlineSeconds: 300
 # dependency — a probe that touched Postgres would turn a database blip into a
 # fleet-wide crashloop.
 #
-# `/livez` ships from appVersion v1.10.231. Against an older image the probes are
+# `/livez` ships from appVersion v1.10.233. Against an older image the probes are
 # NOT rendered (they would 404 and crashloop the deployment), so an install
 # pinned to an earlier tag keeps today's behaviour until it upgrades.
 livenessProbe:
@@ -326,7 +326,7 @@ gateway:
   # Turning it off is safe because nothing authoritative lives here any more.
   # Provider keys, user access keys, routing config, content settings, per-user
   # caps, model aliases, team policy, the audit log, and (from appVersion
-  # v1.10.231) the end-point lane's fleetd installers are all in the shared
+  # v1.10.233) the end-point lane's fleetd installers are all in the shared
   # Postgres, read identically by every replica. What remains on the volume is
   # the entitlement-lease cache, which is re-fetched, and legacy off-Postgres
   # fallbacks this chart never uses.
@@ -336,7 +336,7 @@ gateway:
   # that while the volume is mounted. Upgrading the image and taking persistence
   # away in the SAME `helm upgrade` starts the pod with an empty volume, so there
   # is nothing to copy. Set `persistence.enabled: true` explicitly for the
-  # upgrade that first lands v1.10.231+, then remove that override once the copy
+  # upgrade that first lands v1.10.233+, then remove that override once the copy
   # has actually run. Do NOT use Ready as the signal: the copy is best-effort so
   # it can never hold up a boot, which means readiness does not wait for it.
   # `GET /admin/endpoint-fleet/installers` reads the database, so a non-empty

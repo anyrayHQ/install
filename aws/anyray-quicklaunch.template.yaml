@@ -996,6 +996,38 @@ Resources:
                   raise Exception('no appVersion entries in the release index')
               return max(tags, key=lambda t: tuple(int(x) for x in SEMVER.match(t).groups()))
 
+          def requested_target(event):
+              """The tag the CALLER asked for, if it named one.
+
+              The gateway decides its own target: it evaluates the release
+              manifest against this deployment and only asks for a version it
+              classified as a soft update. Honour that instead of resolving
+              'latest' here, because the two sources disagree -- the chart index
+              this Lambda reads lags the manifest the gateway reads. Resolving
+              our own then finds every service already current, answers 200, and
+              the gateway records a successful trigger that changed nothing,
+              suppressing its retry for six hours.
+
+              Validated against the same immutable-tag regex either way, so a
+              caller can only ever name a release tag, never an arbitrary image.
+              Absent/blank body keeps the old behaviour (console one-click).
+              """
+              raw = event.get('body') or ''
+              if event.get('isBase64Encoded'):
+                  import base64
+                  raw = base64.b64decode(raw).decode('utf-8', 'replace')
+              if not raw.strip():
+                  return None
+              try:
+                  target = (json.loads(raw) or {}).get('target')
+              except Exception:
+                  raise Exception('request body was not valid JSON')
+              if target is None:
+                  return None
+              if not isinstance(target, str) or not SEMVER.match(target):
+                  raise Exception('target must be an immutable release tag like v1.10.245')
+              return target
+
           def services_for(cluster, prefix):
               """This stack's three services, found by task-definition family."""
               out, token = [], None
@@ -1019,7 +1051,8 @@ Resources:
                   if not authorised(event):
                       return reply(403, {'status': 'failure',
                                          'message': 'bad or missing bearer token'})
-                  tag = latest_release()
+                  asked = requested_target(event)
+                  tag = asked or latest_release()
                   cluster = os.environ['CLUSTER']
                   updated, current = [], []
                   for service, family in services_for(cluster, os.environ['FAMILY_PREFIX']):
@@ -1037,7 +1070,12 @@ Resources:
                       arn = ecs.register_task_definition(**td)['taskDefinition']['taskDefinitionArn']
                       ecs.update_service(cluster=cluster, service=service, taskDefinition=arn)
                       updated.append(service)
+                  # 'target' names where the tag came from: a caller-requested
+                  # version, or one this Lambda resolved from the chart index.
+                  # A roll that keeps reporting alreadyCurrent on 'index' is the
+                  # index lagging, not the deployment being up to date.
                   result = {'status': 'ok', 'tag': tag,
+                            'target': 'requested' if asked else 'index',
                             'updated': updated, 'alreadyCurrent': current}
                   print(json.dumps(result))
                   return reply(200, result)

@@ -34,12 +34,13 @@ jobs:
           # shield this `up` from repulling anyway.
           ANYRAY_GATEWAY_IMAGE: public.ecr.aws/anyray/gateway:latest
           ANYRAY_OPTIMIZER_IMAGE: public.ecr.aws/anyray/optimizer:latest
+          ANYRAY_ENDPOINT_CONTROL_IMAGE: public.ecr.aws/anyray/endpoint-control:latest
           ANYRAY_PROXY_IMAGE: public.ecr.aws/anyray/proxy:latest
           ANYRAY_POSTGRES_IMAGE: public.ecr.aws/docker/library/postgres:17
           ANYRAY_UPDATER_ENABLED: "false"
         run: |
           for attempt in 1 2 3 4 5; do
-            if docker compose up -d --quiet-pull gateway optimizer proxy postgres; then
+            if docker compose up -d --quiet-pull gateway optimizer endpoint-control proxy postgres; then
               exit 0
             fi
             echo "attempt $attempt failed (likely ECR Public anonymous pull rate limit) — backing off"
@@ -61,6 +62,16 @@ jobs:
             sleep 5
           done
           echo "console never became healthy"; docker compose ps; docker compose logs proxy; exit 1
+      - name: Wait for endpoint-control
+        # No host port by design (only Caddy's agent-plane routes reach it in a
+        # public deployment), so probe the compose healthcheck (/livez) instead.
+        run: |
+          for _ in $(seq 1 30); do
+            state="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q endpoint-control)" 2>/dev/null || true)"
+            if [ "$state" = "healthy" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "endpoint-control never became healthy"; docker compose ps; docker compose logs endpoint-control; exit 1
       - name: Probe surfaces
         run: |
           set -e

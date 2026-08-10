@@ -115,6 +115,11 @@ services:
       # Dev/staging ONLY — override the pinned key + host for an internal build.
       ANYRAY_DEV_UNSAFE_CONTROL_PLANE: ${ANYRAY_DEV_UNSAFE_CONTROL_PLANE:-}
       ANYRAY_LICENSE_PUBLIC_KEY: ${ANYRAY_LICENSE_PUBLIC_KEY:-}
+      # In-stack address of the endpoint-control service (RFC 0014). Optional on
+      # the gateway: images that predate the end-point lane ignore it, and the
+      # whole plane stays dormant until a gateway that reads it ships — so this
+      # line is safe ahead of that gateway. A literal, like ANYRAY_OPTIMIZER_URL.
+      ANYRAY_ENDPOINT_CONTROL_URL: http://endpoint-control:8090
     volumes:
       - anyray_gateway_data:/data
     healthcheck:
@@ -164,6 +169,49 @@ services:
       - anyray_optimizer_data:/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:8088/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # End-point control (RFC 0014) — the client-operated device-evidence service.
+  # Employee laptops run the signed fleetd agent against this deployment's own
+  # public origin (see the Caddyfile's agent-plane routes); enrollment, policy
+  # evidence, and remediation authority stay inside the deployment. The gateway
+  # talks to it in-stack over ANYRAY_ENDPOINT_CONTROL_URL; nothing here exposes
+  # a host port.
+  endpoint-control:
+    logging: *default-logging
+    image: "${ANYRAY_ENDPOINT_CONTROL_IMAGE:-public.ecr.aws/anyray/endpoint-control:${ANYRAY_IMAGE_TAG:-policy-stable}}"
+    pull_policy: always
+    restart: always
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    # Its endpoint_* tables ride the same bundled Postgres as the gateway's
+    # spend store (boot-applied idempotent schema); without this gate it boots
+    # before Postgres on a cold `up` and falls back to the loud in-memory store.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Same database the gateway's ANYRAY_SPEND_DB_URL points at — the
+      # endpoint_* tables coexist there. Same default, same override shape.
+      ANYRAY_CP_DATABASE_URL: ${ANYRAY_CP_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
+      # Paired key: the SAME value as ANYRAY_ADMIN_TOKEN, derived here exactly
+      # like ANYRAY_UPDATER_TOKEN — the gateway authenticates to this service by
+      # falling back to its own admin token, so the two must never drift. The
+      # override exists for operators who deliberately split the credentials.
+      ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN: ${ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN:-${ANYRAY_ADMIN_TOKEN}}
+      # Public origin employee laptops reach (fleetd calls fixed /api/* paths on
+      # it). With `--profile public` this derives from ANYRAY_PUBLIC_DOMAIN —
+      # Caddy routes the agent-plane paths here on that same origin, so no
+      # second hostname or certificate is needed. Empty (no public profile) the
+      # plane simply cannot mint installers until an operator sets it.
+      ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL: ${ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL:-${ANYRAY_PUBLIC_DOMAIN:+https://${ANYRAY_PUBLIC_DOMAIN:-}}}
+    healthcheck:
+      # /livez is process-only liveness; /readyz (Postgres + drain) stays for
+      # edge health checks, mirroring the service's documented probe split.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8090/livez').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -282,7 +330,7 @@ services:
   # is no toggle to disable it. The token the trigger needs derives from
   # ANYRAY_ADMIN_TOKEN (override with ANYRAY_UPDATER_TOKEN).
   # Bundles Watchtower to pull newer images and recreate the Anyray app
-  # containers (gateway/optimizer/proxy) when the operator clicks the console's
+  # containers (gateway/optimizer/endpoint-control/proxy) when the operator clicks the console's
   # "Update now" button (Watchtower HTTP API). Updates apply only on that click —
   # there is no unattended polling.
   #
@@ -291,7 +339,7 @@ services:
   # migration revision may temporarily pin one immutable vX.Y.Z. Override
   # ANYRAY_IMAGE_TAG=vX.Y.Z when you want pinned/manual updates. Watchtower only
   # touches containers labelled
-  # com.centurylinklabs.watchtower.enable=true (the three app services above),
+  # com.centurylinklabs.watchtower.enable=true (the four app services above),
   # never the datastores or anything else on the host.
   #
   # SECURITY: Watchtower never gets the raw Docker socket — it talks to the

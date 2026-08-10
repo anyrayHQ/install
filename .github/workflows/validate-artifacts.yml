@@ -345,14 +345,24 @@ jobs:
           grep -Fq "google_metadata_script_runner startup" gcp/gce/deploy.sh
           grep -Fq '^adt_[A-Za-z0-9_-]+$' railway/railway-iac-bootstrap.sh
 
+  # NOTE: the job id stays `gateway-env-coverage` even though it now covers the
+  # optimizer too — it is a REQUIRED status check on main (branch protection
+  # matches by job name), and renaming it would leave every PR waiting forever on
+  # a check that never reports. Rename only alongside a protection update.
   gateway-env-coverage:
-    # Every deploy-critical gateway env var (ci/critical-gateway-env.txt) must be
-    # wired into EVERY template — compose, CloudFormation, both Railway paths,
-    # and Helm. A var
-    # the gateway fail-fasts on (or the admin console needs), silently dropped
-    # from one template, bricks that install path on the next image bump.
-    # Running daily, it catches template drift before a customer hits it (and
-    # a monorepo paired PR that wired a new var into some templates but not all).
+    # Every deploy-critical env var must be wired onto ITS SERVICE in EVERY
+    # template — compose, CloudFormation, both Railway paths, and Helm. Running
+    # daily, it catches template drift before a customer hits it (and a monorepo
+    # paired PR that wired a new var into some templates but not all).
+    #
+    # Two contracts, because the services fail in opposite ways. The GATEWAY
+    # (ci/critical-gateway-env.txt) fail-fasts, so a dropped var bricks that
+    # install path on the next image bump. The OPTIMIZER
+    # (ci/critical-optimizer-env.txt) treats the same vars as optional and
+    # degrades in SILENCE — prod 2026-08-08 ran without ANYRAY_SPEND_DB_URL on
+    # the optimizer, so every admin setting was per-pod and deploy-ephemeral with
+    # nothing logged anywhere. "Degrades rather than bricks" is why it needs a
+    # gate, not why it can skip one.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -360,12 +370,12 @@ jobs:
         with:
           version: v3.16.3
           token: ${{ github.token }}
-      - name: render Helm values (gateway env comes from the rendered chart)
+      - name: render Helm values (service env comes from the rendered chart)
         run: |
           ./setup.sh --k8s --connect adt_ci0000000000000000 \
             --host anyray.internal --namespace anyray
-      - name: every critical gateway env var is wired into every template
-        run: ci/check-gateway-env-coverage.sh
+      - name: every critical env var is wired onto its service in every template
+        run: ci/check-service-env-coverage.sh
 
   shell:
     runs-on: ubuntu-latest

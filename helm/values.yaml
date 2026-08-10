@@ -48,6 +48,9 @@ images:
   proxy:
     repository: public.ecr.aws/anyray/proxy
     tag: ""
+  endpoint-control:
+    repository: public.ecr.aws/anyray/endpoint-control
+    tag: ""
   # Postgres is third-party, so its tag carries an immutable digest as well: `17`
   # is a floating minor and a tag can be re-pushed. The digest is the multi-arch
   # index (linux/amd64 + linux/arm64) for postgres 17.10, matching the pin in
@@ -394,6 +397,30 @@ proxy:
     nodePort: null
     # Set for LoadBalancer installs to keep the console private to your org/VPN.
     loadBalancerSourceRanges: []
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  extraEnv: []
+
+# End-point control (RFC 0014) — the client-operated device-evidence service.
+# Employee laptops run the signed fleetd agent against the deployment's public
+# origin: the Ingress/HTTPRoute route the fixed agent-plane path families
+# (/api/v1/osquery, /api/fleet/orbit, /api/v1/evidence, /livez) to it on the
+# SAME host the console and gateway share, so no extra hostname or certificate
+# is needed. Its admin token is PAIRED with ANYRAY_ADMIN_TOKEN (same Secret
+# key — the gateway authenticates to it by falling back to its own admin
+# token), and its endpoint_* tables live in the same Postgres as the gateway's
+# spend store. Stateless (no volume), so replicas can scale freely.
+endpoint-control:
+  replicas: 1
+  # Public origin fleetd is pointed at. Leave blank on an Ingress install and
+  # it defaults to https://<host>; set it explicitly for NodePort / non-TLS
+  # installs (the agent plane needs a reachable origin to mint installers).
+  publicUrl: ""
   resources:
     requests:
       cpu: "100m"

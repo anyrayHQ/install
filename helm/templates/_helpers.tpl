@@ -596,3 +596,29 @@ BYO /v1/record path, which full-stack installs don't use.
   value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
 {{- end }}
 {{- end }}
+
+{{/*
+End-point control store env: ANYRAY_CP_DATABASE_URL, resolved through the SAME
+three source branches as the gateway's DB env (anyray.observabilityDbEnv /
+anyray.spendDbEnv) so the service always lands on the database the gateway's
+ANYRAY_SPEND_DB_URL points at — its endpoint_* tables coexist there
+(boot-applied idempotent schema). A separate helper because the var name
+differs; the branch logic must stay in lockstep with the two above.
+*/}}
+{{- define "anyray.cpDatabaseUrlEnv" -}}
+{{- include "anyray.requirePostgres" . }}
+{{- if .Values.postgres.external.databaseUrlSecretKeyRef.name }}
+- name: ANYRAY_CP_DATABASE_URL
+  valueFrom:
+    {{- include "anyray.externalSecretRef" .Values.postgres.external.databaseUrlSecretKeyRef | nindent 4 }}
+{{- else if .Values.postgres.external.databaseUrl }}
+- name: ANYRAY_CP_DATABASE_URL
+  value: {{ .Values.postgres.external.databaseUrl | quote }}
+{{- else }}
+- name: POSTGRES_PASSWORD
+  valueFrom:
+    {{- include "anyray.secretRef" (dict "key" "POSTGRES_PASSWORD" "context" .) | nindent 4 }}
+- name: ANYRAY_CP_DATABASE_URL
+  value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
+{{- end }}
+{{- end }}

@@ -4,7 +4,8 @@
 # `railway config apply` creates the services. This script adds:
 #   1. generated secrets (preserve()d in railway.ts)
 #   2. the operator's mandatory Billing deployment token
-#   3. public domains for gateway (:8787) and proxy (:80) + the URLs that reference them
+#   3. public domains for gateway (:8787), proxy (:80) and endpoint-control
+#      (:8090, the fleetd agent plane — RFC 0014) + the URLs that reference them
 #
 # Run after `railway config apply` with the project linked (`railway link`).
 # Safe to re-run: generated secrets and domains are kept; a supplied token is set.
@@ -86,15 +87,22 @@ fi
 echo "== generating public domains =="
 railway domain -s gateway -p 8787 >/dev/null 2>&1 || true
 railway domain -s proxy   -p 80   >/dev/null 2>&1 || true
+# End-point control agent plane (RFC 0014): Railway services each get their own
+# domain, so fleetd is pointed at this service's OWN origin (no shared front
+# door to path-route on, unlike compose/Helm/AWS).
+railway domain -s endpoint-control -p 8090 >/dev/null 2>&1 || true
 
 gw_host="$(railway domain -s gateway 2>/dev/null | grep -oE '[a-z0-9-]+\.up\.railway\.app' | head -1)"
 px_host="$(railway domain -s proxy   2>/dev/null | grep -oE '[a-z0-9-]+\.up\.railway\.app' | head -1)"
+ec_host="$(railway domain -s endpoint-control 2>/dev/null | grep -oE '[a-z0-9-]+\.up\.railway\.app' | head -1)"
 [ -n "$gw_host" ] && railway variables -s gateway --set "ANYRAY_GATEWAY_PUBLIC_URL=https://$gw_host" --skip-deploys >/dev/null
+[ -n "$ec_host" ] && railway variables -s endpoint-control --set "ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL=https://$ec_host" >/dev/null # its only set — must redeploy the service
 [ -n "$px_host" ] && railway variables -s gateway --set "ANYRAY_CONSOLE_PUBLIC_URL=https://$px_host" >/dev/null # last set triggers redeploy
 
 echo
 echo "Bootstrap complete."
 echo "  Gateway API : ${gw_host:+https://$gw_host}"
 echo "  Console     : ${px_host:+https://$px_host}"
+echo "  End-points  : ${ec_host:+https://$ec_host} (fleetd agent plane)"
 echo "  Admin token : \$(railway variables -s gateway --kv | grep ANYRAY_ADMIN_TOKEN)"
 echo "  Billing     : deployment token configured"

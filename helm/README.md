@@ -195,7 +195,7 @@ silent permanent outage.
 | --- | --- | --- |
 | `livenessProbe.enabled` | `true` | Restarts a wedged pod. Targets `/livez` (gateway) or `/health` (optimizer) — deliberately **not** the readiness route, which turns 503 while draining; a liveness probe there would restart the pod mid-drain and reset every in-flight stream. Neither route checks a dependency, so a database blip cannot crashloop the fleet. |
 | `livenessProbe.failureThreshold` x `periodSeconds` | `6` x `10s` | A full minute of failure before a restart. Slack on purpose: restarting a merely-slow pod is itself an outage. |
-| `startupProbe.enabled` | `true` | Holds liveness off until the process answers once, so the liveness budget above need not cover a cold start. 60 x 5s, sized for a replica applying the migration ledger under an advisory lock. |
+| `startupProbe.enabled` | `true` | Holds liveness off until the process answers once, so the liveness budget above need not cover a cold start. 360 x 5s = 30 minutes, which must cover a full migration run: the gateway applies the ordered ledger at boot and refuses to serve on an unmigrated schema, so it opens no port until every pending migration has run, and the ledger allows a single statement 30 minutes (`MIGRATION_QUERY_TIMEOUT_MS`). A startup probe only ever delays a *restart*, never traffic, so the budget costs nothing. |
 | `postgres.livenessProbe.enabled` | `true` | `pg_isready` against the bundled Postgres, with slack thresholds — interrupting crash recovery is worse than waiting it out. |
 
 The gateway's probes render **only for an image that serves `/livez`** (appVersion
@@ -207,7 +207,8 @@ created for each Deployment that runs two or more pods, capping how many pods a
 node drain or autoscaler scale-down may remove at once. It is deliberately not
 created for a single-replica workload: such a budget could never allow its only
 pod to be evicted, and `kubectl drain` would block indefinitely on a node upgrade.
-At the default `replicas: 1` that means only the proxy is covered.
+At the defaults that covers the gateway and the proxy, both at `replicas: 2`, but
+not the optimizer, which stays at one while it keeps its volume.
 
 `podDisruptionBudget.unhealthyPodEvictionPolicy` defaults to `AlwaysAllow`.
 Kubernetes' own default (`IfHealthyBudget`) refuses to evict pods that are running

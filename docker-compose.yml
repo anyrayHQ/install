@@ -277,9 +277,14 @@ services:
     # Caddy is the ONLY public entry in this profile, so it starting before the
     # gateway can answer is a public-facing 502 plus a wasted ACME attempt. The
     # bare list form waits only for the container to be created, not for it to be
-    # usable — the same gate the proxy already uses.
+    # usable — the same gate the proxy already uses. endpoint-control gets the
+    # same gate for the same reason: Caddy forwards the agent-plane routes
+    # (/api/v1/osquery/* etc.) there, so starting before it passes its health
+    # check would answer fleetd check-ins with transient 502s.
     depends_on:
       gateway:
+        condition: service_healthy
+      endpoint-control:
         condition: service_healthy
     # The admin API on 2019 is Caddy's own liveness surface and is bound to
     # localhost inside the container, so probing it exposes nothing. Checking

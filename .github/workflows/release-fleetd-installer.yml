@@ -48,13 +48,20 @@ name: Release fleetd installer
 #          --fleet-url without --enroll-secret, so both are baked: the REAL
 #          control-server URL (identical for every org, so the package stays
 #          org-agnostic) and an obvious inert placeholder secret. Those land in
-#          /etc/default/orbit; connect's systemd drop-in overrides them and
-#          supplies the real secret through a root-only file. Verified locally:
-#          the .deb payload contains no secret file at all.
-#   Windows .msi  same baked-placeholder shape, but it MUST build on a Windows
-#          runner — fleetctl shells out to WiX `heat`, which needs a real
-#          Windows toolchain (elsewhere it wants Docker + Fleet's wix image, and
-#          our CodeBuild runners are privileged_mode=false).
+#          /etc/default/orbit, which connect REWRITES at install time — it can
+#          not layer a systemd drop-in over them, because systemd applies
+#          EnvironmentFile= after Environment=, and because leaving the baked
+#          ORBIT_ENROLL_SECRET in place stops orbit booting outright. Both found
+#          by drilling a real Debian host; the .deb payload carries no secret
+#          file, only these env values.
+#   Windows .msi  same baked-placeholder shape, and it must build on a Windows
+#          runner — but that is NOT sufficient on its own. fleetctl shells out
+#          to WiX heat/candle/light and by default runs them in the `fleetdm/wix`
+#          DOCKER image even on Windows, which a Windows runner cannot execute
+#          (Linux image) and our CodeBuild runners cannot either
+#          (privileged_mode=false). So WiX v3 is installed below and passed via
+#          --local-wix-dir. Proven on a hosted Windows runner: without it the
+#          build dies at `heat failed: exit status 125`.
 #
 # No package carries a credential, so all of them publish openly.
 #
@@ -87,6 +94,10 @@ env:
   # Pinned separately: the Windows archive is a different artifact from the
   # macOS tarball, so it needs its own digest. Bump both together.
   FLEETCTL_WINDOWS_SHA256: '89fb65ea511a49b85331ee74b1b1acc029750f85eb1972115c5fbbe23c65a775'
+  # WiX v3, the version Fleet's docs name for --local-wix-dir. Required: see the
+  # "Install WiX v3" step for why the default Docker path cannot work here.
+  WIX_URL: 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip'
+  WIX_SHA256: '6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31'
   ENDPOINT_SERVER_URL: 'https://endpoint.anyray.ai'
   # Inert by construction, and asserted as such before publish. connect replaces
   # it with the org's real secret, which never touches a package.
@@ -315,6 +326,38 @@ jobs:
           "FLEETCTL_BIN=$bin" | Out-File -FilePath $env:GITHUB_ENV -Append
           & $bin --version
 
+      # WITHOUT THIS THE JOB CANNOT BUILD ANYTHING. `fleetctl package --type=msi`
+      # shells out to WiX heat/candle/light, and by DEFAULT it runs them inside
+      # the `fleetdm/wix` Docker image — on Windows too. A Windows runner cannot
+      # run a Linux image ("image operating system linux cannot be used on this
+      # platform"), and our CodeBuild runners have no Docker daemon at all
+      # (privileged_mode = false), so the default path fails either way. Proven
+      # on a hosted Windows runner by the monorepo's endpoint drill, which hit
+      # exactly this: `heat failed: exit status 125`.
+      #
+      # The header above used to say a Windows runner was enough because
+      # fleetctl "needs a real Windows toolchain" there. It does — and it does
+      # not ship or find one on its own. `--local-wix-dir` is Fleet's documented
+      # escape hatch (articles/enroll-hosts.md).
+      - name: Install WiX v3 (pinned + checksum-verified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri $env:WIX_URL -OutFile "$env:RUNNER_TEMP\wix.zip"
+          $got = (Get-FileHash "$env:RUNNER_TEMP\wix.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:WIX_SHA256) {
+            Write-Error "WiX checksum mismatch: got $got"
+          }
+          $dir = "$env:RUNNER_TEMP\wix"
+          Expand-Archive "$env:RUNNER_TEMP\wix.zip" -DestinationPath $dir
+          # fleetctl fails opaquely if any of the three is absent; say which.
+          foreach ($exe in 'heat.exe','candle.exe','light.exe') {
+            if (-not (Test-Path (Join-Path $dir $exe))) {
+              Write-Error "WiX archive is missing $exe"
+            }
+          }
+          "WIX_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Build the Windows package
         shell: pwsh
         run: |
@@ -324,6 +367,7 @@ jobs:
           # Same baked-placeholder shape as Linux: the shared control-server URL
           # plus an inert secret connect replaces at install time.
           & $env:FLEETCTL_BIN package --type=msi --enable-scripts `
+            --local-wix-dir="$env:WIX_DIR" `
             --fleet-url="$env:ENDPOINT_SERVER_URL" `
             --enroll-secret="$env:PLACEHOLDER_SECRET"
           Get-ChildItem *.msi | Select-Object -First 1 | Rename-Item -NewName 'fleetd.msi'

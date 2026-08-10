@@ -4,12 +4,13 @@
 # below must wire each of these onto the gateway:
 # docker-compose.yml, the AWS CloudFormation GatewayTask, both Railway gateway
 # templates, and the Helm gateway Deployment. Enforced by
-# ci/check-gateway-env-coverage.sh (validate-artifacts).
+# ci/check-service-env-coverage.sh (validate-artifacts).
 #
 # Add a var here when the monorepo gateway grows a new fail-fast / secret /
 # required-DB-URL var (see .claude/rules/install-env-sync.md), and wire it into
-# every template in the same PR. Optimizer vars are intentionally excluded — the
-# gateway fails OPEN on the optimizer, so their absence degrades, not bricks.
+# every template in the same PR. Vars the OPTIMIZER needs are gated separately
+# by ci/critical-optimizer-env.txt — that service degrades in silence rather
+# than fail-fasting, so it needs its own contract, not an exemption.
 ANYRAY_SPEND_DB_URL
 ANYRAY_CONTENT_KEY
 ANYRAY_ADMIN_TOKEN

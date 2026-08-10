@@ -1,0 +1,30 @@
+# Deploy-critical OPTIMIZER env vars: every template must wire each of these
+# onto the *optimizer* service — docker-compose.yml, docker-compose.attach.yml,
+# the AWS CloudFormation OptimizerTask, both Railway optimizer templates, and
+# the Helm optimizer Deployment. Enforced by ci/check-service-env-coverage.sh
+# (validate-artifacts).
+#
+# WHY THIS FILE EXISTS, given the gateway contract says optimizer vars are
+# "intentionally excluded — the gateway fails OPEN on the optimizer, so their
+# absence degrades, not bricks":
+#
+# That reasoning is true of the gateway's fail-open and false of the optimizer's
+# OWN durable state. Prod, 2026-08-08: the optimizer ran without
+# ANYRAY_SPEND_DB_URL, so migration 0058's shared runtime-config store resolved
+# null and every admin optimizer setting silently became per-pod and
+# deploy-ephemeral. An org-holdout enable read back DISABLED on the next request
+# (2 replicas), and the setting vanished on the next roll. Nothing bricked and
+# nothing alarmed — which is precisely why it went unnoticed, and why "degrades"
+# is not a reason to leave a var ungated.
+#
+# The asymmetry that makes the optimizer easy to get wrong (see the monorepo's
+# gateway/DURABLE-STATE.md rule 1): the GATEWAY fail-fasts without this var, so a
+# template that drops it fails loudly on the first boot. The optimizer treats it
+# as OPTIONAL and degrades in silence, so only a gate like this one catches it.
+#
+# Add a var here when the monorepo optimizer grows a new secret / durable-store
+# / required-DB-URL var, and wire it into every template in the same PR.
+ANYRAY_SPEND_DB_URL
+ANYRAY_ADMIN_TOKEN
+ANYRAY_OPTIMIZER_TOKEN
+ANYRAY_CONTENT_KEY

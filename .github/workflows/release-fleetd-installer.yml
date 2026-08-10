@@ -41,13 +41,22 @@ name: Release fleetd installer
 #   APPLE_NOTARY_KEY, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID — notarization
 # Required vars: AWS_MAC_FLEET_ROLE_ARN — the on-demand Mac lifecycle role.
 #
-# SCOPE — macOS only, deliberately. `--use-system-configuration` reads the
-# config from a macOS configuration profile and fleetctl supports it on NO other
-# platform, so a Windows .msi or a Linux .deb/.rpm has to bake the org's enroll
-# secret at package time. That would make the artifact a per-org credential and
-# drag back everything this design removes: per-tenant builds, secrets in CI,
-# and a private distribution path. Adding those platforms is therefore a
-# separate design decision, not a matter of adding --type flags here.
+# SCOPE — macOS, Linux and Windows, built differently because fleetctl is.
+#
+#   macOS  .pkg  --use-system-configuration: no URL, no secret in the package.
+#   Linux  .deb/.rpm  that flag does not exist off macOS, and fleetctl refuses
+#          --fleet-url without --enroll-secret, so both are baked: the REAL
+#          control-server URL (identical for every org, so the package stays
+#          org-agnostic) and an obvious inert placeholder secret. Those land in
+#          /etc/default/orbit; connect's systemd drop-in overrides them and
+#          supplies the real secret through a root-only file. Verified locally:
+#          the .deb payload contains no secret file at all.
+#   Windows .msi  same baked-placeholder shape, but it MUST build on a Windows
+#          runner — fleetctl shells out to WiX `heat`, which needs a real
+#          Windows toolchain (elsewhere it wants Docker + Fleet's wix image, and
+#          our CodeBuild runners are privileged_mode=false).
+#
+# No package carries a credential, so all of them publish openly.
 #
 # Cadence: this is not part of the release train. fleetd moves on Fleet's
 # schedule, not ours, so it is dispatched deliberately when the pinned version
@@ -72,6 +81,16 @@ permissions:
 env:
   FLEETCTL_VERSION: '4.89.2'
   FLEETCTL_SHA256: '38222bb2a5cb010e3de1337e6cd500a4d8773f68da1f74696850ed4ec1b18270'
+  # The one control server every organization enrols against (RFC 0012). Baked
+  # into the Linux/Windows packages because those cannot defer it; identical for
+  # everyone, so the artifact stays org-agnostic.
+  # Pinned separately: the Windows archive is a different artifact from the
+  # macOS tarball, so it needs its own digest. Bump both together.
+  FLEETCTL_WINDOWS_SHA256: '89fb65ea511a49b85331ee74b1b1acc029750f85eb1972115c5fbbe23c65a775'
+  ENDPOINT_SERVER_URL: 'https://endpoint.anyray.ai'
+  # Inert by construction, and asserted as such before publish. connect replaces
+  # it with the org's real secret, which never touches a package.
+  PLACEHOLDER_SECRET: 'placeholder-replaced-at-install'
 
 jobs:
   # Same on-demand Mac fleet the connect binaries use. Mirrors that workflow's
@@ -142,7 +161,19 @@ jobs:
           # --enable-scripts is baked here and NOT profile-supplied (header).
           fleetctl package --type=pkg --enable-scripts --use-system-configuration
           mv fleet-osquery.pkg "anyray-fleetd-${FLEETCTL_VERSION}.pkg"
-          ls -l "anyray-fleetd-${FLEETCTL_VERSION}.pkg"
+
+          # Linux: --use-system-configuration does not exist here, and fleetctl
+          # refuses --fleet-url without --enroll-secret, so bake the real
+          # control-server URL (the same for every org) plus an inert
+          # placeholder secret. connect's drop-in replaces both at install.
+          for t in deb rpm; do
+            fleetctl package --type="$t" --enable-scripts \
+              --fleet-url="$ENDPOINT_SERVER_URL" \
+              --enroll-secret="$PLACEHOLDER_SECRET"
+          done
+          mv fleet-osquery*.deb fleetd.deb
+          mv fleet-osquery*.rpm fleetd.rpm
+          ls -l
 
       # This asset is published PUBLICLY. If a future edit reintroduces
       # --enroll-secret, the package silently becomes a credential on a public
@@ -152,6 +183,17 @@ jobs:
           set -euo pipefail
           cd out
           rm -rf expanded
+
+          # Linux packages DO carry config, by necessity. Assert it is exactly
+          # the inert placeholder — never a real credential.
+          for f in fleetd.deb fleetd.rpm; do
+            if strings "$f" | grep -q "ORBIT_ENROLL_SECRET=${PLACEHOLDER_SECRET}"; then
+              echo "  $f: placeholder secret only — ok"
+            else
+              echo "::error::$f lacks the expected placeholder enroll secret; refusing to publish a package that may embed a real credential"
+              exit 1
+            fi
+          done
           pkgutil --expand-full "anyray-fleetd-${FLEETCTL_VERSION}.pkg" expanded
           plist='expanded/base.pkg/Payload/Library/LaunchDaemons/com.fleetdm.orbit.plist'
           if [ ! -f "$plist" ]; then
@@ -245,7 +287,65 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fleetd-installer
-          path: out/anyray-fleetd-*.pkg
+          path: |
+            out/anyray-fleetd-*.pkg
+            out/fleetd.deb
+            out/fleetd.rpm
+          if-no-files-found: error
+
+  # Windows must build on Windows: fleetctl shells out to WiX `heat`, which
+  # segfaults under emulation elsewhere and otherwise demands Docker + Fleet's
+  # wix image (unavailable on a privileged_mode=false runner). Same on-demand
+  # Windows runner the connect binaries already use.
+  build-windows:
+    runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Install fleetctl (pinned + checksum-verified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://github.com/fleetdm/fleet/releases/download/fleet-v$env:FLEETCTL_VERSION/fleetctl_v${env:FLEETCTL_VERSION}_windows_amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\fleetctl.zip"
+          $got = (Get-FileHash "$env:RUNNER_TEMP\fleetctl.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:FLEETCTL_WINDOWS_SHA256) {
+            Write-Error "fleetctl checksum mismatch: got $got"
+          }
+          Expand-Archive "$env:RUNNER_TEMP\fleetctl.zip" -DestinationPath "$env:RUNNER_TEMP\fleetctl"
+          $bin = (Get-ChildItem -Recurse -Filter fleetctl.exe "$env:RUNNER_TEMP\fleetctl")[0].FullName
+          "FLEETCTL_BIN=$bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $bin --version
+
+      - name: Build the Windows package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Set-Location out
+          # Same baked-placeholder shape as Linux: the shared control-server URL
+          # plus an inert secret connect replaces at install time.
+          & $env:FLEETCTL_BIN package --type=msi --enable-scripts `
+            --fleet-url="$env:ENDPOINT_SERVER_URL" `
+            --enroll-secret="$env:PLACEHOLDER_SECRET"
+          Get-ChildItem *.msi | Select-Object -First 1 | Rename-Item -NewName 'fleetd.msi'
+          Get-ChildItem
+
+      - name: Gate — the package must carry no real credential
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bytes = [System.IO.File]::ReadAllBytes('out/fleetd.msi')
+          # MSI stores strings UTF-16LE; check both encodings rather than assume.
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $utf16 = [System.Text.Encoding]::Unicode.GetString($bytes)
+          if (-not ($ascii.Contains($env:PLACEHOLDER_SECRET) -or $utf16.Contains($env:PLACEHOLDER_SECRET))) {
+            Write-Error "fleetd.msi lacks the expected placeholder enroll secret; refusing to publish a package that may embed a real credential"
+          }
+          Write-Host "placeholder secret only — ok"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fleetd-installer-windows
+          path: out/fleetd.msi
           if-no-files-found: error
 
   # Always release the Mac, even if the build failed — an orphaned fleet bills a
@@ -266,7 +366,7 @@ jobs:
       - run: ./scripts/mac-fleet.sh down
 
   release:
-    needs: build-macos
+    needs: [build-macos, build-windows]
     if: ${{ !inputs.dry_run }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
@@ -289,6 +389,10 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: fleetd-installer
+          path: assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fleetd-installer-windows
           path: assets
 
       - name: Generate SHA256SUMS

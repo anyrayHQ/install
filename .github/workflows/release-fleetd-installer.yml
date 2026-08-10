@@ -1,0 +1,469 @@
+name: Release fleetd installer
+
+# Builds, Developer ID-signs and notarizes the macOS installer for `fleetd` —
+# the signed osquery agent that puts a managed machine under Anyray's end-point
+# control server (endpoint.anyray.ai).
+#
+# WHY ONE ARTIFACT SERVES EVERY TENANT, and why it is safe to publish:
+# the package is built with `--use-system-configuration`, so it contains NO
+# enroll secret and NO fleet URL. The 43 MB binary is therefore org-agnostic and
+# credential-free, and the per-org config reaches orbit at runtime by EITHER of
+# two paths:
+#   * managed fleets — a `com.fleetdm.fleetd.config` MDM configuration profile;
+#   * everyone else — the service environment that `anyray-connect endpoint
+#     install` writes, which is how the shared enrollment command brings a
+#     developer's machine under policy with no MDM at all.
+# Proven end-to-end 2026-08-09/10 on the dogfood Mac, both ways: enrolled against
+# the live control server, 13/13 policies evaluated, root remediation exit 0,
+# with no secret in any world-readable file.
+#
+# SIGNING — read before touching the keychain steps. The outer .pkg needs a
+# **Developer ID Installer** identity. That is a DIFFERENT certificate type from
+# the Developer ID Application cert that signs the connect binaries in
+# release-connect-binaries.yml, and it is invisible to
+# `security find-identity -p codesigning` — pkg signing is not a codesigning
+# policy, so it must be selected with plain `find-identity -v`. Copying the
+# selector from the other workflow yields "no identity found" on a keychain that
+# demonstrably holds the cert.
+# Unsigned, the package still installs fine over MDM (Gatekeeper is bypassed on
+# that path) — but the console offers this asset as a human download, and a
+# double-click of an unsigned pkg is refused outright. So signing is REQUIRED
+# here and the job fails loudly when the secrets are absent, rather than
+# skipping the way the Windows/Linux legs of the connect lane do.
+#
+# `--enable-scripts` is MANDATORY and baked at package time: without it orbit
+# 422s every remediation script, silently killing the failed-policy -> repair
+# loop and the daemonless key-refresh backstop. A host enrolled without it must
+# be re-enrolled. It is NOT supplied by the profile.
+#
+# Required secrets (all already configured on this repo):
+#   APPLE_INSTALLER_CERT_P12, APPLE_INSTALLER_CERT_PASSWORD   — pkg signing
+#   APPLE_NOTARY_KEY, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID — notarization
+# Required vars: AWS_MAC_FLEET_ROLE_ARN — the on-demand Mac lifecycle role.
+#
+# SCOPE — macOS, Linux and Windows, built differently because fleetctl is.
+#
+#   macOS  .pkg  --use-system-configuration: no URL, no secret in the package.
+#   Linux  .deb/.rpm  that flag does not exist off macOS, and fleetctl refuses
+#          --fleet-url without --enroll-secret, so both are baked: the REAL
+#          control-server URL (identical for every org, so the package stays
+#          org-agnostic) and an obvious inert placeholder secret. Those land in
+#          /etc/default/orbit, which connect REWRITES at install time — it can
+#          not layer a systemd drop-in over them, because systemd applies
+#          EnvironmentFile= after Environment=, and because leaving the baked
+#          ORBIT_ENROLL_SECRET in place stops orbit booting outright. Both found
+#          by drilling a real Debian host; the .deb payload carries no secret
+#          file, only these env values.
+#   Windows .msi  same baked-placeholder shape, and it must build on a Windows
+#          runner — but that is NOT sufficient on its own. fleetctl shells out
+#          to WiX heat/candle/light and by default runs them in the `fleetdm/wix`
+#          DOCKER image even on Windows, which a Windows runner cannot execute
+#          (Linux image) and our CodeBuild runners cannot either
+#          (privileged_mode=false). So WiX v3 is installed below and passed via
+#          --local-wix-dir. Proven on a hosted Windows runner: without it the
+#          build dies at `heat failed: exit status 125`.
+#
+# No package carries a credential, so all of them publish openly.
+#
+# Cadence: this is not part of the release train. fleetd moves on Fleet's
+# schedule, not ours, so it is dispatched deliberately when the pinned version
+# below is bumped.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        default: false
+        description: 'Test run: build + sign + notarize, but publish no release. The signed package is uploaded as a workflow artifact for inspection.'
+
+permissions:
+  contents: read
+
+# Pinned by version AND sha256, same supply-chain discipline as the gh/nfpm
+# installs in release-connect-binaries.yml: fleetctl is a third-party binary
+# that ends up producing a customer-facing signed artifact. Bumping the version
+# means bumping the digest in the same commit — that coupling is the point.
+# Digest of fleetctl_v4.89.2_macos.tar.gz from the fleetdm/fleet release.
+env:
+  FLEETCTL_VERSION: '4.89.2'
+  FLEETCTL_SHA256: '38222bb2a5cb010e3de1337e6cd500a4d8773f68da1f74696850ed4ec1b18270'
+  # The one control server every organization enrols against (RFC 0012). Baked
+  # into the Linux/Windows packages because those cannot defer it; identical for
+  # everyone, so the artifact stays org-agnostic.
+  # Pinned separately: the Windows archive is a different artifact from the
+  # macOS tarball, so it needs its own digest. Bump both together.
+  FLEETCTL_WINDOWS_SHA256: '89fb65ea511a49b85331ee74b1b1acc029750f85eb1972115c5fbbe23c65a775'
+  # WiX v3, the version Fleet's docs name for --local-wix-dir. Required: see the
+  # "Install WiX v3" step for why the default Docker path cannot work here.
+  WIX_URL: 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip'
+  WIX_SHA256: '6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31'
+  ENDPOINT_SERVER_URL: 'https://endpoint.anyray.ai'
+  # Inert by construction, and asserted as such before publish. connect replaces
+  # it with the org's real secret, which never touches a package.
+  PLACEHOLDER_SECRET: 'placeholder-replaced-at-install'
+
+jobs:
+  # Same on-demand Mac fleet the connect binaries use. Mirrors that workflow's
+  # provisioning verbatim — see its comments for the OIDC role and lifecycle.
+  provision-mac:
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the fleet-lifecycle role via OIDC
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          aws-region: eu-central-1
+      - run: ./scripts/mac-fleet.sh up
+
+  build-macos:
+    needs: provision-mac
+    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    env:
+      # GitHub Actions can't read `secrets.*` in a step `if:` — map them to env
+      # so the preflight below can check presence without leaking values.
+      APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+      APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+      APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+    steps:
+      # Fail before spending ~10 minutes on a build we cannot ship. Unsigned is
+      # not a usable outcome for this artifact (see the header).
+      - name: Preflight — signing material must be present
+        run: |
+          set -euo pipefail
+          missing=''
+          [ -n "$APPLE_INSTALLER_CERT_P12" ] || missing="$missing APPLE_INSTALLER_CERT_P12"
+          [ -n "$APPLE_INSTALLER_CERT_PASSWORD" ] || missing="$missing APPLE_INSTALLER_CERT_PASSWORD"
+          [ -n "$APPLE_NOTARY_KEY" ] || missing="$missing APPLE_NOTARY_KEY"
+          [ -n "$APPLE_NOTARY_KEY_ID" ] || missing="$missing APPLE_NOTARY_KEY_ID"
+          [ -n "$APPLE_NOTARY_ISSUER_ID" ] || missing="$missing APPLE_NOTARY_ISSUER_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::missing signing secrets:$missing — the Developer ID *Installer* cert is separate from the Application cert; create it in the Apple portal (team V53XMA78UF) and set both secrets"
+            exit 1
+          fi
+
+      - name: Install fleetctl (pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          url="https://github.com/fleetdm/fleet/releases/download/fleet-v${FLEETCTL_VERSION}/fleetctl_v${FLEETCTL_VERSION}_macos.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/fleetctl.tar.gz" "$url"
+          echo "${FLEETCTL_SHA256}  $RUNNER_TEMP/fleetctl.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/fleetctl.tar.gz" -C "$RUNNER_TEMP"
+          # Into RUNNER_TEMP, not /usr/local/bin: the Mac fleet runner is not
+          # root and that directory is not reliably writable there. GITHUB_PATH
+          # only affects LATER steps, so this one calls the binary by path.
+          mkdir -p "$RUNNER_TEMP/bin"
+          install -m 0755 "$RUNNER_TEMP/fleetctl_v${FLEETCTL_VERSION}_macos/fleetctl" "$RUNNER_TEMP/bin/fleetctl"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/fleetctl" --version
+
+      - name: Build the org-agnostic package
+        run: |
+          set -euo pipefail
+          mkdir -p out && cd out
+          # No --fleet-url and no --enroll-secret: both come from the MDM
+          # configuration profile at runtime. fleetctl rejects one without the
+          # other, so --use-system-configuration is the only way to omit them.
+          # --enable-scripts is baked here and NOT profile-supplied (header).
+          fleetctl package --type=pkg --enable-scripts --use-system-configuration
+          mv fleet-osquery.pkg "anyray-fleetd-${FLEETCTL_VERSION}.pkg"
+
+          # Linux: --use-system-configuration does not exist here, and fleetctl
+          # refuses --fleet-url without --enroll-secret, so bake the real
+          # control-server URL (the same for every org) plus an inert
+          # placeholder secret. connect's drop-in replaces both at install.
+          for t in deb rpm; do
+            fleetctl package --type="$t" --enable-scripts \
+              --fleet-url="$ENDPOINT_SERVER_URL" \
+              --enroll-secret="$PLACEHOLDER_SECRET"
+          done
+          mv fleet-osquery*.deb fleetd.deb
+          mv fleet-osquery*.rpm fleetd.rpm
+          ls -l
+
+      # This asset is published PUBLICLY. If a future edit reintroduces
+      # --enroll-secret, the package silently becomes a credential on a public
+      # release. This gate makes that a build failure instead of a leak.
+      - name: Gate — the package must carry no credential
+        run: |
+          set -euo pipefail
+          cd out
+          rm -rf expanded
+
+          # Linux packages DO carry config, by necessity. Assert it is exactly
+          # the inert placeholder — never a real credential.
+          for f in fleetd.deb fleetd.rpm; do
+            if strings "$f" | grep -q "ORBIT_ENROLL_SECRET=${PLACEHOLDER_SECRET}"; then
+              echo "  $f: placeholder secret only — ok"
+            else
+              echo "::error::$f lacks the expected placeholder enroll secret; refusing to publish a package that may embed a real credential"
+              exit 1
+            fi
+          done
+          pkgutil --expand-full "anyray-fleetd-${FLEETCTL_VERSION}.pkg" expanded
+          plist='expanded/base.pkg/Payload/Library/LaunchDaemons/com.fleetdm.orbit.plist'
+          if [ ! -f "$plist" ]; then
+            echo "::error::orbit LaunchDaemon plist not found at the expected path — package layout changed, re-verify the gate below"
+            exit 1
+          fi
+          echo '--- orbit launchd environment:'
+          plutil -p "$plist"
+          if find expanded -name 'secret.txt' | grep -q .; then
+            echo "::error::package contains an enroll secret — it must NOT be published; drop --enroll-secret and rebuild with --use-system-configuration"
+            exit 1
+          fi
+          if plutil -p "$plist" | grep -qi 'FLEET_URL\|ENROLL_SECRET'; then
+            echo "::error::package bakes a fleet URL or enroll secret into launchd — this artifact is meant to be org-agnostic"
+            exit 1
+          fi
+          # The two flags the runtime contract depends on, asserted positively.
+          plutil -p "$plist" | grep -q 'ORBIT_USE_SYSTEM_CONFIGURATION" => "true"' \
+            || { echo "::error::ORBIT_USE_SYSTEM_CONFIGURATION missing — orbit would never read the MDM profile"; exit 1; }
+          plutil -p "$plist" | grep -q 'ORBIT_ENABLE_SCRIPTS" => "true"' \
+            || { echo "::error::ORBIT_ENABLE_SCRIPTS missing — every remediation script would 422"; exit 1; }
+          rm -rf expanded
+
+      - name: Sign the package (Developer ID Installer)
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/anyray-installer.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # No lock timeout: notarization below can outlast the default.
+          security set-keychain-settings "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # productsign resolves identities through the DEFAULT keychain and the
+          # session search list, same as codesign — see the sibling workflow.
+          security default-keychain -s "$KEYCHAIN"
+          printf '%s' "$APPLE_INSTALLER_CERT_P12" | base64 -d > "$RUNNER_TEMP/installer-cert.p12"
+          security import "$RUNNER_TEMP/installer-cert.p12" -k "$KEYCHAIN" -f pkcs12 \
+            -P "$APPLE_INSTALLER_CERT_PASSWORD" -A -T /usr/bin/productsign
+          rm -f "$RUNNER_TEMP/installer-cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -s "$KEYCHAIN"
+          echo '--- identities in the throwaway keychain ---'
+          security find-identity -v "$KEYCHAIN" || true
+          # Plain -v, NOT -p codesigning: an Installer cert is not a codesigning
+          # identity and never appears under that policy (header). The p12 ships
+          # with Apple's G2 intermediate + root, so -v resolves here.
+          IDENTITY="$(security find-identity -v "$KEYCHAIN" \
+            | awk '/Developer ID Installer/ {print $2; exit}')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::APPLE_INSTALLER_CERT_P12 imported no Developer ID Installer identity (see diagnostics above)"
+            exit 1
+          fi
+          echo "using signing identity $IDENTITY"
+          cd out
+          productsign --sign "$IDENTITY" \
+            "anyray-fleetd-${FLEETCTL_VERSION}.pkg" "anyray-fleetd-${FLEETCTL_VERSION}-signed.pkg"
+          mv "anyray-fleetd-${FLEETCTL_VERSION}-signed.pkg" "anyray-fleetd-${FLEETCTL_VERSION}.pkg"
+          pkgutil --check-signature "anyray-fleetd-${FLEETCTL_VERSION}.pkg"
+
+      - name: Notarize and staple
+        run: |
+          set -euo pipefail
+          printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/notary-key.p8"
+          cd out
+          pkg="anyray-fleetd-${FLEETCTL_VERSION}.pkg"
+          status="$(xcrun notarytool submit "$pkg" \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::notarization failed (status: $status)"
+            exit 1
+          fi
+          # Unlike a bare mach-o, a .pkg CAN be stapled — so the ticket travels
+          # with the file and first install verifies with no network.
+          xcrun stapler staple "$pkg"
+          xcrun stapler validate "$pkg"
+          # The end state a customer actually hits on double-click.
+          spctl -a -vvv -t install "$pkg"
+
+      - name: Delete the throwaway keychain
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/installer-cert.p12" "$RUNNER_TEMP/notary-key.p8"
+          if [ -f "$RUNNER_TEMP/anyray-installer.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/anyray-installer.keychain-db"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fleetd-installer
+          path: |
+            out/anyray-fleetd-*.pkg
+            out/fleetd.deb
+            out/fleetd.rpm
+          if-no-files-found: error
+
+  # Windows must build on Windows: fleetctl shells out to WiX `heat`, which
+  # segfaults under emulation elsewhere and otherwise demands Docker + Fleet's
+  # wix image (unavailable on a privileged_mode=false runner). Same on-demand
+  # Windows runner the connect binaries already use.
+  build-windows:
+    runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Install fleetctl (pinned + checksum-verified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://github.com/fleetdm/fleet/releases/download/fleet-v$env:FLEETCTL_VERSION/fleetctl_v${env:FLEETCTL_VERSION}_windows_amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\fleetctl.zip"
+          $got = (Get-FileHash "$env:RUNNER_TEMP\fleetctl.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:FLEETCTL_WINDOWS_SHA256) {
+            Write-Error "fleetctl checksum mismatch: got $got"
+          }
+          Expand-Archive "$env:RUNNER_TEMP\fleetctl.zip" -DestinationPath "$env:RUNNER_TEMP\fleetctl"
+          $bin = (Get-ChildItem -Recurse -Filter fleetctl.exe "$env:RUNNER_TEMP\fleetctl")[0].FullName
+          "FLEETCTL_BIN=$bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $bin --version
+
+      # WITHOUT THIS THE JOB CANNOT BUILD ANYTHING. `fleetctl package --type=msi`
+      # shells out to WiX heat/candle/light, and by DEFAULT it runs them inside
+      # the `fleetdm/wix` Docker image — on Windows too. A Windows runner cannot
+      # run a Linux image ("image operating system linux cannot be used on this
+      # platform"), and our CodeBuild runners have no Docker daemon at all
+      # (privileged_mode = false), so the default path fails either way. Proven
+      # on a hosted Windows runner by the monorepo's endpoint drill, which hit
+      # exactly this: `heat failed: exit status 125`.
+      #
+      # The header above used to say a Windows runner was enough because
+      # fleetctl "needs a real Windows toolchain" there. It does — and it does
+      # not ship or find one on its own. `--local-wix-dir` is Fleet's documented
+      # escape hatch (articles/enroll-hosts.md).
+      - name: Install WiX v3 (pinned + checksum-verified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri $env:WIX_URL -OutFile "$env:RUNNER_TEMP\wix.zip"
+          $got = (Get-FileHash "$env:RUNNER_TEMP\wix.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:WIX_SHA256) {
+            Write-Error "WiX checksum mismatch: got $got"
+          }
+          $dir = "$env:RUNNER_TEMP\wix"
+          Expand-Archive "$env:RUNNER_TEMP\wix.zip" -DestinationPath $dir
+          # fleetctl fails opaquely if any of the three is absent; say which.
+          foreach ($exe in 'heat.exe','candle.exe','light.exe') {
+            if (-not (Test-Path (Join-Path $dir $exe))) {
+              Write-Error "WiX archive is missing $exe"
+            }
+          }
+          "WIX_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build the Windows package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Set-Location out
+          # Same baked-placeholder shape as Linux: the shared control-server URL
+          # plus an inert secret connect replaces at install time.
+          & $env:FLEETCTL_BIN package --type=msi --enable-scripts `
+            --local-wix-dir="$env:WIX_DIR" `
+            --fleet-url="$env:ENDPOINT_SERVER_URL" `
+            --enroll-secret="$env:PLACEHOLDER_SECRET"
+          Get-ChildItem *.msi | Select-Object -First 1 | Rename-Item -NewName 'fleetd.msi'
+          Get-ChildItem
+
+      - name: Gate — the package must carry no real credential
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bytes = [System.IO.File]::ReadAllBytes('out/fleetd.msi')
+          # MSI stores strings UTF-16LE; check both encodings rather than assume.
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $utf16 = [System.Text.Encoding]::Unicode.GetString($bytes)
+          if (-not ($ascii.Contains($env:PLACEHOLDER_SECRET) -or $utf16.Contains($env:PLACEHOLDER_SECRET))) {
+            Write-Error "fleetd.msi lacks the expected placeholder enroll secret; refusing to publish a package that may embed a real credential"
+          }
+          Write-Host "placeholder secret only — ok"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fleetd-installer-windows
+          path: out/fleetd.msi
+          if-no-files-found: error
+
+  # Always release the Mac, even if the build failed — an orphaned fleet bills a
+  # standing Mac. Same OIDC lifecycle role, on the Linux runner.
+  teardown-mac:
+    needs: build-macos
+    if: ${{ always() }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          aws-region: eu-central-1
+      - run: ./scripts/mac-fleet.sh down
+
+  release:
+    needs: [build-macos, build-windows]
+    if: ${{ !inputs.dry_run }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: write # create the release + upload assets
+    steps:
+      # The CodeBuild AL2 runner image ships no gh CLI — installed pinned by
+      # version + sha256, same as the connect release job.
+      - name: Install gh CLI
+        run: |
+          set -euo pipefail
+          V=2.76.1
+          SHA=18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
+          curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v${V}/gh_${V}_linux_amd64.tar.gz"
+          echo "${SHA}  /tmp/gh.tgz" | sha256sum -c -
+          tar -xzf /tmp/gh.tgz -C /tmp
+          install -m 0755 "/tmp/gh_${V}_linux_amd64/bin/gh" /usr/local/bin/gh
+          gh --version
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fleetd-installer
+          path: assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fleetd-installer-windows
+          path: assets
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          ( cd assets && sha256sum -- * > SHA256SUMS )
+          cat assets/SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="fleetd-installer-v${FLEETCTL_VERSION}"
+          # Recreate on re-run: a rebuild produces a byte-different (re-signed,
+          # re-notarized) package, so leaving the old assets would publish a
+          # SHA256SUMS that matches nothing.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          # --latest=false is LOAD-BEARING, not tidiness. connect.sh and the
+          # self-updater fetch the standalone binaries from
+          # releases/latest/download, and GitHub hands "latest" to whichever
+          # release published most recently. Without this, publishing the agent
+          # package 404s anyray-connect-* for every developer and breaks the
+          # zero-install path. connect fetches this package by its TAG, so it
+          # never needs to be "latest".
+          gh release create "$TAG" \
+            --latest=false \
+            --title "fleetd installer ${FLEETCTL_VERSION}" \
+            --notes "Installers for the Anyray end-point agent (fleetd ${FLEETCTL_VERSION}): macOS (.pkg), Debian/Ubuntu (.deb), RHEL/Fedora (.rpm) and Windows (.msi). Every one is org-agnostic and carries NO enroll secret. The .pkg carries no server URL either — orbit reads it at runtime from the com.fleetdm.fleetd.config MDM configuration profile, or from the service environment that \`anyray-connect endpoint install\` writes. The .deb/.rpm/.msi bake the shared control-server URL plus an inert placeholder secret, because fleetctl has no --use-system-configuration off macOS; connect overrides both at install time. Inner binaries are signed by Fleet Device Management Inc (8VBZ3948LU); the macOS installer wrapper is signed by Anyray and notarized by Apple." \
+            assets/*

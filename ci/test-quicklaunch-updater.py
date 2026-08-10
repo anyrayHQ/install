@@ -40,21 +40,29 @@ for ln in src[zf:].split('\n')[1:]:
 code = '\n'.join(lines)
 
 # ---- stub boto3 --------------------------------------------------------
-STATE = {'deployed': 'v1.10.240', 'registered': [], 'updated': []}
+# STATE['fleet'] (family -> deployed tag, insertion-ordered) models a
+# multi-service stack; None keeps the terse single-gateway default driven by
+# STATE['deployed'], which most cases use.
+STATE = {'deployed': 'v1.10.240', 'fleet': None, 'registered': [], 'updated': []}
+
+def fleet():
+    return STATE['fleet'] or {'anyray-gateway': STATE['deployed']}
 
 class FakeEcs:
     def list_services(self, **kw):
-        return {'serviceArns': ['arn:svc/anyray-gateway']}
+        return {'serviceArns': ['arn:svc/' + f for f in fleet()]}
     def describe_services(self, **kw):
-        return {'services': [{'serviceName': 'anyray-gateway',
-                              'taskDefinition': 'arn:aws:ecs:::task-definition/anyray-gateway:7'}]}
+        return {'services': [{'serviceName': f,
+                              'taskDefinition': 'arn:aws:ecs:::task-definition/%s:7' % f}
+                             for f in fleet()]}
     def describe_task_definition(self, taskDefinition):
+        name = taskDefinition.split('anyray-', 1)[-1]
         return {'taskDefinition': {
             'family': taskDefinition, 'taskDefinitionArn': 'arn:x', 'revision': 7,
             'status': 'ACTIVE', 'registeredAt': 'now',
             'containerDefinitions': [
-                {'name': 'gateway',
-                 'image': 'public.ecr.aws/anyray/gateway:' + STATE['deployed']}]}}
+                {'name': name,
+                 'image': 'public.ecr.aws/anyray/%s:%s' % (name, fleet()[taskDefinition])}]}}
     def register_task_definition(self, **td):
         STATE['registered'].append(td['containerDefinitions'][0]['image'])
         return {'taskDefinition': {'taskDefinitionArn': 'arn:new'}}
@@ -123,6 +131,30 @@ print('== equal version is a no-op, not a refusal ==')
 c, b = call(json.dumps({'target': '1.10.240'}))
 check('same version = alreadyCurrent',
       c == 200 and b['alreadyCurrent'] == ['anyray-gateway'], '%s %s' % (c, b))
+
+print('== mixed-version fleet: one refusal must mean ZERO mutations ==')
+# gateway v1.0.0, proxy v3.0.0, target v2.0.0: an upgrade for the first
+# service walked, a downgrade for the second. Validating inside the update
+# loop registered + rolled the gateway FIRST and only then rejected on the
+# proxy -- the caller got a 400 while the deployment had in fact partially
+# updated, leaving the services this Lambda exists to keep on ONE version on
+# two. The all-service read-only preflight must reject the whole call before
+# any RegisterTaskDefinition/UpdateService, whatever the family list holds.
+STATE['fleet'] = {'anyray-gateway': 'v1.0.0', 'anyray-proxy': 'v3.0.0'}
+c, b = call(json.dumps({'target': 'v2.0.0'}))
+check('mixed-version downgrade rejected 400', c == 400, '%s %s' % (c, b))
+check('same refusal message shape', 'refusing to move anyray-proxy backwards' in b.get('message', ''), b)
+check('ZERO task definitions registered', STATE['registered'] == [], STATE['registered'])
+check('ZERO services rolled', STATE['updated'] == [], STATE['updated'])
+STATE['fleet'] = None
+
+print('== mixed-version fleet: a fully valid target still rolls only the stale ==')
+STATE['fleet'] = {'anyray-gateway': 'v1.0.0', 'anyray-proxy': 'v2.0.0'}
+c, b = call(json.dumps({'target': 'v2.0.0'}))
+check('stale rolled, current skipped',
+      c == 200 and b['updated'] == ['anyray-gateway']
+      and b['alreadyCurrent'] == ['anyray-proxy'], '%s %s' % (c, b))
+STATE['fleet'] = None
 
 print('== malformed input => 400, never 500, never reaches an image ==')
 INJECTION = 'v1.10.245; ' + 'rm -rf' + ' /'

@@ -1093,7 +1093,17 @@ Resources:
                   tag = asked or latest_release()
                   wanted = parse_version(tag)
                   cluster = os.environ['CLUSTER']
-                  updated, current = [], []
+                  # Read-only preflight over EVERY service before ANY mutation.
+                  # Validating each service inside the update loop meant a
+                  # mixed-version stack (gateway v1, proxy v3, target v2) moved
+                  # the gateway FIRST and then rejected on the proxy: the caller
+                  # got a 400 for a deployment that had in fact partially
+                  # updated, and the services it exists to keep on one version
+                  # were left on two. Any rejection now happens with zero
+                  # RegisterTaskDefinition / UpdateService calls behind it. The
+                  # preflight walks whatever services_for() returns, so it needs
+                  # no change when FAMILIES grows.
+                  plan, current = [], []
                   for service, family in services_for(cluster, os.environ['FAMILY_PREFIX']):
                       td = ecs.describe_task_definition(taskDefinition=family)['taskDefinition']
                       if all(c['image'].rsplit(':', 1)[-1] == tag
@@ -1115,6 +1125,10 @@ Resources:
                           raise BadRequest(
                               'refusing to move %s backwards; roll back through '
                               'a CloudFormation stack update instead' % service)
+                      plan.append((service, td))
+                  # Only a fully valid set reaches this point; mutate it.
+                  updated = []
+                  for service, td in plan:
                       for k in ('taskDefinitionArn', 'revision', 'status',
                                 'requiresAttributes', 'compatibilities',
                                 'registeredAt', 'registeredBy', 'deregisteredAt'):

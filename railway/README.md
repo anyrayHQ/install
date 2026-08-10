@@ -131,7 +131,7 @@ offering. Installs now go through the IaC path (`IAC.md`), which reads
 `railway.template.json` STAYS, and is still the spec for the four services. It is
 load-bearing beyond the marketplace: `deploy-prod.yml` reads its gateway tag as
 the current-version source for the release bump, and
-`ci/check-gateway-env-coverage.sh` validates every gateway env var against it.
+`ci/check-service-env-coverage.sh` validates every gateway and optimizer env var against it.
 
 `build-publish.sh` also stays as its validator (called by `validate-artifacts.yml`
 to prove the deployment-token field is still required). It reads

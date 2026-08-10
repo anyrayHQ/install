@@ -157,6 +157,31 @@ check('no token => 403 even with a valid body', c == 403, '%s %s' % (c, b))
 c, b = call('not json at all', headers={'authorization': 'Bearer wrong'})
 check('bad token => 403, malformed body never parsed', c == 403, '%s %s' % (c, b))
 
+print('== bearer scheme is matched, not assumed by offset ==')
+# The old code sliced 7 characters off the header without checking the prefix,
+# so any 7-byte preamble stood in for "Bearer ".
+c, b = call('{}', headers={'authorization': 'XXXXXXXtok-synthetic'})
+check('7-byte preamble is not a bearer prefix', c == 403, '%s %s' % (c, b))
+c, b = call('{}', headers={'authorization': 'bearer tok-synthetic'})
+check('scheme is case-insensitive (RFC 7235)', c == 200, '%s %s' % (c, b))
+c, b = call('{}', headers={'authorization': 'Bearer    '})
+check('blank token rejected', c == 403, '%s %s' % (c, b))
+
+print('== an internal failure tells the CALLER nothing about the deployment ==')
+# This endpoint is public (AuthType NONE) and the catch-all also covers
+# authorised(), so a missing/denied secret must not echo its ARN back.
+ARN = os.environ['TOKEN_SECRET_ARN']
+del os.environ['TOKEN_SECRET_ARN']
+try:
+    c, b = call('{}', headers=AUTH)
+    msg = json.dumps(b)
+    check('secret ARN never reaches the response', ARN not in msg, msg)
+    check('bare env var name never reaches the response',
+          'TOKEN_SECRET_ARN' not in msg, msg)
+    check('still a 500 with a pointer to the logs', c == 500, '%s %s' % (c, b))
+finally:
+    os.environ['TOKEN_SECRET_ARN'] = ARN
+
 print()
 print('FAILED: %d' % len(fails) if fails else 'ALL PASS')
 sys.exit(1 if fails else 0)

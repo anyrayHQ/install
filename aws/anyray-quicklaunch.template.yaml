@@ -1003,10 +1003,21 @@ Resources:
 
           def authorised(event):
               hdrs = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
-              presented = (hdrs.get('authorization') or '')[len('Bearer '):]
+              parts = (hdrs.get('authorization') or '').split(None, 1)
+              # Check the header's SHAPE before spending a GetSecretValue. This
+              # URL is public by design (AuthType NONE), so without this every
+              # unauthenticated request bills a Secrets Manager call. Matching
+              # the scheme properly also closes a slice that assumed the prefix:
+              # the old code took everything past 7 characters, so any 7-byte
+              # preamble was accepted in place of "Bearer ".
+              if len(parts) != 2 or parts[0].lower() != 'bearer':
+                  return False
+              presented = parts[1].strip()
+              if not presented:
+                  return False
               expected = sm.get_secret_value(
                   SecretId=os.environ['TOKEN_SECRET_ARN'])['SecretString']
-              return bool(presented) and hmac.compare_digest(presented, expected)
+              return hmac.compare_digest(presented, expected)
 
           def latest_release():
               with urllib.request.urlopen(os.environ['INDEX_URL'], timeout=20) as r:
@@ -1129,9 +1140,20 @@ Resources:
                   # debugging after the network instead of the contract.
                   print('updater REJECTED:', str(e))
                   return reply(400, {'status': 'failure', 'message': str(e)})
-              except Exception as e:
+              except Exception:
+                  # The traceback goes to CloudWatch; the CALLER gets nothing
+                  # but a generic failure. This handler also covers exceptions
+                  # raised by authorised() itself, so on an endpoint that is
+                  # public by design, echoing str(e) hands an UNAUTHENTICATED
+                  # caller internal detail: a missing TOKEN_SECRET_ARN raises a
+                  # KeyError naming it, and a Secrets Manager denial quotes the
+                  # secret's full ARN. Constant-string BadRequest messages above
+                  # stay verbatim; they are ours and say nothing about the
+                  # deployment.
                   print('updater FAILED:', traceback.format_exc())
-                  return reply(500, {'status': 'failure', 'message': str(e)})
+                  return reply(500, {'status': 'failure',
+                                     'message': 'internal error; see the updater '
+                                                'function log group'})
 
   # AuthType NONE because the caller is the gateway container, which has no AWS
   # credentials to sign with — the bearer check above is the gate, exactly as

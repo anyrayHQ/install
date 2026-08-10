@@ -970,16 +970,36 @@ Resources:
           INDEX_URL: https://charts.anyray.ai/index.yaml
       Code:
         ZipFile: |
-          import hmac, json, os, re, urllib.request, traceback, boto3
+          import base64, hmac, json, os, re, urllib.request, traceback, boto3
           ecs = boto3.client('ecs')
           sm = boto3.client('secretsmanager')
-          SEMVER = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
+          # The `v` is optional on the way IN and always present on the way OUT
+          # (release_tag). The control plane serves versions bare -- it strips the
+          # prefix -- while published images are tagged `vX.Y.Z`, so a gateway
+          # asking for "1.10.246" means the image `:v1.10.246`. Requiring the `v`
+          # here would 500 every unattended update the gateway ever sends.
+          SEMVER = re.compile(r'^v?(\d+)\.(\d+)\.(\d+)$')
+          # Mirrors MAX_PREFLIGHT_TARGET_CHARS gateway-side: the regex alone would
+          # admit an arbitrarily long digit run as a "version".
+          MAX_TARGET_CHARS = 20
           FAMILIES = ('gateway', 'optimizer', 'proxy')
+
+          class BadRequest(Exception):
+              """Caller's input is malformed -- a 400, never a 500."""
 
           def reply(code, body):
               return {'statusCode': code,
                       'headers': {'content-type': 'application/json'},
                       'body': json.dumps(body)}
+
+          def parse_version(tag):
+              """(major, minor, patch) for an immutable release tag, else None."""
+              m = SEMVER.fullmatch((tag or '').strip())
+              return tuple(int(x) for x in m.groups()) if m else None
+
+          def release_tag(parsed):
+              """Canonical published-image tag for a parsed version."""
+              return 'v%d.%d.%d' % parsed
 
           def authorised(event):
               hdrs = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
@@ -1014,19 +1034,26 @@ Resources:
               """
               raw = event.get('body') or ''
               if event.get('isBase64Encoded'):
-                  import base64
                   raw = base64.b64decode(raw).decode('utf-8', 'replace')
               if not raw.strip():
                   return None
               try:
-                  target = (json.loads(raw) or {}).get('target')
+                  parsed = json.loads(raw)
               except Exception:
-                  raise Exception('request body was not valid JSON')
+                  raise BadRequest('request body was not valid JSON')
+              if not isinstance(parsed, dict):
+                  raise BadRequest('request body must be a JSON object')
+              target = parsed.get('target')
               if target is None:
                   return None
-              if not isinstance(target, str) or not SEMVER.match(target):
-                  raise Exception('target must be an immutable release tag like v1.10.245')
-              return target
+              if not isinstance(target, str) or len(target) > MAX_TARGET_CHARS:
+                  raise BadRequest('target must be an immutable release tag like v1.10.245')
+              version = parse_version(target)
+              if not version:
+                  raise BadRequest('target must be an immutable release tag like v1.10.245')
+              # Re-emit from the parsed groups rather than echoing the caller's
+              # string, so nothing but digits can reach an image reference.
+              return release_tag(version)
 
           def services_for(cluster, prefix):
               """This stack's three services, found by task-definition family."""
@@ -1053,6 +1080,7 @@ Resources:
                                          'message': 'bad or missing bearer token'})
                   asked = requested_target(event)
                   tag = asked or latest_release()
+                  wanted = parse_version(tag)
                   cluster = os.environ['CLUSTER']
                   updated, current = [], []
                   for service, family in services_for(cluster, os.environ['FAMILY_PREFIX']):
@@ -1061,6 +1089,21 @@ Resources:
                              for c in td['containerDefinitions']):
                           current.append(service)
                           continue
+                      # Forward only. This endpoint exists to APPLY updates; a
+                      # rollback is a deliberate operator act and goes through a
+                      # CloudFormation stack update, where it is recorded. Before
+                      # the caller could name a version, the tag always came from
+                      # the release index and could only move forward; honouring a
+                      # request without this check would hand anyone holding the
+                      # token a one-call downgrade to a release with known holes.
+                      # The gateway enforces the same rule (updatePreflight), but
+                      # that is the caller's check, not ours.
+                      running = [parse_version(c['image'].rsplit(':', 1)[-1])
+                                 for c in td['containerDefinitions']]
+                      if any(cur and wanted < cur for cur in running):
+                          raise BadRequest(
+                              'refusing to move %s backwards; roll back through '
+                              'a CloudFormation stack update instead' % service)
                       for k in ('taskDefinitionArn', 'revision', 'status',
                                 'requiresAttributes', 'compatibilities',
                                 'registeredAt', 'registeredBy', 'deregisteredAt'):
@@ -1079,6 +1122,13 @@ Resources:
                             'updated': updated, 'alreadyCurrent': current}
                   print(json.dumps(result))
                   return reply(200, result)
+              except BadRequest as e:
+                  # 400, not 500: the caller sent something this endpoint will
+                  # never accept, and retrying verbatim cannot help. A 500 here
+                  # reads to the gateway as "unreachable" and sends whoever is
+                  # debugging after the network instead of the contract.
+                  print('updater REJECTED:', str(e))
+                  return reply(400, {'status': 'failure', 'message': str(e)})
               except Exception as e:
                   print('updater FAILED:', traceback.format_exc())
                   return reply(500, {'status': 'failure', 'message': str(e)})

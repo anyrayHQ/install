@@ -197,11 +197,48 @@ jobs:
 
           # Linux packages DO carry config, by necessity. Assert it is exactly
           # the inert placeholder — never a real credential.
+          #
+          # READ IT OUT OF THE PACKAGE; do not scan the file. `strings` on the
+          # archive finds nothing, because the payload lives in a COMPRESSED
+          # member — data.tar.gz inside the deb's ar, a compressed cpio inside
+          # the rpm. The first real run of this workflow failed here on packages
+          # that were provably correct: a Debian container had `/etc/default/orbit`
+          # holding the placeholder while `strings` reported zero hits. A gate
+          # that cannot see what it is guarding is not a gate.
+          #
+          # macOS `tar` is bsdtar/libarchive, which reads BOTH an ar archive and
+          # an rpm directly. Payload paths differ by format — `./etc/...` in the
+          # deb's tar, `/etc/...` in the rpm — so each is asked its own way.
+          read_orbit_env() {
+            local pkg="$1" tmp member
+            case "$pkg" in
+              *.deb)
+                tmp="$(mktemp -d)"
+                # Compression of the data member varies (gz/xz/zst) by packager
+                # version; take whichever member is actually present.
+                member="$(tar -tf "$pkg" | grep '^data\.tar' | head -1)"
+                [ -n "$member" ] || return 1
+                tar -xf "$pkg" -C "$tmp" "$member" || return 1
+                tar -xOf "$tmp/$member" ./etc/default/orbit 2>/dev/null
+                rm -rf "$tmp"
+                ;;
+              *.rpm)
+                tar -xOf "$pkg" /etc/default/orbit 2>/dev/null
+                ;;
+            esac
+          }
           for f in fleetd.deb fleetd.rpm; do
-            if strings "$f" | grep -q "ORBIT_ENROLL_SECRET=${PLACEHOLDER_SECRET}"; then
+            orbit_env="$(read_orbit_env "$f")"
+            if [ -z "$orbit_env" ]; then
+              echo "::error::$f: could not read /etc/default/orbit out of the package — layout changed, re-verify this gate"
+              exit 1
+            fi
+            if echo "$orbit_env" | grep -q "^ORBIT_ENROLL_SECRET=${PLACEHOLDER_SECRET}$"; then
               echo "  $f: placeholder secret only — ok"
             else
-              echo "::error::$f lacks the expected placeholder enroll secret; refusing to publish a package that may embed a real credential"
+              # Redacted: this log is public on every run.
+              echo "  $f: $(echo "$orbit_env" | grep '^ORBIT_ENROLL_SECRET=' | sed 's/=.*/=<redacted>/')"
+              echo "::error::$f carries an enroll secret that is not the placeholder; refusing to publish a package that embeds a real credential"
               exit 1
             fi
           done
@@ -377,14 +414,31 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $bytes = [System.IO.File]::ReadAllBytes('out/fleetd.msi')
-          # MSI stores strings UTF-16LE; check both encodings rather than assume.
-          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
-          $utf16 = [System.Text.Encoding]::Unicode.GetString($bytes)
-          if (-not ($ascii.Contains($env:PLACEHOLDER_SECRET) -or $utf16.Contains($env:PLACEHOLDER_SECRET))) {
-            Write-Error "fleetd.msi lacks the expected placeholder enroll secret; refusing to publish a package that may embed a real credential"
+          # EXTRACT, do not scan. Reading the raw bytes finds nothing whichever
+          # encoding you try, because MSI payload files live in a COMPRESSED CAB
+          # stream — the first real run of this workflow failed here on a package
+          # that was provably correct. `msiexec /a` is an administrative install:
+          # it unpacks the payload to a directory WITHOUT installing anything or
+          # touching this machine's services.
+          $extract = Join-Path $env:RUNNER_TEMP 'msi-extract'
+          Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
+          $msi = (Resolve-Path 'out/fleetd.msi').Path
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList `
+            '/a', "`"$msi`"", '/qn', "TARGETDIR=`"$extract`""
+          if ($p.ExitCode -ne 0) {
+            Write-Error "could not extract fleetd.msi for inspection (msiexec exit $($p.ExitCode))"
           }
-          Write-Host "placeholder secret only — ok"
+          $secretFile = Get-ChildItem -Path $extract -Filter 'secret.txt' -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $secretFile) {
+            Write-Error 'fleetd.msi has no secret.txt — package layout changed, re-verify this gate'
+          }
+          $secret = (Get-Content $secretFile.FullName -Raw).Trim()
+          if ($secret -ne $env:PLACEHOLDER_SECRET) {
+            # Never echo the value: this log is public on every run.
+            Write-Error 'fleetd.msi carries an enroll secret that is not the placeholder; refusing to publish a package that embeds a real credential'
+          }
+          Write-Host 'placeholder secret only — ok'
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

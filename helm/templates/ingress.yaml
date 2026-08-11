@@ -98,13 +98,38 @@ spec:
                 name: {{ include "anyray.fullname" $ }}-proxy
                 port:
                   number: 3000
+          # /livez is the GATEWAY's liveness route, and the one the docs tell
+          # operators to point external monitoring at. It needs a rule of its
+          # own: the only other route that matches it is the proxy `/`
+          # catch-all, whose nginx answers `302 /console/` — a monitor reading
+          # that as "up" would be measuring the console, and would stay green
+          # through a gateway outage. Unlike compose (Caddy's catch-all IS the
+          # gateway) and the quicklaunch ALB (its listener default is the
+          # gateway target group), the Kubernetes edge has a console-shaped
+          # catch-all, so the route has to be explicit here.
+          - path: /livez
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8787
+          {{- if (index $.Values "endpoint-control").enabled }}
           # End-point control agent plane (RFC 0014): fleetd on employee
           # laptops calls these FIXED root-anchored paths against this same
           # origin (the gateway has no /api/* routes, so nothing collides — no
           # second hostname or certificate needed). Not overridable on purpose:
           # the wire protocol is fixed, so a different prefix could never work.
-          # Everything else the service exposes (/admin/*, /readyz) stays
-          # in-cluster, mirroring the vendor edge's allowlist posture.
+          # Everything else the service exposes (/admin/*, /readyz, /livez)
+          # stays in-cluster, mirroring the vendor edge's allowlist posture.
+          #
+          # /livez is deliberately NOT routed here, even though the vendor edge
+          # forwards it: there endpoint-control owns a dedicated hostname, here
+          # it shares the gateway's. The gateway serves /livez too and the docs
+          # point operators' liveness checks at it, so a rule for it would
+          # silently re-aim every external probe at the wrong process — and,
+          # longest-prefix beating the "/" catch-all, would answer 503 whenever
+          # this Deployment has no ready endpoints while the gateway is fine.
           - path: /api/v1/osquery
             pathType: Prefix
             backend:
@@ -126,12 +151,6 @@ spec:
                 name: endpoint-control
                 port:
                   number: 8090
-          - path: /livez
-            pathType: Prefix
-            backend:
-              service:
-                name: endpoint-control
-                port:
-                  number: 8090
+          {{- end }}
     {{- end }}
 {{- end }}

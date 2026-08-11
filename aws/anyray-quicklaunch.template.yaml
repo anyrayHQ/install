@@ -104,6 +104,11 @@ Parameters:
       Immutable Anyray release tag deployed by every app service. This default
       is stamped by the release workflow; mutable latest/stable channels are not
       accepted because independently rolled ECS tasks must stay compatible.
+      Minimum v1.10.246 — the release that first published the endpoint-control
+      image to the customer set. Updating an older stack onto this template with
+      UsePreviousValue keeps a tag that image has no manifest for, so the new
+      service never stabilises and CloudFormation rolls the whole update back;
+      pass the current tag instead.
   EnableAutoUpdate:
     Type: String
     Default: 'true'
@@ -1337,9 +1342,18 @@ Resources:
   # these FIXED root-anchored paths against the deployment's existing gateway
   # origin (the gateway has no /api/* routes, so nothing collides and no second
   # certificate is needed). ONLY these path families reach the service — its
-  # /admin/* and /readyz are never routed at the listener, mirroring the vendor
-  # edge's allowlist posture — and everything unmatched still falls through to
-  # the gateway default action.
+  # /admin/*, /readyz and /livez are never routed at the listener, mirroring the
+  # vendor edge's allowlist posture — and everything unmatched still falls
+  # through to the gateway default action.
+  #
+  # /livez is excluded on purpose even though the vendor ALB forwards it: that
+  # ALB is endpoint-control's own, this listener is the GATEWAY's. The gateway
+  # serves /livez itself and the docs point operators' liveness checks at it, so
+  # a rule here would silently re-aim every external probe on :8787 at the wrong
+  # process — 200 while the gateway is down, 503 whenever this target group has
+  # no healthy target and the gateway is fine. Target health rides the target
+  # group's own /readyz check; nothing external needs /livez. This mirrors the
+  # same deliberate omission in infra/aws/modules/endpoint-control/alb.tf.
   EndpointAgentRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
@@ -1348,7 +1362,7 @@ Resources:
       Conditions:
         - Field: path-pattern
           PathPatternConfig:
-            Values: ['/api/v1/osquery/*', '/api/fleet/orbit/*', '/api/v1/evidence/*', '/livez']
+            Values: ['/api/v1/osquery/*', '/api/fleet/orbit/*', '/api/v1/evidence/*']
       Actions:
         - { Type: forward, TargetGroupArn: !Ref EndpointControlTg }
 

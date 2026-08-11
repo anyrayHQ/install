@@ -84,8 +84,19 @@ check_service() {
   # reach into every minted installer. Rendering the routed shape here keeps
   # "every template wires it" honest; the negative half — that it stays absent
   # WITHOUT a routed edge — is asserted separately at the bottom of this file.
+  #
+  # A component rendered off by default makes `-s` fail with "could not find
+  # template" (helm treats a selector matching no output as an error), which
+  # would otherwise reach the log as a bare helm error under a misleading
+  # missing-var line. Name the real cause instead: the contract says every
+  # template wires these vars, so a component that renders nothing by default
+  # cannot satisfy it.
   # shellcheck disable=SC2086 # deliberate word-splitting of the --set list
-  helm_render="$(helm template t ./helm -f my-values.yaml -s "templates/${svc}.yaml" ${helm_extra_set:-})"
+  if ! helm_render="$(helm template t ./helm -f my-values.yaml -s "templates/${svc}.yaml" ${helm_extra_set:-} 2>&1)"; then
+    echo "::error::${svc} renders nothing from the default values — its critical env vars cannot reach a default install. helm said: $(head -1 <<<"$helm_render")"
+    fail=1
+    return
+  fi
 
   local v miss
   for v in "${vars[@]}"; do
@@ -134,8 +145,19 @@ helm_extra_set=""
 # worse than none: minting succeeds and writes an unreachable origin into every
 # installer and MDM profile, which only surfaces on the laptop that can't
 # enrol.
-if helm template t ./helm -f my-values.yaml -s templates/endpoint-control.yaml \
-  | grep -q 'ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL'; then
+#
+# Renders the WHOLE chart, not `-s templates/endpoint-control.yaml`. With the
+# component disabled that template produces nothing, and helm treats a selector
+# matching no output as `Error: could not find template …` — which greps clean
+# and would pass this assertion for the wrong reason, including if someone later
+# renames the file. A whole-chart render also proves no OTHER template emits the
+# var. Assert the Deployment really rendered first, so an empty render can never
+# masquerade as a pass.
+unrouted_render="$(helm template t ./helm -f my-values.yaml)"
+if ! grep -q 'app.kubernetes.io/component: endpoint-control' <<<"$unrouted_render"; then
+  echo "::error::endpoint-control did not render at all in the default shape — this assertion would pass vacuously; fix the check"
+  fail=1
+elif grep -q 'ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL' <<<"$unrouted_render"; then
   echo "::error::endpoint-control got a public URL with no Ingress/HTTPRoute routing the agent plane — it would be an origin no agent can reach"
   fail=1
 else

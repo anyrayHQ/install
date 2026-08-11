@@ -18,3 +18,9 @@ ANYRAY_OBSERVABILITY_DB_URL
 ANYRAY_METERING_ENABLED
 ANYRAY_DEPLOYMENT_TOKEN
 ANYRAY_PSEUDONYM_SALT
+# ANYRAY_ENDPOINT_CONTROL_URL is optional on TODAY's gateway images (the
+# end-point plane is dormant without it), but once the gateway ships the local
+# lane its absence degrades in silence — enrollment falls back to the Billing
+# relay and the fleet rollup flaps between sources. Gated now so no template
+# can drop it between here and there (RFC 0014).
+ANYRAY_ENDPOINT_CONTROL_URL

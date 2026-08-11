@@ -72,6 +72,11 @@ spec:
             {{- include "anyray.observabilityDbEnv" . | nindent 12 }}
             - name: ANYRAY_OPTIMIZER_URL
               value: "http://optimizer:8088"
+            # In-cluster address of the endpoint-control service (RFC 0014).
+            # Optional on the gateway: images that predate the end-point lane
+            # ignore it, so this is safe ahead of the gateway that reads it.
+            - name: ANYRAY_ENDPOINT_CONTROL_URL
+              value: "http://endpoint-control:8090"
             - name: ANYRAY_OPTIMIZER_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}

@@ -299,6 +299,16 @@ if [ "$K8S" -eq 0 ]; then
 # click — there is no unattended polling.
 # Docs: docs.anyray.ai -> Configure -> Updates, and Security -> the Docker socket.
 # ANYRAY_UPDATER_TOKEN=
+
+# End-point control (RFC 0014) — the client-operated device-evidence service.
+# Every value derives in docker-compose.yml, so nothing needs generating here:
+# its admin token is a PAIRED key (falls back to ANYRAY_ADMIN_TOKEN, exactly
+# like ANYRAY_UPDATER_TOKEN — same value, never a fresh mint, so the two can't
+# drift), its database is the bundled Postgres the gateway already uses, and
+# its public URL derives from ANYRAY_PUBLIC_DOMAIN under --profile public.
+# Override only to deliberately split the credential or point elsewhere:
+# ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN=
+# ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL=
 EOF
     echo "✓ Secrets generated → .env"
     echo ""

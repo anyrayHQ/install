@@ -63,14 +63,14 @@ jobs:
           set -euo pipefail
           render="$(helm template t helm --set host=anyray.example.com)"
           fail=0
-          for c in gateway optimizer proxy; do
+          for c in gateway optimizer proxy endpoint-control; do
             if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:${APP_VERSION}"; then
               echo "::error::default render does not pin ${c} to appVersion ${APP_VERSION}:"
               printf '%s\n' "$render" | grep -E "image:.*/${c}:" || true
               fail=1
             fi
           done
-          if printf '%s\n' "$render" | grep -Eq 'anyray/(gateway|optimizer|proxy):latest'; then
+          if printf '%s\n' "$render" | grep -Eq 'anyray/(gateway|optimizer|proxy|endpoint-control):latest'; then
             echo "::error::default render uses a moving :latest tag — production images must be pinned"
             fail=1
           fi
@@ -81,7 +81,7 @@ jobs:
           set -euo pipefail
           render="$(helm template t helm --set host=anyray.example.com \
             --set-string image.tag=policy-stable)"
-          for c in gateway optimizer proxy; do
+          for c in gateway optimizer proxy endpoint-control; do
             printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:policy-stable"
           done
-          test "$(printf '%s\n' "$render" | grep -c 'imagePullPolicy: Always')" -ge 3
+          test "$(printf '%s\n' "$render" | grep -c 'imagePullPolicy: Always')" -ge 4

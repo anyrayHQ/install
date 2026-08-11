@@ -102,6 +102,14 @@ echo "→ Generating secrets and Helm values…"
 # `standard-rwo` StorageClass, so no storageClass override is needed. nginx in
 # the proxy reaches the gateway/optimizer by in-cluster FQDN (clusterDomain
 # default cluster.local is correct on GKE).
+#
+# endpoint-control runs but its agent plane is NOT exposed: laptops reach it over
+# fixed root-anchored paths the chart only routes on an Ingress/HTTPRoute, and
+# this install is LoadBalancer Services. It therefore gets no public origin (the
+# chart withholds it rather than deriving an unreachable one from `host`), which
+# leaves the end-point lane dormant — everything else works. To use it, put an
+# Ingress in front and set endpoint-control.publicUrl to that origin, or set
+# endpoint-control.enabled=false to drop the service entirely.
 cat > "$OVERLAY" <<YAML
 image:
   tag: "${IMAGE_TAG}"

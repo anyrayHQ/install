@@ -409,17 +409,28 @@ proxy:
 # End-point control (RFC 0014) — the client-operated device-evidence service.
 # Employee laptops run the signed fleetd agent against the deployment's public
 # origin: the Ingress/HTTPRoute route the fixed agent-plane path families
-# (/api/v1/osquery, /api/fleet/orbit, /api/v1/evidence, /livez) to it on the
-# SAME host the console and gateway share, so no extra hostname or certificate
-# is needed. Its admin token is PAIRED with ANYRAY_ADMIN_TOKEN (same Secret
-# key — the gateway authenticates to it by falling back to its own admin
-# token), and its endpoint_* tables live in the same Postgres as the gateway's
-# spend store. Stateless (no volume), so replicas can scale freely.
+# (/api/v1/osquery, /api/fleet/orbit, /api/v1/evidence) to it on the SAME host
+# the console and gateway share, so no extra hostname or certificate is needed.
+# Its admin token is PAIRED with ANYRAY_ADMIN_TOKEN (same Secret key — the
+# gateway authenticates to it by falling back to its own admin token), and its
+# endpoint_* tables live in the same Postgres as the gateway's spend store.
+# Stateless (no volume), so replicas can scale freely.
 endpoint-control:
+  # On by default — it is part of the minimum stack, not an add-on. Turn it off
+  # for the two cases where rendering it is worse than not having it:
+  #   - a security review that has not cleared a device-evidence plane yet
+  #     (nothing else in the chart changes; the gateway simply leaves the
+  #     end-point lane dormant rather than pointing at an absent Service);
+  #   - an image.tag pinned BELOW v1.10.246, the first release that published
+  #     public.ecr.aws/anyray/endpoint-control. Older pins have no image to
+  #     pull and the Deployment would sit in ImagePullBackOff forever, so an
+  #     `helm upgrade --wait` (what the AKS/GKE scripts run) times out.
+  enabled: true
   replicas: 1
-  # Public origin fleetd is pointed at. Leave blank on an Ingress install and
-  # it defaults to https://<host>; set it explicitly for NodePort / non-TLS
-  # installs (the agent plane needs a reachable origin to mint installers).
+  # Public origin fleetd is pointed at. Leave blank on an Ingress/HTTPRoute
+  # install and it defaults to https://<host>; set it explicitly for
+  # LoadBalancer / NodePort / non-TLS installs, where the chart routes no
+  # agent-plane paths and the agent plane has no origin until you give it one.
   publicUrl: ""
   resources:
     requests:

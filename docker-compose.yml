@@ -182,6 +182,13 @@ services:
   # a host port.
   endpoint-control:
     logging: *default-logging
+    # Same tag as the rest of the stack, like every other service here — but
+    # this image only exists from v1.10.246 (RFC 0014 flipped it to the customer
+    # set then). A deployment pinning ANYRAY_IMAGE_TAG BELOW that gets a
+    # manifest-not-found on `docker compose up` the first time it refreshes this
+    # file. That is the honest signal — the pinned release predates the service —
+    # and the two ways out are to move the pin forward, or to keep the pin and
+    # point this one service elsewhere with ANYRAY_ENDPOINT_CONTROL_IMAGE.
     image: "${ANYRAY_ENDPOINT_CONTROL_IMAGE:-public.ecr.aws/anyray/endpoint-control:${ANYRAY_IMAGE_TAG:-policy-stable}}"
     pull_policy: always
     restart: always
@@ -195,8 +202,14 @@ services:
         condition: service_healthy
     environment:
       # Same database the gateway's ANYRAY_SPEND_DB_URL points at — the
-      # endpoint_* tables coexist there. Same default, same override shape.
-      ANYRAY_CP_DATABASE_URL: ${ANYRAY_CP_DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}
+      # endpoint_* tables coexist there. It has to FOLLOW that override, not
+      # just share its default: a deployment on a managed Postgres sets
+      # ANYRAY_SPEND_DB_URL and leaves the bundled one running, so defaulting
+      # straight to `postgres:5432` would quietly put enrollment state in a
+      # second database nobody backs up. Helm (anyray.cpDatabaseUrlEnv) and the
+      # quicklaunch template (the gateway's own DbUrlSecret) already resolve it
+      # this way; this is the same chain, in compose's syntax.
+      ANYRAY_CP_DATABASE_URL: ${ANYRAY_CP_DATABASE_URL:-${ANYRAY_SPEND_DB_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-}@postgres:5432/postgres}}
       # Paired key: the SAME value as ANYRAY_ADMIN_TOKEN, derived here exactly
       # like ANYRAY_UPDATER_TOKEN — the gateway authenticates to this service by
       # falling back to its own admin token, so the two must never drift. The
@@ -277,15 +290,21 @@ services:
     # Caddy is the ONLY public entry in this profile, so it starting before the
     # gateway can answer is a public-facing 502 plus a wasted ACME attempt. The
     # bare list form waits only for the container to be created, not for it to be
-    # usable — the same gate the proxy already uses. endpoint-control gets the
-    # same gate for the same reason: Caddy forwards the agent-plane routes
-    # (/api/v1/osquery/* etc.) there, so starting before it passes its health
-    # check would answer fleetd check-ins with transient 502s.
+    # usable — the same gate the proxy already uses.
+    #
+    # endpoint-control gets `service_started` — what the bare list form means —
+    # on purpose, never `service_healthy`. It is the one dependency here that
+    # Caddy does not need in order to serve
+    # the money path, so gating on its health would let a device-evidence
+    # service that cannot start — an image tag the stack pin predates, an
+    # unreachable database — hold the public inference edge down with it. A
+    # fleetd check-in that lands early retries; an LLM request that finds no
+    # edge does not.
     depends_on:
       gateway:
         condition: service_healthy
       endpoint-control:
-        condition: service_healthy
+        condition: service_started
     # The admin API on 2019 is Caddy's own liveness surface and is bound to
     # localhost inside the container, so probing it exposes nothing. Checking
     # :80/:443 instead would report the gateway's health, not Caddy's.

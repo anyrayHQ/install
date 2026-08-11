@@ -182,6 +182,30 @@ jobs:
             grep -q 'Billing metering is mandatory' "$RUNNER_TEMP/metering-override.err"
           done
 
+          # Every edge template must route /livez to the GATEWAY. It is the
+          # route the docs point external monitoring at, and the only other
+          # rule matching it is the proxy "/" catch-all, whose nginx answers
+          # `302 /console/` — a monitor reading that as "up" measures the
+          # console and stays green through a gateway outage. Asserted per
+          # template AND on the backend, because the regression that motivated
+          # it was a /livez rule pointing at the wrong service, not a missing
+          # one.
+          for edge in ingress httproute; do
+            case "$edge" in
+              ingress)   flags=(--set ingress.enabled=true); svc='name: gateway' ;;
+              httproute) flags=(--set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw'); svc='- name: gateway' ;;
+            esac
+            edge_render="$(helm template t helm --set host=anyray.example.com \
+              "${flags[@]}" -s "templates/${edge}.yaml")"
+            # `-F --` because the HTTPRoute backend line starts with "- ",
+            # which grep would otherwise parse as an option bundle.
+            if ! grep -A4 -E '(value|path): /livez' <<<"$edge_render" | grep -qF -- "$svc"; then
+              echo "::error::${edge}.yaml does not route /livez to the gateway — external liveness would hit the console proxy's 302"
+              echo "$edge_render"
+              exit 1
+            fi
+          done
+
           # Render-only tooling emits the chart's independently pinned appVersion.
           tool_bin="$(mktemp -d)"
           ln -s "$(command -v helm)" "$tool_bin/helm"

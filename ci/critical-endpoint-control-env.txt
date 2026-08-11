@@ -15,6 +15,14 @@
 # ever be pointed at the deployment. Exactly the class this gate exists for
 # (the 0058/#1707 lesson: "degrades rather than bricks" is why it needs a
 # gate, not why it can skip one).
+#
+# ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL is edge-shaped, unlike the other two: a
+# template only carries it once something actually routes the agent plane to
+# the service. Compose emits the key empty without `--profile public`; Helm
+# omits it entirely without an Ingress/HTTPRoute. Both are the right answer —
+# an unreachable origin minted into an installer is worse than a refusal — so
+# the Helm leg is rendered WITH an ingress here, and the "absent without one"
+# half is asserted separately in check-service-env-coverage.sh.
 ANYRAY_CP_DATABASE_URL
 ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN
 ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL

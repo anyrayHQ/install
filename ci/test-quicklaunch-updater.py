@@ -149,11 +149,18 @@ check('ZERO services rolled', STATE['updated'] == [], STATE['updated'])
 STATE['fleet'] = None
 
 print('== mixed-version fleet: a fully valid target still rolls only the stale ==')
-STATE['fleet'] = {'anyray-gateway': 'v1.0.0', 'anyray-proxy': 'v2.0.0'}
+# endpoint-control is in the fleet too: FAMILIES membership is the only thing
+# that admits a service, so this doubles as proof the newest family is walked
+# by the same preflight with no special-casing (RFC 0014).
+STATE['fleet'] = {'anyray-gateway': 'v1.0.0', 'anyray-proxy': 'v2.0.0',
+                  'anyray-endpoint-control': 'v1.5.0'}
 c, b = call(json.dumps({'target': 'v2.0.0'}))
 check('stale rolled, current skipped',
-      c == 200 and b['updated'] == ['anyray-gateway']
+      c == 200 and b['updated'] == ['anyray-gateway', 'anyray-endpoint-control']
       and b['alreadyCurrent'] == ['anyray-proxy'], '%s %s' % (c, b))
+check('endpoint-control image re-tagged like its siblings',
+      'public.ecr.aws/anyray/endpoint-control:v2.0.0' in STATE['registered'],
+      STATE['registered'])
 STATE['fleet'] = None
 
 print('== malformed input => 400, never 500, never reaches an image ==')

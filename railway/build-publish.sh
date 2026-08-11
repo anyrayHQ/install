@@ -51,12 +51,14 @@ image_for() {
 
 gateway_tag="$(anyray_tag_from_image "$(image_for gateway)")"
 optimizer_tag="$(anyray_tag_from_image "$(image_for optimizer)")"
+endpoint_control_tag="$(anyray_tag_from_image "$(image_for endpoint-control)")"
 proxy_tag="$(anyray_tag_from_image "$(image_for proxy)")"
 iac_tag="$(sed -nE 's/^const TAG = "(v[0-9]+\.[0-9]+\.[0-9]+)";.*/\1/p' "$here/../.railway/railway.ts")"
 
 if [ -z "$gateway_tag" ] || [ "$optimizer_tag" != "$gateway_tag" ] || \
+   [ "$endpoint_control_tag" != "$gateway_tag" ] || \
    [ "$proxy_tag" != "$gateway_tag" ] || [ "$iac_tag" != "$gateway_tag" ]; then
-  echo "error: Railway image pins must match (JSON gateway=$gateway_tag optimizer=$optimizer_tag proxy=$proxy_tag; IaC=$iac_tag)" >&2
+  echo "error: Railway image pins must match (JSON gateway=$gateway_tag optimizer=$optimizer_tag endpoint-control=$endpoint_control_tag proxy=$proxy_tag; IaC=$iac_tag)" >&2
   exit 1
 fi
 

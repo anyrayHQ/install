@@ -1,0 +1,109 @@
+{{- /* End-point control (RFC 0014) — the client-operated device-evidence
+service. Employee laptops run the signed fleetd agent against the deployment's
+public origin (the Ingress/HTTPRoute route exactly the fixed agent-plane path
+families here); the gateway reaches the admin plane in-cluster over
+ANYRAY_ENDPOINT_CONTROL_URL. Stateless: everything durable lives in the same
+Postgres the gateway's spend store uses (boot-applied idempotent schema), so
+there is no volume and the rollout is a plain RollingUpdate. */}}
+{{- $ec := index .Values "endpoint-control" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anyray.fullname" . }}-endpoint-control
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: endpoint-control
+spec:
+  replicas: {{ $ec.replicas }}
+  # No volume to detach: surge a replacement, let it pass /readyz, then retire
+  # the outgoing pod. maxUnavailable 0 keeps the agent plane reachable
+  # throughout, so no fleetd check-in lands on an empty Service.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  {{- include "anyray.minReadySeconds" (dict "component" "endpoint-control" "context" .) | nindent 2 }}
+  {{- include "anyray.rolloutMeta" (dict "component" "endpoint-control" "context" .) | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "endpoint-control" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      {{- include "anyray.podMetadata" (dict "component" "endpoint-control" "context" .) | nindent 6 }}
+    spec:
+      {{- include "anyray.podSpecCommon" (dict "component" "endpoint-control" "context" .) | nindent 6 }}
+      containers:
+        - name: endpoint-control
+          image: {{ include "anyray.image" (dict "component" "endpoint-control" "context" .) }}
+          imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "endpoint-control" "context" .) }}
+          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
+          env:
+            # Same database the gateway's ANYRAY_SPEND_DB_URL resolves to —
+            # identical three-branch wiring (in-chart / external URL / external
+            # secretRef), so the endpoint_* tables always coexist with the
+            # spend store. Without it the service falls back to a loud
+            # in-memory store and enrollment state dies with the pod.
+            {{- include "anyray.cpDatabaseUrlEnv" . | nindent 12 }}
+            # Paired key: the SAME Secret key the gateway's admin token comes
+            # from — the gateway authenticates to this service by falling back
+            # to its own ANYRAY_ADMIN_TOKEN, so the two must never drift. No
+            # new Secret entry, deliberately.
+            - name: ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN
+              valueFrom:
+                {{- include "anyray.secretRef" (dict "key" "ANYRAY_ADMIN_TOKEN" "context" .) | nindent 16 }}
+            {{- /* The public origin fleetd is pointed at. Defaults to
+                   https://<host> — the SAME Ingress origin the console and
+                   gateway share (the agent-plane paths are routed there, so no
+                   second hostname or certificate is needed). Override via
+                   endpoint-control.publicUrl for NodePort / non-TLS installs. */}}
+            {{- $publicUrl := $ec.publicUrl }}
+            {{- if and (not $publicUrl) .Values.host }}
+            {{- $publicUrl = printf "https://%s" .Values.host }}
+            {{- end }}
+            {{- with $publicUrl }}
+            - name: ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $ec.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - containerPort: 8090
+          # /readyz checks Postgres and turns 503 while draining; /livez is
+          # process-only. That split is the service's documented probe
+          # contract, so readiness and liveness deliberately differ here. Both
+          # routes ship in every published customer image, so the probes need
+          # no version guard (unlike the gateway's /livez floor).
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          {{- include "anyray.startupProbe" (dict "component" "endpoint-control" "port" 8090 "path" "/livez" "unguarded" true "context" .) | nindent 10 }}
+          {{- include "anyray.livenessProbe" (dict "component" "endpoint-control" "port" 8090 "path" "/livez" "unguarded" true "context" .) | nindent 10 }}
+          # Holds the pod open while its endpoint removal propagates; after
+          # SIGTERM the service drains in-flight requests itself (35s ceiling),
+          # well inside the global termination budget.
+          {{- include "anyray.preStopDrain" (dict "component" "endpoint-control" "context" .) | nindent 10 }}
+          resources:
+            {{- toYaml $ec.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Bare name: the gateway's ANYRAY_ENDPOINT_CONTROL_URL is the literal
+  # http://endpoint-control:8090, matching the compose service DNS.
+  name: endpoint-control
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: endpoint-control
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "anyray.selectorLabels" (dict "component" "endpoint-control" "context" .) | nindent 4 }}
+  ports:
+    - port: 8090
+      targetPort: 8090

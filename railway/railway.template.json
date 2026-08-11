@@ -43,6 +43,7 @@
         "ANYRAY_DATA_DIR": "/data",
         "ANYRAY_GATEWAY_PUBLIC_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
         "ANYRAY_CONSOLE_PUBLIC_URL": "https://${{proxy.RAILWAY_PUBLIC_DOMAIN}}",
+        "ANYRAY_ENDPOINT_CONTROL_URL": "http://${{endpoint-control.RAILWAY_PRIVATE_DOMAIN}}:8090",
         "ANYRAY_HSTS": "true",
         "ANYRAY_TRUST_PROXY": "true",
         "ANYRAY_SEAT_EXCLUDE": "",
@@ -74,6 +75,21 @@
         "ANYRAY_CONTENT_MODE": "${{gateway.ANYRAY_CONTENT_MODE}}",
         "ANYRAY_ALLOW_PLAINTEXT": "${{gateway.ANYRAY_ALLOW_PLAINTEXT}}",
         "ANYRAY_SPEND_RETENTION_DAYS": "${{gateway.ANYRAY_SPEND_RETENTION_DAYS}}"
+      }
+    },
+    {
+      "name": "endpoint-control",
+      "source": {
+        "image": "public.ecr.aws/anyray/endpoint-control:v1.10.247"
+      },
+      "deploy": {
+        "healthcheckPath": "/readyz",
+        "restartPolicyType": "ON_FAILURE"
+      },
+      "variables": {
+        "ANYRAY_CP_DATABASE_URL": "${{Postgres.DATABASE_URL}}",
+        "ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN": "${{gateway.ANYRAY_ADMIN_TOKEN}}",
+        "ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}"
       }
     },
     {

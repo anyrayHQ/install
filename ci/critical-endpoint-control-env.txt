@@ -1,0 +1,20 @@
+# Deploy-critical ENDPOINT-CONTROL env vars (RFC 0014): every template must
+# wire each of these onto the *endpoint-control* service — docker-compose.yml,
+# the AWS CloudFormation EndpointControlTask, both Railway templates, and the
+# Helm endpoint-control Deployment. Enforced by ci/check-service-env-coverage.sh
+# (validate-artifacts). The service does not run in attach mode.
+#
+# This service is in the optimizer's failure class, not the gateway's: it
+# treats its vars as OPTIONAL and degrades in SILENCE. Without
+# ANYRAY_CP_DATABASE_URL it falls back to a loud-log-but-running IN-MEMORY
+# store, so every enrollment and policy result dies with the container and
+# nothing bricks to say so. Without ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN the
+# admin plane answers 503 while the agent plane keeps serving — the console
+# fleet card just reads "not configured". Without
+# ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL installer minting errors and no laptop can
+# ever be pointed at the deployment. Exactly the class this gate exists for
+# (the 0058/#1707 lesson: "degrades rather than bricks" is why it needs a
+# gate, not why it can skip one).
+ANYRAY_CP_DATABASE_URL
+ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN
+ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL

@@ -5,8 +5,20 @@
 {$ANYRAY_PUBLIC_DOMAIN} {
 	# The admin surface stays in-network / SSH-tunnel only: minting invites,
 	# console reads, and log endpoints are never reachable from the internet.
+	# This also covers endpoint-control's /admin/* — its admin plane is only
+	# ever reached in-stack by the gateway, never from the internet.
 	@admin path /admin/* /public/* /log/*
 	respond @admin 403
+
+	# End-point control agent plane (RFC 0014): fleetd on employee laptops
+	# polls these fixed root-anchored paths against this same public origin
+	# (the gateway has no /api/* routes, so nothing collides). ONLY these
+	# path families reach the service — everything else it serves (/admin/*,
+	# /readyz) stays in-network, mirroring the vendor edge's allowlist.
+	@endpointAgent path /api/v1/osquery/* /api/fleet/orbit/* /api/v1/evidence/* /livez
+	reverse_proxy @endpointAgent endpoint-control:8090 {
+		header_up X-Forwarded-For {remote_host}
+	}
 
 	# Everything else (the OpenAI-compatible API) goes to the gateway.
 	reverse_proxy gateway:8787 {

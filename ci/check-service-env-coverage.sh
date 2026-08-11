@@ -5,7 +5,7 @@
 # regresses that install path on the next image bump, and also catches a
 # monorepo paired PR that wired the var into some templates but not all.
 #
-# Two contracts, because the two services fail in opposite ways:
+# One contract per service, because the services fail in different ways:
 #
 #   gateway   (ci/critical-gateway-env.txt)   — fail-fasts without its vars, so a
 #             drop is loud on first boot. Gated anyway: loud on the CUSTOMER's
@@ -15,6 +15,9 @@
 #             optimizer meant migration 0058's shared config store resolved null,
 #             so every admin setting became per-pod and deploy-ephemeral with no
 #             error anywhere. Only a gate like this catches that class.
+#   endpoint-control (ci/critical-endpoint-control-env.txt) — the optimizer's
+#             failure class again (RFC 0014): no database var means a silent
+#             in-memory fallback that loses every enrollment on restart.
 #
 # Requires: jq, helm, and my-values.yaml (run `./setup.sh --k8s --connect ...` first, as
 # the CI job does). Compose / CFN / Railway are read from the source files, so
@@ -43,20 +46,24 @@ check_service() {
   local vars=()
   mapfile -t vars < <(grep -vE '^[[:space:]]*(#|$)' "$contract")
 
+  # CloudFormation logical ids and JS identifiers cannot carry hyphens, so a
+  # hyphenated service name maps to PascalCase / camelCase there:
+  # endpoint-control -> EndpointControlTask / endpointControl.
+  local cfn_resource iac_const
+  cfn_resource="$(awk -F- '{ for (i = 1; i <= NF; i++) printf "%s%s", toupper(substr($i, 1, 1)), substr($i, 2) }' <<<"$svc")Task"
+  iac_const="$(awk -F- '{ printf "%s", $1; for (i = 2; i <= NF; i++) printf "%s%s", toupper(substr($i, 1, 1)), substr($i, 2) }' <<<"$svc")"
+
   local f railway_vars railway_iac_block cfn_block helm_render
   railway_vars="$(jq -r --arg s "$svc" \
     '.services[] | select(.name == $s) | .variables | keys[]' \
     railway/railway.template.json)"
-  # The service's object literal in the Railway IaC source, `const <svc> =
+  # The service's object literal in the Railway IaC source, `const <camel> =
   # service("<svc>"` to the closing `  });` of that call.
-  railway_iac_block="$(awk -v s="$svc" '
-    $0 ~ ("const " s " = service\\(\"" s "\"") { g = 1 }
+  railway_iac_block="$(awk -v c="$iac_const" -v s="$svc" '
+    $0 ~ ("const " c " = service\\(\"" s "\"") { g = 1 }
     g { print }
     g && /^  \}\);/ { exit }
   ' .railway/railway.ts)"
-  # The CloudFormation task-definition resource for this service.
-  local cfn_resource
-  cfn_resource="$(printf '%sTask' "$(tr '[:lower:]' '[:upper:]' <<<"${svc:0:1}")${svc:1}")"
   cfn_block="$(awk -v r="^  ${cfn_resource}:" '
     $0 ~ r { g = 1; print; next }
     g && /^  [A-Za-z][A-Za-z0-9]*:/ { exit }
@@ -96,5 +103,11 @@ check_service gateway ci/critical-gateway-env.txt docker-compose.yml
 # docker-compose.attach.yml is checked too.
 check_service optimizer ci/critical-optimizer-env.txt \
   docker-compose.yml docker-compose.attach.yml
+# endpoint-control (RFC 0014) is in the optimizer's failure class — optional
+# vars, silent degradation (in-memory store, 503 admin plane) — and does not
+# run in attach mode, so its contract is checked against the full-stack
+# compose alone.
+check_service endpoint-control ci/critical-endpoint-control-env.txt \
+  docker-compose.yml
 
 exit "$fail"

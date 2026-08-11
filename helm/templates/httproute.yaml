@@ -70,11 +70,15 @@ spec:
       backendRefs:
         - name: {{ include "anyray.fullname" . }}-proxy
           port: 3000
+    {{- if (index .Values "endpoint-control").enabled }}
     # End-point control agent plane (RFC 0014): fleetd on employee laptops
     # calls these FIXED root-anchored paths against this same origin (the
     # gateway has no /api/* routes, so nothing collides). Longest-prefix
     # matching keeps the "/" catch-all from shadowing them. Everything else
-    # the service exposes (/admin/*, /readyz) stays in-cluster.
+    # the service exposes (/admin/*, /readyz, /livez) stays in-cluster —
+    # /livez notably so: the gateway serves it too and the docs point
+    # operators' liveness checks at it, so routing it here would re-aim every
+    # external probe at the wrong process (see ingress.yaml).
     - matches:
         - path:
             type: PathPrefix
@@ -85,12 +89,10 @@ spec:
         - path:
             type: PathPrefix
             value: /api/v1/evidence
-        - path:
-            type: PathPrefix
-            value: /livez
       backendRefs:
         - name: endpoint-control
           port: 8090
+    {{- end }}
     - matches:
         - path:
             type: PathPrefix

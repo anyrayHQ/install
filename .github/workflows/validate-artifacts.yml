@@ -308,6 +308,10 @@ jobs:
             echo "::error::Railway optimizer pin differs from gateway"
             exit 1
           }
+          [ "$(tag_for endpoint-control)" = "$gateway_tag" ] || {
+            echo "::error::Railway endpoint-control pin differs from gateway"
+            exit 1
+          }
           [ "$(tag_for proxy)" = "$gateway_tag" ] || {
             echo "::error::Railway proxy pin differs from gateway"
             exit 1

@@ -70,6 +70,27 @@ spec:
       backendRefs:
         - name: {{ include "anyray.fullname" . }}-proxy
           port: 3000
+    # End-point control agent plane (RFC 0014): fleetd on employee laptops
+    # calls these FIXED root-anchored paths against this same origin (the
+    # gateway has no /api/* routes, so nothing collides). Longest-prefix
+    # matching keeps the "/" catch-all from shadowing them. Everything else
+    # the service exposes (/admin/*, /readyz) stays in-cluster.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/osquery
+        - path:
+            type: PathPrefix
+            value: /api/fleet/orbit
+        - path:
+            type: PathPrefix
+            value: /api/v1/evidence
+        - path:
+            type: PathPrefix
+            value: /livez
+      backendRefs:
+        - name: endpoint-control
+          port: 8090
     - matches:
         - path:
             type: PathPrefix

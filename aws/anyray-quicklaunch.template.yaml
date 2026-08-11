@@ -101,7 +101,7 @@ Parameters:
     AllowedPattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
     ConstraintDescription: Must be an immutable Anyray release tag such as v1.10.120.
     Description: >-
-      Immutable Anyray release tag deployed by all three services. This default
+      Immutable Anyray release tag deployed by every app service. This default
       is stamped by the release workflow; mutable latest/stable channels are not
       accepted because independently rolled ECS tasks must stay compatible.
   EnableAutoUpdate:
@@ -113,7 +113,7 @@ Parameters:
       gateway already decides WHETHER an update is safe — it evaluates the
       release manifest against this install and never applies one needing
       operator action. This only gives it the arm it lacks on ECS: a Lambda
-      that rolls all three services together. Turning it off removes that arm;
+      that rolls every app service together. Turning it off removes that arm;
       the gateway keeps notifying in the console either way. The operator can
       also flip it at runtime via PUT /admin/update/settings.
   DefaultModel:
@@ -728,6 +728,26 @@ Resources:
       SourceSecurityGroupId: !Ref TasksSg
       Description: Cloud Map discovery - gateway/proxy to optimizer
 
+  TasksFromAlbEndpointControl:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TasksSg
+      IpProtocol: tcp
+      FromPort: 8090
+      ToPort: 8090
+      SourceSecurityGroupId: !Ref AlbSg
+      Description: Endpoint-control agent-plane target from ALB
+
+  TasksSelfEndpointControl:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TasksSg
+      IpProtocol: tcp
+      FromPort: 8090
+      ToPort: 8090
+      SourceSecurityGroupId: !Ref TasksSg
+      Description: Cloud Map discovery - gateway to endpoint-control
+
   RdsSg:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -861,6 +881,16 @@ Resources:
         RoutingPolicy: MULTIVALUE
       HealthCheckCustomConfig: { FailureThreshold: 1 }
 
+  EndpointControlDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: endpoint-control-dns
+      NamespaceId: !GetAtt Namespace.Id
+      DnsConfig:
+        DnsRecords: [{ Type: A, TTL: 10 }]
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig: { FailureThreshold: 1 }
+
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -912,7 +942,7 @@ Resources:
   #
   # Compose bundles Watchtower to execute that decision. ECS has no equivalent,
   # so this is it: same contract Watchtower speaks (POST + bearer token), and it
-  # rolls all three services together so they can never land on different
+  # rolls every app service together so they can never land on different
   # versions. The services already run a deployment circuit breaker with
   # rollback, so a release that fails its health checks reverts itself.
   UpdaterRole:
@@ -982,7 +1012,7 @@ Resources:
           # Mirrors MAX_PREFLIGHT_TARGET_CHARS gateway-side: the regex alone would
           # admit an arbitrarily long digit run as a "version".
           MAX_TARGET_CHARS = 20
-          FAMILIES = ('gateway', 'optimizer', 'proxy')
+          FAMILIES = ('gateway', 'optimizer', 'proxy', 'endpoint-control')
 
           class BadRequest(Exception):
               """Caller's input is malformed -- a 400, never a 500."""
@@ -1067,7 +1097,7 @@ Resources:
               return release_tag(version)
 
           def services_for(cluster, prefix):
-              """This stack's three services, found by task-definition family."""
+              """This stack's app services, found by task-definition family."""
               out, token = [], None
               while True:
                   page = ecs.list_services(cluster=cluster, maxResults=100,
@@ -1225,6 +1255,11 @@ Resources:
     Properties:
       LogGroupName: !Sub '/anyray/${AWS::StackName}/proxy'
       RetentionInDays: 30
+  EndpointControlLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/anyray/${AWS::StackName}/endpoint-control'
+      RetentionInDays: 30
 
   # ---- Load balancer ----------------------------------------------------------
   Alb:
@@ -1272,6 +1307,22 @@ Resources:
       TargetGroupAttributes:
         - { Key: deregistration_delay.timeout_seconds, Value: '15' }
 
+  EndpointControlTg:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !GetAtt Net.VpcId
+      TargetType: ip
+      Port: 8090
+      Protocol: HTTP
+      # ALB health = readiness: /readyz checks Postgres and turns 503 while
+      # draining, so a deploy pulls a task from rotation before it stops.
+      # (/livez, the process-only liveness route, is the CONTAINER health
+      # check on the task definition — the service's documented probe split.)
+      HealthCheckPath: /readyz
+      Matcher: { HttpCode: 200-399 }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: '15' }
+
   GatewayListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -1281,6 +1332,25 @@ Resources:
       Certificates: !If [HasCert, [{ CertificateArn: !Ref CertificateArn }], !Ref 'AWS::NoValue']
       DefaultActions:
         - { Type: forward, TargetGroupArn: !Ref GatewayTg }
+
+  # End-point control agent plane (RFC 0014): fleetd on employee laptops calls
+  # these FIXED root-anchored paths against the deployment's existing gateway
+  # origin (the gateway has no /api/* routes, so nothing collides and no second
+  # certificate is needed). ONLY these path families reach the service — its
+  # /admin/* and /readyz are never routed at the listener, mirroring the vendor
+  # edge's allowlist posture — and everything unmatched still falls through to
+  # the gateway default action.
+  EndpointAgentRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref GatewayListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ['/api/v1/osquery/*', '/api/fleet/orbit/*', '/api/v1/evidence/*', '/livez']
+      Actions:
+        - { Type: forward, TargetGroupArn: !Ref EndpointControlTg }
 
   ConsoleListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -1384,6 +1454,10 @@ Resources:
             - { SourceVolume: data, ContainerPath: /data }
           Environment:
             - { Name: ANYRAY_OPTIMIZER_URL, Value: !Sub 'http://optimizer-dns.${AWS::StackName}.anyray.internal:8088' }
+            # In-VPC address of the endpoint-control service (RFC 0014).
+            # Optional on the gateway: images that predate the end-point lane
+            # ignore it, so it is safe ahead of the gateway that reads it.
+            - { Name: ANYRAY_ENDPOINT_CONTROL_URL, Value: !Sub 'http://endpoint-control-dns.${AWS::StackName}.anyray.internal:8090' }
             # Gives the gateway's existing soft-update loop an applier on ECS.
             # Unset (EnableAutoUpdate=false) => the loop no-ops and this install
             # stays notify-only, exactly like Kubernetes and Railway.
@@ -1442,6 +1516,59 @@ Resources:
               awslogs-group: !Ref GatewayLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: gateway
+
+  # End-point control (RFC 0014) — the client-operated device-evidence service.
+  # Stateless (no volume): everything durable lives in the same RDS database
+  # the gateway's spend store uses (boot-applied idempotent schema).
+  EndpointControlTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-endpoint-control'
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: endpoint-control
+          Image: !Sub 'public.ecr.aws/anyray/endpoint-control:${ImageTag}'
+          Essential: true
+          PortMappings:
+            - { Name: endpoint-control, ContainerPort: 8090, Protocol: tcp }
+          Environment:
+            # The public origin fleetd on employee laptops is pointed at: the
+            # SAME origin as the gateway listener (the agent-plane paths are
+            # routed there by EndpointAgentRule), so it mirrors
+            # ANYRAY_GATEWAY_PUBLIC_URL exactly.
+            - Name: ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL
+              Value: !If
+                - HasGatewayUrl
+                - !Ref GatewayPublicUrl
+                - !If [HasCert, !Sub 'https://${Alb.DNSName}:8787', !Sub 'http://${Alb.DNSName}:8787']
+          Secrets:
+            # Same database the gateway's ANYRAY_SPEND_DB_URL points at — the
+            # endpoint_* tables coexist there.
+            - { Name: ANYRAY_CP_DATABASE_URL, ValueFrom: !GetAtt DbUrlSecret.DbUrlArn }
+            # Paired key: the SAME secret the gateway's ANYRAY_ADMIN_TOKEN
+            # comes from (the gateway authenticates to this service by falling
+            # back to its own admin token) — never a separately minted value,
+            # or the pair drifts.
+            - { Name: ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN, ValueFrom: !GetAtt AppSecrets.AdminTokenArn }
+          HealthCheck:
+            # /livez is process-only liveness; the ALB target group probes
+            # /readyz (Postgres + drain) — the service's documented split.
+            Command: [CMD-SHELL, 'node -e "fetch(''http://localhost:8090/livez'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"']
+            Interval: 10
+            Timeout: 5
+            Retries: 10
+            StartPeriod: 20
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EndpointControlLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: endpoint-control
 
   ProxyTask:
     Type: AWS::ECS::TaskDefinition
@@ -1561,6 +1688,36 @@ Resources:
         - { TargetGroupArn: !Ref GatewayTg, ContainerName: gateway, ContainerPort: 8787 }
       ServiceRegistries:
         - RegistryArn: !GetAtt GatewayDiscovery.Arn
+
+  EndpointControlService:
+    Type: AWS::ECS::Service
+    DependsOn: [EndpointAgentRule]
+    Properties:
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      DesiredCount: !If [Ha, 2, 1]
+      # Same hardening the production stack runs: a deployment whose tasks keep
+      # failing rolls back automatically instead of hanging the service (and the
+      # CloudFormation update fails fast instead of waiting out the full timeout).
+      # MinimumHealthyPercent/MaximumPercent are stated rather than left to the
+      # ECS default so a rolling deploy provably never dips below the current
+      # task count: surge to 200%, wait for the new tasks to pass their target
+      # group health check, then retire the old ones.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true }
+      TaskDefinition: !Ref EndpointControlTask
+      HealthCheckGracePeriodSeconds: 120
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!GetAtt Net.SubnetA, !GetAtt Net.SubnetB]
+          SecurityGroups: [!Ref TasksSg]
+      LoadBalancers:
+        - { TargetGroupArn: !Ref EndpointControlTg, ContainerName: endpoint-control, ContainerPort: 8090 }
+      ServiceRegistries:
+        - RegistryArn: !GetAtt EndpointControlDiscovery.Arn
 
   ProxyServiceV2:
     Type: AWS::ECS::Service

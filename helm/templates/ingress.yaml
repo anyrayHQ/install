@@ -98,5 +98,40 @@ spec:
                 name: {{ include "anyray.fullname" $ }}-proxy
                 port:
                   number: 3000
+          # End-point control agent plane (RFC 0014): fleetd on employee
+          # laptops calls these FIXED root-anchored paths against this same
+          # origin (the gateway has no /api/* routes, so nothing collides — no
+          # second hostname or certificate needed). Not overridable on purpose:
+          # the wire protocol is fixed, so a different prefix could never work.
+          # Everything else the service exposes (/admin/*, /readyz) stays
+          # in-cluster, mirroring the vendor edge's allowlist posture.
+          - path: /api/v1/osquery
+            pathType: Prefix
+            backend:
+              service:
+                name: endpoint-control
+                port:
+                  number: 8090
+          - path: /api/fleet/orbit
+            pathType: Prefix
+            backend:
+              service:
+                name: endpoint-control
+                port:
+                  number: 8090
+          - path: /api/v1/evidence
+            pathType: Prefix
+            backend:
+              service:
+                name: endpoint-control
+                port:
+                  number: 8090
+          - path: /livez
+            pathType: Prefix
+            backend:
+              service:
+                name: endpoint-control
+                port:
+                  number: 8090
     {{- end }}
 {{- end }}

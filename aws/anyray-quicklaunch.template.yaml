@@ -97,11 +97,11 @@ Parameters:
       multiple with commas.
   ImageTag:
     Type: String
-    Default: v1.10.245
+    Default: v1.10.247
     AllowedPattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
     ConstraintDescription: Must be an immutable Anyray release tag such as v1.10.120.
     Description: >-
-      Immutable Anyray release tag deployed by all three services. This default
+      Immutable Anyray release tag deployed by every app service. This default
       is stamped by the release workflow; mutable latest/stable channels are not
       accepted because independently rolled ECS tasks must stay compatible.
   EnableAutoUpdate:
@@ -113,7 +113,7 @@ Parameters:
       gateway already decides WHETHER an update is safe — it evaluates the
       release manifest against this install and never applies one needing
       operator action. This only gives it the arm it lacks on ECS: a Lambda
-      that rolls all three services together. Turning it off removes that arm;
+      that rolls every app service together. Turning it off removes that arm;
       the gateway keeps notifying in the console either way. The operator can
       also flip it at runtime via PUT /admin/update/settings.
   DefaultModel:
@@ -1000,23 +1000,54 @@ Resources:
           INDEX_URL: https://charts.anyray.ai/index.yaml
       Code:
         ZipFile: |
-          import hmac, json, os, re, urllib.request, traceback, boto3
+          import base64, hmac, json, os, re, urllib.request, traceback, boto3
           ecs = boto3.client('ecs')
           sm = boto3.client('secretsmanager')
-          SEMVER = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
+          # The `v` is optional on the way IN and always present on the way OUT
+          # (release_tag). The control plane serves versions bare -- it strips the
+          # prefix -- while published images are tagged `vX.Y.Z`, so a gateway
+          # asking for "1.10.246" means the image `:v1.10.246`. Requiring the `v`
+          # here would 500 every unattended update the gateway ever sends.
+          SEMVER = re.compile(r'^v?(\d+)\.(\d+)\.(\d+)$')
+          # Mirrors MAX_PREFLIGHT_TARGET_CHARS gateway-side: the regex alone would
+          # admit an arbitrarily long digit run as a "version".
+          MAX_TARGET_CHARS = 20
           FAMILIES = ('gateway', 'optimizer', 'proxy', 'endpoint-control')
+
+          class BadRequest(Exception):
+              """Caller's input is malformed -- a 400, never a 500."""
 
           def reply(code, body):
               return {'statusCode': code,
                       'headers': {'content-type': 'application/json'},
                       'body': json.dumps(body)}
 
+          def parse_version(tag):
+              """(major, minor, patch) for an immutable release tag, else None."""
+              m = SEMVER.fullmatch((tag or '').strip())
+              return tuple(int(x) for x in m.groups()) if m else None
+
+          def release_tag(parsed):
+              """Canonical published-image tag for a parsed version."""
+              return 'v%d.%d.%d' % parsed
+
           def authorised(event):
               hdrs = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
-              presented = (hdrs.get('authorization') or '')[len('Bearer '):]
+              parts = (hdrs.get('authorization') or '').split(None, 1)
+              # Check the header's SHAPE before spending a GetSecretValue. This
+              # URL is public by design (AuthType NONE), so without this every
+              # unauthenticated request bills a Secrets Manager call. Matching
+              # the scheme properly also closes a slice that assumed the prefix:
+              # the old code took everything past 7 characters, so any 7-byte
+              # preamble was accepted in place of "Bearer ".
+              if len(parts) != 2 or parts[0].lower() != 'bearer':
+                  return False
+              presented = parts[1].strip()
+              if not presented:
+                  return False
               expected = sm.get_secret_value(
                   SecretId=os.environ['TOKEN_SECRET_ARN'])['SecretString']
-              return bool(presented) and hmac.compare_digest(presented, expected)
+              return hmac.compare_digest(presented, expected)
 
           def latest_release():
               with urllib.request.urlopen(os.environ['INDEX_URL'], timeout=20) as r:
@@ -1025,6 +1056,45 @@ Resources:
               if not tags:
                   raise Exception('no appVersion entries in the release index')
               return max(tags, key=lambda t: tuple(int(x) for x in SEMVER.match(t).groups()))
+
+          def requested_target(event):
+              """The tag the CALLER asked for, if it named one.
+
+              The gateway decides its own target: it evaluates the release
+              manifest against this deployment and only asks for a version it
+              classified as a soft update. Honour that instead of resolving
+              'latest' here, because the two sources disagree -- the chart index
+              this Lambda reads lags the manifest the gateway reads. Resolving
+              our own then finds every service already current, answers 200, and
+              the gateway records a successful trigger that changed nothing,
+              suppressing its retry for six hours.
+
+              Validated against the same immutable-tag regex either way, so a
+              caller can only ever name a release tag, never an arbitrary image.
+              Absent/blank body keeps the old behaviour (console one-click).
+              """
+              raw = event.get('body') or ''
+              if event.get('isBase64Encoded'):
+                  raw = base64.b64decode(raw).decode('utf-8', 'replace')
+              if not raw.strip():
+                  return None
+              try:
+                  parsed = json.loads(raw)
+              except Exception:
+                  raise BadRequest('request body was not valid JSON')
+              if not isinstance(parsed, dict):
+                  raise BadRequest('request body must be a JSON object')
+              target = parsed.get('target')
+              if target is None:
+                  return None
+              if not isinstance(target, str) or len(target) > MAX_TARGET_CHARS:
+                  raise BadRequest('target must be an immutable release tag like v1.10.245')
+              version = parse_version(target)
+              if not version:
+                  raise BadRequest('target must be an immutable release tag like v1.10.245')
+              # Re-emit from the parsed groups rather than echoing the caller's
+              # string, so nothing but digits can reach an image reference.
+              return release_tag(version)
 
           def services_for(cluster, prefix):
               """This stack's app services, found by task-definition family."""
@@ -1049,15 +1119,46 @@ Resources:
                   if not authorised(event):
                       return reply(403, {'status': 'failure',
                                          'message': 'bad or missing bearer token'})
-                  tag = latest_release()
+                  asked = requested_target(event)
+                  tag = asked or latest_release()
+                  wanted = parse_version(tag)
                   cluster = os.environ['CLUSTER']
-                  updated, current = [], []
+                  # Read-only preflight over EVERY service before ANY mutation.
+                  # Validating each service inside the update loop meant a
+                  # mixed-version stack (gateway v1, proxy v3, target v2) moved
+                  # the gateway FIRST and then rejected on the proxy: the caller
+                  # got a 400 for a deployment that had in fact partially
+                  # updated, and the services it exists to keep on one version
+                  # were left on two. Any rejection now happens with zero
+                  # RegisterTaskDefinition / UpdateService calls behind it. The
+                  # preflight walks whatever services_for() returns, so it needs
+                  # no change when FAMILIES grows.
+                  plan, current = [], []
                   for service, family in services_for(cluster, os.environ['FAMILY_PREFIX']):
                       td = ecs.describe_task_definition(taskDefinition=family)['taskDefinition']
                       if all(c['image'].rsplit(':', 1)[-1] == tag
                              for c in td['containerDefinitions']):
                           current.append(service)
                           continue
+                      # Forward only. This endpoint exists to APPLY updates; a
+                      # rollback is a deliberate operator act and goes through a
+                      # CloudFormation stack update, where it is recorded. Before
+                      # the caller could name a version, the tag always came from
+                      # the release index and could only move forward; honouring a
+                      # request without this check would hand anyone holding the
+                      # token a one-call downgrade to a release with known holes.
+                      # The gateway enforces the same rule (updatePreflight), but
+                      # that is the caller's check, not ours.
+                      running = [parse_version(c['image'].rsplit(':', 1)[-1])
+                                 for c in td['containerDefinitions']]
+                      if any(cur and wanted < cur for cur in running):
+                          raise BadRequest(
+                              'refusing to move %s backwards; roll back through '
+                              'a CloudFormation stack update instead' % service)
+                      plan.append((service, td))
+                  # Only a fully valid set reaches this point; mutate it.
+                  updated = []
+                  for service, td in plan:
                       for k in ('taskDefinitionArn', 'revision', 'status',
                                 'requiresAttributes', 'compatibilities',
                                 'registeredAt', 'registeredBy', 'deregisteredAt'):
@@ -1067,13 +1168,36 @@ Resources:
                       arn = ecs.register_task_definition(**td)['taskDefinition']['taskDefinitionArn']
                       ecs.update_service(cluster=cluster, service=service, taskDefinition=arn)
                       updated.append(service)
+                  # 'target' names where the tag came from: a caller-requested
+                  # version, or one this Lambda resolved from the chart index.
+                  # A roll that keeps reporting alreadyCurrent on 'index' is the
+                  # index lagging, not the deployment being up to date.
                   result = {'status': 'ok', 'tag': tag,
+                            'target': 'requested' if asked else 'index',
                             'updated': updated, 'alreadyCurrent': current}
                   print(json.dumps(result))
                   return reply(200, result)
-              except Exception as e:
+              except BadRequest as e:
+                  # 400, not 500: the caller sent something this endpoint will
+                  # never accept, and retrying verbatim cannot help. A 500 here
+                  # reads to the gateway as "unreachable" and sends whoever is
+                  # debugging after the network instead of the contract.
+                  print('updater REJECTED:', str(e))
+                  return reply(400, {'status': 'failure', 'message': str(e)})
+              except Exception:
+                  # The traceback goes to CloudWatch; the CALLER gets nothing
+                  # but a generic failure. This handler also covers exceptions
+                  # raised by authorised() itself, so on an endpoint that is
+                  # public by design, echoing str(e) hands an UNAUTHENTICATED
+                  # caller internal detail: a missing TOKEN_SECRET_ARN raises a
+                  # KeyError naming it, and a Secrets Manager denial quotes the
+                  # secret's full ARN. Constant-string BadRequest messages above
+                  # stay verbatim; they are ours and say nothing about the
+                  # deployment.
                   print('updater FAILED:', traceback.format_exc())
-                  return reply(500, {'status': 'failure', 'message': str(e)})
+                  return reply(500, {'status': 'failure',
+                                     'message': 'internal error; see the updater '
+                                                'function log group'})
 
   # AuthType NONE because the caller is the gateway container, which has no AWS
   # credentials to sign with — the bearer check above is the gate, exactly as

@@ -568,7 +568,62 @@ Resources:
                   sm.put_secret_value(SecretId=name, SecretString=value)
                   return sm.describe_secret(SecretId=name)['ARN']
 
+          def compose_db_url(props):
+              m = json.loads(sm.get_secret_value(SecretId=props['MasterSecretArn'])['SecretString'])
+              # URL-encode credentials: the RDS-managed master password can
+              # contain URL-reserved chars (?, #, /, @, %, …) that otherwise
+              # corrupt the postgresql:// connection string ("Invalid URL").
+              # sslmode=no-verify: RDS (PG15+) forces SSL via rds.force_ssl, and
+              # the gateway's pg client has no RDS CA bundle — encrypt in transit
+              # without cert verification (the DB is private, in-VPC only).
+              q = lambda s: urllib.parse.quote(s, safe='')
+              return 'postgresql://%s:%s@%s:5432/%s?sslmode=no-verify' % (
+                  q(m['username']), q(m['password']), props['DbHost'], props['DbName'])
+
+          def refresh_db_url(props):
+              # ManageMasterUserPassword means RDS rotates the master password on
+              # its own schedule, into its own secret. Nothing else ever rewrites
+              # db-url, so without this it is correct only until the first
+              # rotation: every running task survives on its already-open pool
+              # while every NEW connection authenticates with a dead password.
+              # The symptom is a task that crash-loops on `password
+              # authentication failed for user "postgres"`, which trips the ECS
+              # deployment circuit breaker and can wedge the stack in
+              # UPDATE_ROLLBACK_FAILED — long after the rotation that caused it.
+              name = props['Prefix'] + 'db-url'
+              # Follow an existing secret; never create one. The composer owns
+              # creation. If db-url is absent the stack is either not up yet or
+              # is being torn down (the Delete branch force-deletes it), and a
+              # refresh that raced in behind that delete would resurrect a
+              # live master credential as an orphan outliving its own stack.
+              try:
+                  current = sm.get_secret_value(SecretId=name)['SecretString']
+              except (sm.exceptions.ResourceNotFoundException,
+                      sm.exceptions.InvalidRequestException):
+                  return {'Changed': False, 'Reason': 'absent'}
+              url = compose_db_url(props)
+              if current == url:
+                  return {'Changed': False}
+              sm.put_secret_value(SecretId=name, SecretString=url)
+              # Never log the URL itself: it carries the master password.
+              print('db-url recomposed from the rotated master secret')
+              return {'Changed': True}
+
           def handler(event, context):
+              # Two callers, two contracts. CloudFormation sends RequestType and
+              # a ResponseURL to answer; the schedule rule sends the properties
+              # bare and must never try to PUT to a response URL that is not
+              # there — including from the failure path, which is why this
+              # returns before the CFN try/except below.
+              if 'RequestType' not in event:
+                  try:
+                      return refresh_db_url(event['ResourceProperties'])
+                  except Exception:
+                      # Raise: a silent refresh failure is a stack that looks
+                      # protected and is not. This surfaces on the function's
+                      # error metric.
+                      print('SecretFn refresh FAILED:', traceback.format_exc())
+                      raise
               try:
                   rt = event['RequestType']; props = event['ResourceProperties']
                   action = props['Action']; prefix = props['Prefix']
@@ -588,18 +643,9 @@ Resources:
                       }
                       return send(event, context, 'SUCCESS', data, prefix + 'generate')
                   if action == 'composeDbUrl':
-                      m = json.loads(sm.get_secret_value(SecretId=props['MasterSecretArn'])['SecretString'])
-                      # URL-encode credentials: the RDS-managed master password can
-                      # contain URL-reserved chars (?, #, /, @, %, …) that otherwise
-                      # corrupt the postgresql:// connection string ("Invalid URL").
-                      # sslmode=no-verify: RDS (PG15+) forces SSL via rds.force_ssl, and
-                      # the gateway's pg client has no RDS CA bundle — encrypt in transit
-                      # without cert verification (the DB is private, in-VPC only).
-                      q = lambda s: urllib.parse.quote(s, safe='')
-                      url = 'postgresql://%s:%s@%s:5432/%s?sslmode=no-verify' % (
-                          q(m['username']), q(m['password']), props['DbHost'], props['DbName'])
                       return send(event, context, 'SUCCESS',
-                          {'DbUrlArn': put(prefix + 'db-url', url)}, prefix + 'composeDbUrl')
+                          {'DbUrlArn': put(prefix + 'db-url', compose_db_url(props))},
+                          prefix + 'composeDbUrl')
                   return send(event, context, 'FAILED', {'Error': 'unknown action'}, prefix + action)
               except Exception as e:
                   print('SecretFn FAILED:', traceback.format_exc())
@@ -623,6 +669,50 @@ Resources:
       MasterSecretArn: !GetAtt Db.MasterUserSecret.SecretArn
       DbHost: !GetAtt Db.Endpoint.Address
       DbName: postgres
+      # Bumped to re-run the composer on an existing stack. CloudFormation
+      # invokes a custom resource on UPDATE only when its properties actually
+      # change, so on an unchanged block the upgrade that carries this fix
+      # would NOT recompose db-url — a stack whose master has already rotated
+      # would stay broken until the schedule below caught it up.
+      RefreshVersion: 1
+
+  # ---- db-url follows the master rotation ------------------------------------
+  # The composer above is a one-shot: it captures the master password at stack
+  # create/update. ManageMasterUserPassword keeps rotating it afterwards, so
+  # db-url decays into a credential that authenticates nothing while every
+  # already-running task keeps working off its open pool — the failure stays
+  # invisible until the next task start (an image roll, a scale event, the
+  # auto-updater, a new service) and then presents as a crash-loop, not as an
+  # expired secret. Hourly is well inside the shortest rotation RDS will
+  # schedule, and the handler is a no-op write when nothing changed.
+  DbUrlRefreshRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: !Sub 'Recompose ${AWS::StackName} db-url after an RDS master password rotation.'
+      ScheduleExpression: rate(1 hour)
+      State: ENABLED
+      Targets:
+        - Id: secret-fn
+          Arn: !GetAtt SecretFn.Arn
+          # No RequestType: this is the non-CloudFormation contract in the
+          # handler. Same property shape as DbUrlSecret above, deliberately —
+          # both paths compose the URL through compose_db_url().
+          Input: !Sub |
+            {"ResourceProperties": {
+              "Action": "composeDbUrl",
+              "Prefix": "${AWS::StackName}/anyray/",
+              "MasterSecretArn": "${Db.MasterUserSecret.SecretArn}",
+              "DbHost": "${Db.Endpoint.Address}",
+              "DbName": "postgres"
+            }}
+
+  DbUrlRefreshPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SecretFn.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DbUrlRefreshRule.Arn
 
   # The deployment token arrives as a NoEcho parameter; hold it in Secrets
   # Manager and inject it via the task Secrets list so it is not readable by

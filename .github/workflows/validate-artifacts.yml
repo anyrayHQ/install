@@ -224,6 +224,10 @@ jobs:
         run: |
           pipx install cfn-lint
           cfn-lint aws/anyray-quicklaunch.template.yaml
+      # Drives the template's inline updater Lambda against stubbed AWS clients.
+      # No interpolation, no untrusted input: a fixed script path only.
+      - name: Updater Lambda contract (version format, forward-only, input validation)
+        run: python3 ci/test-quicklaunch-updater.py
       - name: Template stays within CloudFormation size limits
         run: |
           set -euo pipefail

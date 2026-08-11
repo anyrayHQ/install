@@ -70,6 +70,18 @@ spec:
       backendRefs:
         - name: {{ include "anyray.fullname" . }}-proxy
           port: 3000
+    # /livez is the GATEWAY's liveness route, and the one the docs tell
+    # operators to point external monitoring at. It needs a rule of its own:
+    # the only other route matching it is the proxy "/" catch-all, whose nginx
+    # answers `302 /console/` — a monitor reading that as "up" would be
+    # measuring the console, and would stay green through a gateway outage.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /livez
+      backendRefs:
+        - name: gateway
+          port: 8787
     {{- if (index .Values "endpoint-control").enabled }}
     # End-point control agent plane (RFC 0014): fleetd on employee laptops
     # calls these FIXED root-anchored paths against this same origin (the

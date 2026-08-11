@@ -98,6 +98,22 @@ spec:
                 name: {{ include "anyray.fullname" $ }}-proxy
                 port:
                   number: 3000
+          # /livez is the GATEWAY's liveness route, and the one the docs tell
+          # operators to point external monitoring at. It needs a rule of its
+          # own: the only other route that matches it is the proxy `/`
+          # catch-all, whose nginx answers `302 /console/` — a monitor reading
+          # that as "up" would be measuring the console, and would stay green
+          # through a gateway outage. Unlike compose (Caddy's catch-all IS the
+          # gateway) and the quicklaunch ALB (its listener default is the
+          # gateway target group), the Kubernetes edge has a console-shaped
+          # catch-all, so the route has to be explicit here.
+          - path: /livez
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8787
           {{- if (index $.Values "endpoint-control").enabled }}
           # End-point control agent plane (RFC 0014): fleetd on employee
           # laptops calls these FIXED root-anchored paths against this same

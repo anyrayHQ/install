@@ -252,6 +252,8 @@ jobs:
       # No interpolation, no untrusted input: a fixed script path only.
       - name: Updater Lambda contract (version format, forward-only, input validation)
         run: python3 ci/test-quicklaunch-updater.py
+      - name: SecretFn db-url contract (follows the RDS master rotation)
+        run: python3 ci/test-quicklaunch-dburl.py
       - name: Template stays within CloudFormation size limits
         run: |
           set -euo pipefail

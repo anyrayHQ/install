@@ -312,6 +312,32 @@ ingress:
         admin: /admin
 ```
 
+### The end-point agent plane
+
+The `endpoint-control` service (device evidence for employee laptops) is the one
+component whose clients live outside the cluster, so it needs a route of its own.
+On an Ingress or HTTPRoute install the chart adds three fixed prefixes —
+`/api/v1/osquery`, `/api/fleet/orbit`, `/api/v1/evidence` — on the same host the
+console and gateway already use. The agent protocol anchors those paths at the
+root, so they are not configurable; the gateway serves no `/api/*` route, so
+nothing collides, and no second hostname or certificate is involved. Everything
+else the service exposes (`/admin/*`, `/readyz`, `/livez`) stays in-cluster: the
+gateway reaches its admin plane over the cluster Service.
+
+Two consequences worth knowing before you install:
+
+- **`LoadBalancer` and `NodePort` installs route none of it.** Nothing external
+  reaches the agent plane, so the chart deliberately leaves
+  `ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL` unset rather than guessing an origin from
+  `host` — a guessed origin would be baked into every installer and MDM profile
+  the service mints and fail only on the laptop. Expose the plane yourself and
+  set `endpoint-control.publicUrl` to the origin that reaches it.
+- **`endpoint-control.enabled: false`** drops the Deployment, the Service, the
+  ingress rules, and the gateway's pointer at it, leaving the end-point lane
+  dormant. Use it if a device-evidence plane hasn't cleared your security review,
+  or if you pin `image.tag` below `v1.10.246` — the first release that published
+  this image, so older pins have nothing to pull.
+
 ## Cluster policy knobs
 
 Set these values when your cluster requires a specific service account, private

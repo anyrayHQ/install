@@ -4,8 +4,16 @@ public origin (the Ingress/HTTPRoute route exactly the fixed agent-plane path
 families here); the gateway reaches the admin plane in-cluster over
 ANYRAY_ENDPOINT_CONTROL_URL. Stateless: everything durable lives in the same
 Postgres the gateway's spend store uses (boot-applied idempotent schema), so
-there is no volume and the rollout is a plain RollingUpdate. */}}
+there is no volume and the rollout is a plain RollingUpdate.
+
+Rendered by default (RFC 0014 §9 accepts one more always-on service in the
+minimum stack). `enabled: false` exists for the two cases where rendering it
+anyway is worse than not having it: an operator whose security review has not
+cleared a device-evidence plane yet, and a chart user pinning image.tag to a
+release BELOW v1.10.246, where this image does not exist and the Deployment
+would sit in ImagePullBackOff forever. */}}
 {{- $ec := index .Values "endpoint-control" }}
+{{- if $ec.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,12 +61,23 @@ spec:
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_ADMIN_TOKEN" "context" .) | nindent 16 }}
             {{- /* The public origin fleetd is pointed at. Defaults to
-                   https://<host> — the SAME Ingress origin the console and
-                   gateway share (the agent-plane paths are routed there, so no
-                   second hostname or certificate is needed). Override via
-                   endpoint-control.publicUrl for NodePort / non-TLS installs. */}}
+                   https://<host> — the SAME Ingress/HTTPRoute origin the console
+                   and gateway share (the agent-plane paths are routed there, so
+                   no second hostname or certificate is needed). Override via
+                   endpoint-control.publicUrl for NodePort / non-TLS installs.
+
+                   The default is gated on an edge that ACTUALLY routes the agent
+                   plane, not on .Values.host alone. The LoadBalancer-Service
+                   installs (the AKS and GKE one-click scripts) leave ingress and
+                   httpRoute off and pass a placeholder host, so deriving from
+                   host there would bake https://anyray.internal into every
+                   minted installer and MDM profile — a URL no laptop can reach,
+                   and a mint that looks like it worked. Unset, the service
+                   refuses to mint until an operator supplies a real origin,
+                   which is the honest failure. */}}
             {{- $publicUrl := $ec.publicUrl }}
-            {{- if and (not $publicUrl) .Values.host }}
+            {{- $routedEdge := or .Values.ingress.enabled .Values.httpRoute.enabled }}
+            {{- if and (not $publicUrl) $routedEdge .Values.host }}
             {{- $publicUrl = printf "https://%s" .Values.host }}
             {{- end }}
             {{- with $publicUrl }}
@@ -107,3 +126,4 @@ spec:
   ports:
     - port: 8090
       targetPort: 8090
+{{- end }}

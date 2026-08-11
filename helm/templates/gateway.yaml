@@ -72,11 +72,18 @@ spec:
             {{- include "anyray.observabilityDbEnv" . | nindent 12 }}
             - name: ANYRAY_OPTIMIZER_URL
               value: "http://optimizer:8088"
+            {{- if (index .Values "endpoint-control").enabled }}
             # In-cluster address of the endpoint-control service (RFC 0014).
             # Optional on the gateway: images that predate the end-point lane
             # ignore it, so this is safe ahead of the gateway that reads it.
+            # Gated on the component being rendered: a set URL SELECTS the local
+            # lane and an unreachable local service degrades to reachable:false
+            # rather than falling back, so pointing at a Service that does not
+            # exist would report a permanently broken fleet instead of a dormant
+            # one.
             - name: ANYRAY_ENDPOINT_CONTROL_URL
               value: "http://endpoint-control:8090"
+            {{- end }}
             - name: ANYRAY_OPTIMIZER_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}

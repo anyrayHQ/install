@@ -32,6 +32,10 @@ fi
 
 fail=0
 
+# Extra `helm template --set` flags for the next check_service call; reset by
+# each caller that needs it. See the render comment inside check_service.
+helm_extra_set=""
+
 # check_service <service> <contract> <compose-files…>
 #
 # Every extractor below is scoped to ONE service's block on purpose: grepping a
@@ -71,7 +75,28 @@ check_service() {
   ' aws/anyray-quicklaunch.template.yaml)"
   # The rendered Helm Deployment for this service. `-s` selects the template
   # file, which is named after the service.
-  helm_render="$(helm template t ./helm -f my-values.yaml -s "templates/${svc}.yaml")"
+  #
+  # helm_extra_set lets a caller render the shape a var is actually contracted
+  # for. It exists for exactly one case: the chart ships ingress.enabled=false,
+  # and endpoint-control's public URL is deliberately only emitted when an edge
+  # (Ingress or HTTPRoute) actually routes the agent-plane paths — deriving it
+  # from `host` on a LoadBalancer install would bake an origin no laptop can
+  # reach into every minted installer. Rendering the routed shape here keeps
+  # "every template wires it" honest; the negative half — that it stays absent
+  # WITHOUT a routed edge — is asserted separately at the bottom of this file.
+  #
+  # A component rendered off by default makes `-s` fail with "could not find
+  # template" (helm treats a selector matching no output as an error), which
+  # would otherwise reach the log as a bare helm error under a misleading
+  # missing-var line. Name the real cause instead: the contract says every
+  # template wires these vars, so a component that renders nothing by default
+  # cannot satisfy it.
+  # shellcheck disable=SC2086 # deliberate word-splitting of the --set list
+  if ! helm_render="$(helm template t ./helm -f my-values.yaml -s "templates/${svc}.yaml" ${helm_extra_set:-} 2>&1)"; then
+    echo "::error::${svc} renders nothing from the default values — its critical env vars cannot reach a default install. helm said: $(head -1 <<<"$helm_render")"
+    fail=1
+    return
+  fi
 
   local v miss
   for v in "${vars[@]}"; do
@@ -106,8 +131,37 @@ check_service optimizer ci/critical-optimizer-env.txt \
 # endpoint-control (RFC 0014) is in the optimizer's failure class — optional
 # vars, silent degradation (in-memory store, 503 admin plane) — and does not
 # run in attach mode, so its contract is checked against the full-stack
-# compose alone.
+# compose alone. Rendered with an Ingress because that is the shape its public
+# URL is contracted for (see the render comment in check_service).
+helm_extra_set="--set ingress.enabled=true"
 check_service endpoint-control ci/critical-endpoint-control-env.txt \
   docker-compose.yml
+helm_extra_set=""
+
+# The negative half of the public-URL contract: with NO edge routing the
+# agent-plane paths (the chart default, and the shape the AKS/GKE one-click
+# scripts install — LoadBalancer Services, ingress off, a placeholder host),
+# the chart must emit NO public URL at all. A URL derived from `host` there is
+# worse than none: minting succeeds and writes an unreachable origin into every
+# installer and MDM profile, which only surfaces on the laptop that can't
+# enrol.
+#
+# Renders the WHOLE chart, not `-s templates/endpoint-control.yaml`. With the
+# component disabled that template produces nothing, and helm treats a selector
+# matching no output as `Error: could not find template …` — which greps clean
+# and would pass this assertion for the wrong reason, including if someone later
+# renames the file. A whole-chart render also proves no OTHER template emits the
+# var. Assert the Deployment really rendered first, so an empty render can never
+# masquerade as a pass.
+unrouted_render="$(helm template t ./helm -f my-values.yaml)"
+if ! grep -q 'app.kubernetes.io/component: endpoint-control' <<<"$unrouted_render"; then
+  echo "::error::endpoint-control did not render at all in the default shape — this assertion would pass vacuously; fix the check"
+  fail=1
+elif grep -q 'ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL' <<<"$unrouted_render"; then
+  echo "::error::endpoint-control got a public URL with no Ingress/HTTPRoute routing the agent plane — it would be an origin no agent can reach"
+  fail=1
+else
+  echo "OK: endpoint-control emits no public URL until an edge routes the agent plane."
+fi
 
 exit "$fail"

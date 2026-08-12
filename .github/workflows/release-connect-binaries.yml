@@ -47,6 +47,11 @@ on:
         required: false
         type: boolean
         default: false
+      staging:
+        description: 'Staging release: publish the SAME signed binaries under a connect-staging-v<version> pre-release tag, so a tester can fetch a real build by URL without changing anything customers receive. Ignored when dry_run is set.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -606,9 +611,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
           REPO: ${{ github.repository }}
+          STAGING: ${{ inputs.staging }}
         run: |
           set -euo pipefail
-          TAG="connect-v${VERSION}"
+          # A staging release is the SAME signed, notarized, checksummed asset
+          # set — only where it lands differs. Separate tag, and never `latest`.
+          #
+          # `--latest=false` IS THE WHOLE SAFETY PROPERTY, and it is the same
+          # hazard the fleetd lane documents: `connect.sh`, `connect.ps1` and
+          # the self-updater all fetch from `releases/latest/download`, and
+          # GitHub hands "latest" to whichever release published most recently.
+          # Without it, publishing a staging build would silently become the
+          # binary every developer and every fleet machine downloads — a
+          # staging lane that ships to production is worse than no staging lane.
+          if [ "$STAGING" = "true" ]; then
+            TAG="connect-staging-v${VERSION}"
+          else
+            TAG="connect-v${VERSION}"
+          fi
           # Notes go through a file rather than an inline --notes string: the
           # verification section is multi-line. Static prose lives in QUOTED
           # heredocs (nothing expands, so no shell metacharacter in the markdown
@@ -646,10 +666,30 @@ jobs:
           cat "$NOTES"
           # Idempotent: replace an existing release for this version.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" \
-            --title "anyray-connect ${VERSION} (binaries)" \
-            --notes-file "$NOTES" \
-            assets/*
+          if [ "$STAGING" = "true" ]; then
+            gh release create "$TAG" \
+              --title "anyray-connect ${VERSION} (staging binaries)" \
+              --notes "Staging build of anyray-connect ${VERSION}, for testing before a customer-facing release. Same signing and checksums as a real release; deliberately NOT \`latest\`, so \`connect.sh\`, \`connect.ps1\` and the self-updater are unaffected and no customer receives this build. Fetch a binary by its explicit tag URL, never through \`releases/latest/download\`." \
+              --latest=false \
+              --prerelease \
+              assets/*
+            # Say it out loud in the log: a human reading a green run needs to
+            # see that `latest` did not move.
+            echo "Published STAGING release $TAG (pre-release, not latest)."
+            gh release view --json tagName,isLatest,isPrerelease \
+              --jq '"verify: tag=\(.tagName) isLatest=\(.isLatest) isPrerelease=\(.isPrerelease)"' "$TAG"
+            # Fail rather than leave a staging build masquerading as the real
+            # one. `--latest=false` is the guard; this proves it took effect.
+            if [ "$(gh release view "$TAG" --json isLatest --jq .isLatest)" != "false" ]; then
+              echo "::error::staging release $TAG became 'latest' — connect.sh and the self-updater would serve it to every customer"
+              exit 1
+            fi
+          else
+            gh release create "$TAG" \
+              --title "anyray-connect ${VERSION} (binaries)" \
+              --notes-file "$NOTES" \
+              assets/*
+          fi
 
       # dry_run: prove the whole build->sign->notarize->fleet path without a
       # customer-facing release. The signed, checksummed asset set is inspectable.

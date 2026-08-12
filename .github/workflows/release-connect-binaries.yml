@@ -302,46 +302,117 @@ jobs:
           aws-region: eu-central-1
       - run: ./scripts/mac-fleet.sh down
 
-  # Authenticode-signs the windows binary when the cert secrets are
-  # configured; otherwise it passes through byte-identical.
+  # Authenticode-signs the windows binary through Azure Artifact Signing when
+  # the account is configured; otherwise it passes through byte-identical.
+  #
+  # WHY NOT A .pfx, WHICH THIS JOB USED TO EXPECT. Since June 2023 the
+  # CA/Browser Forum requires code-signing private keys to live on FIPS 140-2
+  # Level 2 hardware, so no CA issues an exportable PFX for an OV/EV
+  # code-signing certificate any more. The old `signtool /f cert.pfx /p pass`
+  # shape could therefore never have been fed by a certificate bought today —
+  # the job was not merely dormant, it was written against a model that no
+  # longer exists. A hardware token is equally unusable here: there is no USB
+  # port on a cloud runner. That leaves a cloud-held key, and Azure Artifact
+  # Signing (formerly Trusted Signing) is the cheapest: $9.99/mo Basic covers
+  # 5,000 signatures against a release cadence of a few per week.
+  #
+  # Apple's lane keeps using a p12 (`APPLE_SIGNING_CERT_P12`) because Apple
+  # imposes no equivalent hardware requirement. The two are not inconsistent.
+  #
+  # STILL INERT UNTIL CONFIGURED, same posture as before: with no
+  # `AZURE_SIGNING_ENDPOINT` the sign step skips and the unsigned binary passes
+  # through, so this cannot break a release before the account exists.
+  #
+  # SETUP, and the order matters. Identity validation sources the certificate's
+  # subject from the AZURE BILLING ACCOUNT's legal name and address, and the
+  # billing account TYPE fixes what can be validated: an Individual account can
+  # only ever produce an individual certificate. Onboarding under a personal
+  # Microsoft account therefore yields a certificate that names a person rather
+  # than the company, and correcting it means redoing validation. Confirm the
+  # billing account's legal name matches the entity that should appear as the
+  # publisher BEFORE starting. Validation is portal-only; there is no CLI.
   sign-windows:
     needs: build
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      # Federated (OIDC) auth to Azure, so there is no client secret to store or
+      # rotate. `azure/login` exchanges this token; the signing action then
+      # reuses that context.
+      id-token: write
     env:
-      # Same pattern as sign-macos: secrets into env, gate on `env.X != ''`.
-      WINDOWS_SIGNING_CERT_PFX: ${{ secrets.WINDOWS_SIGNING_CERT_PFX }}
-      WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+      # Non-secret coordinates: which signing account and certificate profile to
+      # use. Gating on the endpoint keeps the "unset means skip" posture the
+      # macOS lane already uses.
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+      AZURE_SIGNING_CERT_PROFILE: ${{ vars.AZURE_SIGNING_CERT_PROFILE }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: binaries-unsigned
           path: out
 
-      - name: Sign the windows binary (Authenticode)
-        if: env.WINDOWS_SIGNING_CERT_PFX != ''
+      # signtool ships with the Windows SDK, and the CodeBuild windows-base
+      # image does NOT carry it — the previous version of this job only
+      # suspected that in a comment. Installing just the signing feature keeps
+      # it to a couple of minutes rather than pulling the whole SDK.
+      - name: Install the Windows SDK signing tools
+        if: env.AZURE_SIGNING_ENDPOINT != ''
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $pfx = Join-Path $env:RUNNER_TEMP 'signing-cert.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT_PFX))
-          # signtool ships with the Windows SDK. NOTE: on the CodeBuild
-          # windows-base image the SDK may be absent — when the Windows cert is
-          # provisioned and this step first goes live, it may need a pinned
-          # SDK/choco install step above. Inert until then (secret-gated).
-          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
-            Where-Object { $_.FullName -like '*\x64\*' } |
-            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
-          if (-not $signtool) { Write-Error 'signtool.exe not found on the runner' }
-          & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
-            /f $pfx /p $env:WINDOWS_SIGNING_CERT_PASSWORD out\anyray-connect-windows-x64.exe
-          if ($LASTEXITCODE -ne 0) { Write-Error "signtool sign failed ($LASTEXITCODE)" }
-          & $signtool verify /pa out\anyray-connect-windows-x64.exe
-          if ($LASTEXITCODE -ne 0) { Write-Error "signtool verify failed ($LASTEXITCODE)" }
+          if (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue) {
+            Write-Host 'signtool already present; skipping SDK install'
+            exit 0
+          }
+          $iso = Join-Path $env:RUNNER_TEMP 'winsdksetup.exe'
+          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/?linkid=2320455' -OutFile $iso
+          # /features OptionId.SigningTools — the signing subset only.
+          $p = Start-Process $iso -Wait -PassThru -ArgumentList '/quiet','/norestart','/features','OptionId.SigningTools'
+          if ($p.ExitCode -ne 0) { Write-Error "Windows SDK install failed ($($p.ExitCode))" }
 
-      - name: Remove the decoded certificate
-        if: always()
+      - name: Authenticate to Azure (OIDC)
+        if: env.AZURE_SIGNING_ENDPOINT != ''
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign the windows binary (Azure Artifact Signing)
+        if: env.AZURE_SIGNING_ENDPOINT != ''
+        uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ env.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ env.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_SIGNING_CERT_PROFILE }}
+          files: ${{ github.workspace }}\out\anyray-connect-windows-x64.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Verify OUT OF BAND rather than trusting the action's exit code. A
+      # release that reports success while shipping an unsigned binary is the
+      # failure mode this whole lane exists to prevent, and it is exactly what
+      # the old secret-gated step did for months.
+      - name: Verify the signature
+        if: env.AZURE_SIGNING_ENDPOINT != ''
         shell: pwsh
-        run: Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'signing-cert.pfx')
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'out\anyray-connect-windows-x64.exe'
+          $sig = Get-AuthenticodeSignature $exe
+          Write-Host "status=$($sig.Status) signer=$($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') {
+            Write-Error "Authenticode verification failed: $($sig.Status) $($sig.StatusMessage)"
+          }
+          if (-not $sig.TimeStamperCertificate) {
+            Write-Error 'binary is signed but NOT timestamped — the signature would expire with the certificate'
+          }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

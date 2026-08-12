@@ -11,9 +11,55 @@
 set -eu
 
 REPO="anyrayHQ/install"
-BASE="https://github.com/${REPO}/releases/latest/download"
 
 err() { echo "anyray-connect: $*" >&2; exit 1; }
+
+# Which release to install from. Unset — the only thing a customer ever hits —
+# is `latest`, byte-for-byte the behaviour this script has always had.
+#
+# $ANYRAY_CONNECT_TAG pins a specific release instead, which is what makes a
+# staging build reachable through the SAME command a developer really runs:
+#
+#   export ANYRAY_CONNECT_TAG=connect-staging-v0.11.135
+#   curl -fsSL https://<control-plane>/i/<tenant> | sh
+#
+# Staging releases are deliberately published with --latest=false, so `latest`
+# can never resolve to one; without this there is no way to exercise the
+# curl|sh path against a pre-release build at all.
+#
+# THIS SELECTS A RELEASE, IT NEVER RELAXES VERIFICATION. `REPO` stays hardcoded
+# — the override cannot redirect the download to another host — and the
+# checksum block below is untouched, still fetching SHA256SUMS from whichever
+# release was selected and still failing closed. An operator who can set this
+# variable can already run any command in the shell they are typing into, so it
+# grants no capability they lack; what it must never become is a way to skip the
+# hash check, because the installed binary registers a Claude Code PostToolUse
+# hook that runs on every subsequent tool call.
+#
+# The value is validated rather than interpolated as given: it lands in a URL
+# path, so `../../` in an unchecked tag would walk out of /releases/download and
+# fetch an attacker-chosen object from the same host.
+#
+# Three checks, and the charset one is why a glob alone is not enough: `*` in a
+# shell pattern matches `/` as happily as anything else, so the obvious
+# `connect-v[0-9]*.[0-9]*.[0-9]*` accepts `connect-v1.2.3/../../evil` — the
+# trailing `*` swallows the traversal. Deleting every legal character and
+# requiring an empty remainder cannot be fooled that way.
+if [ -n "${ANYRAY_CONNECT_TAG:-}" ]; then
+  _tag_bad_shape=1
+  case "$ANYRAY_CONNECT_TAG" in
+    connect-v[0-9]*|connect-staging-v[0-9]*) _tag_bad_shape=0 ;;
+  esac
+  # No traversal segment, and nothing outside [a-z0-9.-] (which excludes `/`).
+  case "$ANYRAY_CONNECT_TAG" in *..*) _tag_bad_shape=1 ;; esac
+  [ -z "$(printf '%s' "$ANYRAY_CONNECT_TAG" | tr -d 'a-z0-9.-')" ] || _tag_bad_shape=1
+  [ "$_tag_bad_shape" = 0 ] \
+    || err "invalid ANYRAY_CONNECT_TAG '${ANYRAY_CONNECT_TAG}' — expected connect-v<x.y.z> or connect-staging-v<x.y.z>"
+  BASE="https://github.com/${REPO}/releases/download/${ANYRAY_CONNECT_TAG}"
+  echo "anyray-connect: pinned to release ${ANYRAY_CONNECT_TAG} (not latest)" >&2
+else
+  BASE="https://github.com/${REPO}/releases/latest/download"
+fi
 
 command -v curl >/dev/null 2>&1 || err "curl is required"
 

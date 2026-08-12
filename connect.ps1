@@ -17,7 +17,26 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repo  = 'anyrayHQ/install'
-$base  = "https://github.com/$repo/releases/latest/download"
+# Which release to install from. Unset — every customer — is `latest`, exactly
+# as before. $env:ANYRAY_CONNECT_TAG pins a specific release so a staging build
+# (published --latest=false, so `latest` can never reach it) is testable through
+# the same command a developer actually runs. See connect.sh for the full
+# rationale; the two must stay in step.
+#
+# Selects a release, never relaxes verification: $repo is fixed, so the download
+# cannot be pointed at another host, and the checksum block below is unchanged.
+# The value is regex-anchored because it lands in a URL path — an unvalidated
+# tag containing `../` would walk out of /releases/download.
+$tag = $env:ANYRAY_CONNECT_TAG
+if ($tag) {
+  if ($tag -notmatch '^connect(-staging)?-v[0-9]+\.[0-9]+\.[0-9]+$') {
+    Write-Error "invalid ANYRAY_CONNECT_TAG '$tag' - expected connect-v<x.y.z> or connect-staging-v<x.y.z>"
+  }
+  $base = "https://github.com/$repo/releases/download/$tag"
+  Write-Host "anyray-connect: pinned to release $tag (not latest)"
+} else {
+  $base = "https://github.com/$repo/releases/latest/download"
+}
 $asset = 'anyray-connect-windows-x64.exe'  # Bun compiles a single x64 Windows target
 
 # Args: prefer real script args; fall back to $env:ANYRAY_CONNECT for the `| iex` form.

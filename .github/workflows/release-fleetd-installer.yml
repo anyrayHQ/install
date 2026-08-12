@@ -171,7 +171,21 @@ jobs:
           # other, so --use-system-configuration is the only way to omit them.
           # --enable-scripts is baked here and NOT profile-supplied (header).
           fleetctl package --type=pkg --enable-scripts --use-system-configuration
-          mv fleet-osquery.pkg "anyray-fleetd-${FLEETCTL_VERSION}.pkg"
+          # `fleetd.pkg`, NOT a versioned name. THIS IS A CROSS-REPO CONTRACT:
+          # connect asks for exactly `fleetd.<kind>` (monorepo
+          # connect/src/commands/endpoint.ts, `endpointAssetName`) and resolves
+          # it through SHA256SUMS with an EXACT string match
+          # (`parseSha256Sums`) — no globbing, no version inference. A
+          # versioned filename here does not degrade, it 404s: the sums lookup
+          # misses, `stageEndpointPackage` returns undefined, and the install
+          # exits `release-unavailable` on every macOS seat.
+          #
+          # The version already lives in the TAG this release is published
+          # under, which is how connect pins it, so the filename must not carry
+          # it as well. Unversioned on purpose: every shipped connect binary —
+          # including ones already on developer machines — looks for this exact
+          # string, so it can never be renamed in step with a version bump.
+          mv fleet-osquery.pkg fleetd.pkg
 
           # Linux: --use-system-configuration does not exist here, and fleetctl
           # refuses --fleet-url without --enroll-secret, so bake the real
@@ -242,7 +256,7 @@ jobs:
               exit 1
             fi
           done
-          pkgutil --expand-full "anyray-fleetd-${FLEETCTL_VERSION}.pkg" expanded
+          pkgutil --expand-full fleetd.pkg expanded
           plist='expanded/base.pkg/Payload/Library/LaunchDaemons/com.fleetdm.orbit.plist'
           if [ ! -f "$plist" ]; then
             echo "::error::orbit LaunchDaemon plist not found at the expected path — package layout changed, re-verify the gate below"
@@ -298,16 +312,16 @@ jobs:
           echo "using signing identity $IDENTITY"
           cd out
           productsign --sign "$IDENTITY" \
-            "anyray-fleetd-${FLEETCTL_VERSION}.pkg" "anyray-fleetd-${FLEETCTL_VERSION}-signed.pkg"
-          mv "anyray-fleetd-${FLEETCTL_VERSION}-signed.pkg" "anyray-fleetd-${FLEETCTL_VERSION}.pkg"
-          pkgutil --check-signature "anyray-fleetd-${FLEETCTL_VERSION}.pkg"
+            fleetd.pkg fleetd-signed.pkg
+          mv fleetd-signed.pkg fleetd.pkg
+          pkgutil --check-signature fleetd.pkg
 
       - name: Notarize and staple
         run: |
           set -euo pipefail
           printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/notary-key.p8"
           cd out
-          pkg="anyray-fleetd-${FLEETCTL_VERSION}.pkg"
+          pkg=fleetd.pkg
           status="$(xcrun notarytool submit "$pkg" \
             --key "$RUNNER_TEMP/notary-key.p8" \
             --key-id "$APPLE_NOTARY_KEY_ID" \
@@ -336,7 +350,7 @@ jobs:
         with:
           name: fleetd-installer
           path: |
-            out/anyray-fleetd-*.pkg
+            out/fleetd.pkg
             out/fleetd.deb
             out/fleetd.rpm
           if-no-files-found: error
@@ -493,11 +507,38 @@ jobs:
           name: fleetd-installer-windows
           path: assets
 
+      # The asset names ARE the contract with connect, and nothing else checks
+      # them. connect resolves `fleetd.<kind>` out of SHA256SUMS by exact string
+      # match, so a rename here does not degrade — it 404s that platform's
+      # install with `release-unavailable`, silently, on every seat. The
+      # published v4.89.2 release was hand-built and shipped `fleetd.pkg` ALONE:
+      # no .deb, .rpm or .msi, so Linux and Windows could never install at all,
+      # and nothing surfaced it. Assert all four exist before publishing.
+      - name: Gate — every asset connect asks for must be present
+        run: |
+          set -euo pipefail
+          missing=''
+          for a in fleetd.pkg fleetd.deb fleetd.rpm fleetd.msi; do
+            [ -f "assets/$a" ] || missing="$missing $a"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing asset(s):$missing — connect resolves these names exactly (endpointAssetName in connect/src/commands/endpoint.ts); publishing without one makes that platform's \`endpoint install\` report release-unavailable"
+            exit 1
+          fi
+          echo 'all four platform assets present'
+
       - name: Generate SHA256SUMS
         run: |
           set -euo pipefail
           ( cd assets && sha256sum -- * > SHA256SUMS )
           cat assets/SHA256SUMS
+          # Belt and braces on the contract above: prove each name survived into
+          # the sums file connect actually parses, in the `<sha>  <name>` shape
+          # `parseSha256Sums` requires.
+          for a in fleetd.pkg fleetd.deb fleetd.rpm fleetd.msi; do
+            grep -qE "^[0-9a-f]{64}  $a\$" assets/SHA256SUMS \
+              || { echo "::error::$a is absent or malformed in SHA256SUMS"; exit 1; }
+          done
 
       - name: Publish the release
         env:

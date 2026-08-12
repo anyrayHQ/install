@@ -676,12 +676,30 @@ jobs:
             # Say it out loud in the log: a human reading a green run needs to
             # see that `latest` did not move.
             echo "Published STAGING release $TAG (pre-release, not latest)."
-            gh release view --json tagName,isLatest,isPrerelease \
-              --jq '"verify: tag=\(.tagName) isLatest=\(.isLatest) isPrerelease=\(.isPrerelease)"' "$TAG"
-            # Fail rather than leave a staging build masquerading as the real
-            # one. `--latest=false` is the guard; this proves it took effect.
-            if [ "$(gh release view "$TAG" --json isLatest --jq .isLatest)" != "false" ]; then
+            # ASK THE API WHAT `latest` RESOLVES TO — do not ask `gh release
+            # view` for an `isLatest` field. That field does not exist on every
+            # gh version (the CLI answers "Unknown JSON field" and exits 1), so
+            # the first cut FAILED a run whose release was in fact published
+            # correctly: `--latest=false` had taken effect, the release was
+            # prerelease, and the job still went red. A guard that cannot tell
+            # "the thing I feared happened" from "I asked the wrong question"
+            # is worse than no guard, because the next person learns to ignore
+            # it.
+            #
+            # `/releases/latest` is also the more faithful test. It is the exact
+            # resolution `releases/latest/download` performs — the URL
+            # connect.sh, connect.ps1 and the self-updater actually fetch — so
+            # this asserts the property we care about rather than a flag we hope
+            # implies it.
+            actual_latest="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name 2>/dev/null || echo unknown)"
+            prerelease="$(gh api "repos/${REPO}/releases/tags/${TAG}" --jq .prerelease 2>/dev/null || echo unknown)"
+            echo "verify: tag=$TAG prerelease=$prerelease · releases/latest -> $actual_latest"
+            if [ "$actual_latest" = "$TAG" ]; then
               echo "::error::staging release $TAG became 'latest' — connect.sh and the self-updater would serve it to every customer"
+              exit 1
+            fi
+            if [ "$prerelease" != "true" ]; then
+              echo "::error::staging release $TAG is not marked pre-release (got '$prerelease')"
               exit 1
             fi
           else

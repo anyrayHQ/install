@@ -40,21 +40,41 @@ err() { echo "anyray-connect: $*" >&2; exit 1; }
 # path, so `../../` in an unchecked tag would walk out of /releases/download and
 # fetch an attacker-chosen object from the same host.
 #
-# Three checks, and the charset one is why a glob alone is not enough: `*` in a
-# shell pattern matches `/` as happily as anything else, so the obvious
-# `connect-v[0-9]*.[0-9]*.[0-9]*` accepts `connect-v1.2.3/../../evil` — the
-# trailing `*` swallows the traversal. Deleting every legal character and
-# requiring an empty remainder cannot be fooled that way.
+# PARSE THE SHAPE; DO NOT PATTERN-MATCH IT. A glob cannot count, so every
+# approximation leaks. `connect-v[0-9]*.[0-9]*.[0-9]*` accepts
+# `connect-v1.2.3/../../evil`, because `*` matches `/` and the trailing one
+# swallows the traversal. Tightening that to `connect-v[0-9]*` plus a character
+# filter closes the traversal but still accepts `connect-v1`, `connect-v1foo`
+# and `connect-v1.2.3.4` — the leading `[0-9]` only constrains the FIRST
+# character. So strip the one legal prefix, require exactly two dots, and
+# require every component to be non-empty digits.
+_tag_bad() {
+  err "invalid ANYRAY_CONNECT_TAG '${ANYRAY_CONNECT_TAG}' — expected connect-v<x.y.z> or connect-staging-v<x.y.z>"
+}
+_digits_only() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac; }
 if [ -n "${ANYRAY_CONNECT_TAG:-}" ]; then
-  _tag_bad_shape=1
   case "$ANYRAY_CONNECT_TAG" in
-    connect-v[0-9]*|connect-staging-v[0-9]*) _tag_bad_shape=0 ;;
+    connect-staging-v*) _ver="${ANYRAY_CONNECT_TAG#connect-staging-v}" ;;
+    connect-v*)         _ver="${ANYRAY_CONNECT_TAG#connect-v}" ;;
+    *) _tag_bad ;;
   esac
-  # No traversal segment, and nothing outside [a-z0-9.-] (which excludes `/`).
-  case "$ANYRAY_CONNECT_TAG" in *..*) _tag_bad_shape=1 ;; esac
-  [ -z "$(printf '%s' "$ANYRAY_CONNECT_TAG" | tr -d 'a-z0-9.-')" ] || _tag_bad_shape=1
-  [ "$_tag_bad_shape" = 0 ] \
-    || err "invalid ANYRAY_CONNECT_TAG '${ANYRAY_CONNECT_TAG}' — expected connect-v<x.y.z> or connect-staging-v<x.y.z>"
+  # Exactly two dots: `*.*.*` needs at least two, excluding `*.*.*.*` caps it.
+  case "$_ver" in
+    *.*.*.*) _tag_bad ;;
+    *.*.*) ;;
+    *) _tag_bad ;;
+  esac
+  _major="${_ver%%.*}"; _tail="${_ver#*.}"
+  _minor="${_tail%%.*}"; _patch="${_tail#*.}"
+  for _part in "$_major" "$_minor" "$_patch"; do
+    _digits_only "$_part" || _tag_bad
+  done
+  # Belt and braces. All-digit components make `..`, `/` and shell
+  # metacharacters structurally impossible above, so this is redundant TODAY —
+  # kept because it is two lines, this string is pasted into a URL that a
+  # `curl | sh` then executes from, and the check must survive a future edit
+  # that loosens the parse without thinking about traversal.
+  case "$ANYRAY_CONNECT_TAG" in *..*|*/*) _tag_bad ;; esac
   BASE="https://github.com/${REPO}/releases/download/${ANYRAY_CONNECT_TAG}"
   echo "anyray-connect: pinned to release ${ANYRAY_CONNECT_TAG} (not latest)" >&2
 else

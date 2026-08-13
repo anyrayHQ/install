@@ -22,7 +22,7 @@ release carries verifiable provenance whether or not any signing secret exists.
 Three invariants the workflow encodes — keep them if you touch it:
 
 - **`SHA256SUMS` is generated in the `release` job, AFTER the signing jobs.**
-  `codesign` and `signtool` rewrite the binaries, so a checksum taken at
+  `codesign` and `jsign` rewrite the binaries, so a checksum taken at
   compile time would not match the released bytes. `connect-update.json` (the
   mandatory-release marker) is still written after `SHA256SUMS` and never
   appears in it.
@@ -50,18 +50,39 @@ Three invariants the workflow encodes — keep them if you touch it:
 | `APPLE_NOTARY_ISSUER_ID` | Issuer ID (UUID) shown on the same page | Same page as the key |
 | `APPLE_NOTARY_KEY` | Base64 of the `.p8` private key (`base64 -i AuthKey_XXXX.p8`) | Downloadable **once** at key creation — store the original safely |
 
-### Windows — Authenticode
+### Windows — Authenticode (AWS KMS + jsign)
 
-| Secret | What it is | Where to get it |
-| --- | --- | --- |
-| `WINDOWS_SIGNING_CERT_PFX` | Base64 of a code-signing certificate + private key (`.pfx`/`.p12`) | An Authenticode CA (DigiCert, Sectigo, SSL.com, …), **OV** code-signing certificate exported as `.pfx`, then `base64 -w0 cert.pfx` |
-| `WINDOWS_SIGNING_CERT_PASSWORD` | The `.pfx` password | Chosen at export time |
+| Setting | Kind | What it is | Where to get it |
+| --- | --- | --- | --- |
+| `AWS_SIGNING_ROLE_ARN` | **variable** | GitHub-OIDC role the job assumes; also the on/off switch for the whole lane | IAM, federated to this repo; needs `kms:Sign`, `kms:GetPublicKey`, `kms:DescribeKey` on the key below |
+| `AWS_SIGNING_KMS_KEY_ID` | **variable** | KMS key id or alias holding the signing key | `aws kms create-key --key-spec RSA_3072 --key-usage SIGN_VERIFY` (eu-central-1) |
+| `WINDOWS_SIGNING_CERT_CHAIN` | **secret** | Full PEM chain from the CA, leaf first | Issued against a CSR generated from the KMS key |
 
-> Reality check: since mid-2023 **EV** Authenticode keys must live on an HSM or
-> hardware token and cannot be exported as a `.pfx`. This lane therefore takes
-> an OV certificate. If EV (instant SmartScreen reputation) is ever required,
-> the step needs reworking against a cloud signer (Azure Trusted Signing /
-> DigiCert KeyLocker) instead of `signtool /f`.
+> **Why not a `.pfx`.** Since June 2023 the CA/Browser Forum requires code-signing
+> private keys — **OV and EV alike**, not just EV — to live on FIPS 140-2 Level 2
+> hardware, so no CA issues an exportable `.pfx` any more. The old
+> `signtool /f cert.pfx /p pass` shape could not be fed by a certificate bought
+> today; it was written against a model that no longer exists.
+>
+> **Why AWS.** Standard KMS has met that hardware bar since May 2023, so no
+> CloudHSM is needed, and this account already federates to GitHub over OIDC.
+> Note **AWS Signer is not the service for this** — it covers Lambda, IoT/FreeRTOS
+> and OCI artifacts, has no Windows PE path, and is not in the Microsoft Trusted
+> Root Program. KMS holds the key; the trust comes from the CA certificate.
+>
+> **KMS holds only the private key**, so the certificate is bought separately
+> (~$200-600/yr) from a CA in the Microsoft Trusted Root Program. Azure Trusted
+> Signing bundles the certificate for ~$120/yr because Microsoft is itself the CA;
+> that was the trade-off, decided in favour of not onboarding a second cloud.
+> Organization identity validation is required on either path.
+>
+> **EV vs OV** changes only SmartScreen reputation timing — EV earns it
+> immediately, OV accrues it. Both work with this lane; nothing in the workflow
+> changes between them.
+>
+> Confirm the legal entity name on the certificate order is the one that should
+> appear as the publisher **before** validation starts — correcting it afterwards
+> means redoing validation.
 
 ### Linux — GPG-signed `.deb`/`.rpm` **and `SHA256SUMS`**
 
@@ -133,14 +154,19 @@ mandatory* step.
 ## CI runners
 
 The release workflow runs on **self-hosted AWS CodeBuild runners** (org GitHub billing
-blocks GitHub-hosted runners). Two persistent Linux/Windows runner projects plus an
+blocks GitHub-hosted runners). One persistent Linux runner project plus an
 **on-demand macOS fleet** created per release:
 
 | Job | Runner | CodeBuild project (eu-central-1) |
 | --- | --- | --- |
-| build, provision-mac, package-linux, release, teardown-mac | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`) | `anyray-install-runner` |
-| sign-windows | Windows Server 2022 | `anyray-install-runner-win` |
+| build, provision-mac, sign-windows, package-linux, release, teardown-mac | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`) | `anyray-install-runner` |
 | sign-macos | **on-demand** macOS (MAC_ARM, `mac2-m2.metal`) | `anyray-install-runner-mac` (ephemeral) |
+
+**`sign-windows` no longer needs Windows.** jsign is a pure-Java Authenticode
+implementation, so signing moved to the Linux runner — no Windows SDK download,
+no `signtool`. **Keep the `anyray-install-runner-win` project**: this workflow no
+longer uses it, but `release-fleetd-installer.yml`'s `build-windows` still does
+(fleetctl shells out to WiX `heat`, which needs a real Windows host).
 
 **Why macOS is on-demand.** Bun-compiled binaries can only be Developer-ID-signed by Apple's
 own `codesign` (the Linux signers rcodesign and quill both mishandle Bun's x64 Mach-O — proven

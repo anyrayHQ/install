@@ -455,6 +455,15 @@ jobs:
           work="$(mktemp -d)"
           cd "$work"
 
+          # The GitHub-hosted image exports cert env vars (SSL_CERT_FILE /
+          # SSL_CERT_DIR, set for the preinstalled toolchains). Bun honors those
+          # regardless of --use-system-ca, so leaving them set makes the UNFLAGGED
+          # binary trust the system store too — which is precisely what the
+          # negative control below caught on the first run of this job. Clearing
+          # them is what keeps the comparison attributable to the flag.
+          unset SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE
+          echo "cert env cleared: SSL_CERT_FILE='${SSL_CERT_FILE-unset}' SSL_CERT_DIR='${SSL_CERT_DIR-unset}'"
+
           # Throwaway CA + localhost leaf. Never leaves the runner; 1-day validity.
           openssl req -x509 -newkey rsa:2048 -keyout ca.key -out ca.pem -days 1 \
             -nodes -subj "/CN=Anyray CI Synthetic Root" 2>/dev/null
@@ -502,8 +511,12 @@ jobs:
 
           [ "$(./probe-sys)" = TRUSTED ] ||
             { echo "::error::--use-system-ca did NOT pick up a root installed in the system store. The released binaries would fail SELF_SIGNED_CERT_IN_CHAIN behind a TLS-inspecting proxy. Check the flag in release-connect-binaries.yml and the pinned Bun version."; exit 1; }
-          [ "$(./probe-plain)" = REJECTED ] ||
-            { echo "::error::unflagged binary also trusted it — this guard no longer proves anything"; exit 1; }
+          [ "$(./probe-plain)" = REJECTED ] || {
+            echo "::error::unflagged binary also trusted it — this guard no longer proves anything"
+            echo "Something outside the flag is feeding the binary extra roots. Cert-related env:"
+            env | grep -iE 'ssl|cert|ca_bundle' || echo "  (none set)"
+            exit 1
+          }
 
           echo "system-CA trust verified: flagged=TRUSTED, unflagged=REJECTED"
 

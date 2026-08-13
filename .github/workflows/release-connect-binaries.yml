@@ -102,8 +102,29 @@ jobs:
           set -euo pipefail
           mkdir -p out
           # Bun target -> output asset name. Windows gets a .exe.
+          #
+          # --compile-exec-argv="--use-system-ca": trust the CA roots the MACHINE
+          # trusts, not only Bun's bundled Mozilla list. Behind a TLS-inspecting
+          # corporate proxy the MDM installs a root into the system store; curl
+          # reads that store and the binary did not, so `curl … | sh` downloaded
+          # fine and the very next step failed `SELF_SIGNED_CERT_IN_CHAIN`
+          # against app.anyray.ai. The remedy we printed (NODE_EXTRA_CA_CERTS)
+          # fixes one shell but NOT the LaunchAgent daemon or the drift watcher,
+          # which never inherit it — so those kept failing silently.
+          #
+          # It ADDS to the bundled roots rather than replacing them (verified: a
+          # system store holding ONLY a private root still verifies app.anyray.ai,
+          # registry.npmjs.org and api.github.com), so public TLS is unaffected.
+          #
+          # A compiled binary cannot take this from argv or BUN_OPTIONS — both are
+          # ignored — so it has to be baked in at build time. Bun does NOT validate
+          # the string: a typo compiles and runs, silently unflagged. The guard a
+          # typo cannot survive is connect/src/binarySmoke.test.ts in the monorepo
+          # ("standalone binary trusts the machine's CA store"), which checks it
+          # against a real system trust store. Keep this flag and that test in step.
           build() {
-            bun build --compile --minify --target="$1" package/dist/index.js --outfile "out/$2"
+            bun build --compile --minify --compile-exec-argv="--use-system-ca" \
+              --target="$1" package/dist/index.js --outfile "out/$2"
           }
           build bun-darwin-arm64  anyray-connect-darwin-arm64
           build bun-darwin-x64    anyray-connect-darwin-x64

@@ -422,6 +422,121 @@ jobs:
           bash -c 'for f in "$@"; do bash -n "$f" || exit 1; done' _ "$@"
           shellcheck -S error "$@"
 
+  connect-binary-system-ca:
+    # The release binaries compile with `--compile-exec-argv="--use-system-ca"`
+    # (release-connect-binaries.yml) so they trust the roots the MACHINE trusts.
+    # Behind a TLS-inspecting corporate proxy the MDM installs a root into the
+    # system store; without the flag `curl … | sh` downloads fine (curl reads that
+    # store) and the very next step dies SELF_SIGNED_CERT_IN_CHAIN against
+    # app.anyray.ai — and NODE_EXTRA_CA_CERTS, the remedy we print, never reaches
+    # the LaunchAgent daemon or the drift watcher.
+    #
+    # This is the guard that a dropped or typo'd flag cannot survive. Bun does not
+    # validate an exec-argv string: `--totally-not-a-flag` compiles, runs, exits 0
+    # and even lands in process.execArgv, so nothing short of a REAL system trust
+    # store can tell a working flag from a silently-ignored one. Hence a job that
+    # mints a throwaway root, installs it, and proves the trust difference.
+    #
+    # WHICH install mode this uses, and why it is not `update-ca-certificates`:
+    # on Linux, Bun ALREADY reads OpenSSL's default CApath (the hashed symlinks in
+    # /etc/ssl/certs) with no flag at all, and `update-ca-certificates` writes
+    # exactly those symlinks. Installing that way makes the unflagged binary trust
+    # the root too — the first run of this job failed its own negative control on
+    # precisely that, and clearing SSL_CERT_FILE/SSL_CERT_DIR did not change it
+    # because no env var was involved. So the root goes in as the CA BUNDLE FILE
+    # only (/etc/ssl/certs/ca-certificates.crt, no hashed symlink), which is the
+    # mode the flag actually governs:
+    #
+    #   bundle file only  → unflagged REJECTED, flagged TRUSTED   ← discriminates
+    #   hashed symlink    → unflagged TRUSTED,  flagged TRUSTED   ← proves nothing
+    #
+    # Practical consequence worth knowing: on a Linux box whose corporate root was
+    # installed via update-ca-certificates, connect worked even before this flag.
+    # The flag is what covers macOS (keychain) and the bundle-file-only layouts.
+    #
+    # The two negative controls are the point — without them a green check here
+    # would be compatible with the flag doing nothing at all:
+    #   - before install, BOTH binaries must reject (the root is genuinely unknown)
+    #   - after install, the UNFLAGGED binary must still reject (so the pass is
+    #     attributable to the flag, not to an env var or a lax default)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # Keep in step with release-connect-binaries.yml — this proves the flag
+          # against the Bun version that actually compiles the released binaries.
+          bun-version: '1.3.5'
+      - name: compiled binary trusts a root installed in the system store
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cd "$work"
+
+          # An unflagged Bun honors SSL_CERT_FILE / NODE_EXTRA_CA_CERTS too, so
+          # clear them: the comparison below must be attributable to the flag
+          # alone, never to inherited env.
+          unset SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE
+
+          # Throwaway CA + localhost leaf. Never leaves the runner; 1-day validity.
+          openssl req -x509 -newkey rsa:2048 -keyout ca.key -out ca.pem -days 1 \
+            -nodes -subj "/CN=Anyray CI Synthetic Root" 2>/dev/null
+          openssl req -newkey rsa:2048 -keyout srv.key -out srv.csr -nodes \
+            -subj "/CN=localhost" 2>/dev/null
+          printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\n' > ext.cnf
+          openssl x509 -req -in srv.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+            -out srv.pem -days 1 -extfile ext.cnf 2>/dev/null
+
+          cat > srv.ts <<'EOF'
+          const s = Bun.serve({
+            port: 0,
+            tls: { cert: Bun.file('srv.pem'), key: Bun.file('srv.key') },
+            fetch: () => new Response('ok'),
+          });
+          await Bun.write('port.txt', String(s.port));
+          await Bun.sleep(120000);
+          EOF
+          cat > probe.ts <<'EOF'
+          const port = (await Bun.file('port.txt').text()).trim();
+          try {
+            const r = await fetch(`https://localhost:${port}/`);
+            console.log(r.status === 200 ? 'TRUSTED' : 'UNEXPECTED');
+          } catch {
+            console.log('REJECTED');
+          }
+          EOF
+
+          # Compiled exactly as the release job does, with and without the flag.
+          bun build --compile --minify probe.ts --outfile probe-plain >/dev/null
+          bun build --compile --minify --compile-exec-argv="--use-system-ca" \
+            probe.ts --outfile probe-sys >/dev/null
+
+          bun srv.ts &
+          for _ in $(seq 1 30); do [ -s port.txt ] && break; sleep 0.2; done
+          test -s port.txt
+
+          [ "$(./probe-plain)" = REJECTED ] ||
+            { echo "::error::baseline broken — unflagged binary trusted an unknown root"; exit 1; }
+          [ "$(./probe-sys)" = REJECTED ] ||
+            { echo "::error::baseline broken — flagged binary trusted the root before it was installed"; exit 1; }
+
+          # Append to the CA BUNDLE FILE only. Deliberately NOT
+          # update-ca-certificates: that also writes the hashed CApath symlink an
+          # unflagged Bun already reads, which would collapse the comparison (see
+          # the table in this job's header).
+          sudo cp /etc/ssl/certs/ca-certificates.crt ./bundle.bak
+          cat ./bundle.bak ca.pem | sudo tee /etc/ssl/certs/ca-certificates.crt >/dev/null
+
+          [ "$(./probe-sys)" = TRUSTED ] ||
+            { echo "::error::--use-system-ca did NOT pick up a root installed in the system store. The released binaries would fail SELF_SIGNED_CERT_IN_CHAIN behind a TLS-inspecting proxy. Check the flag in release-connect-binaries.yml and the pinned Bun version."; exit 1; }
+          [ "$(./probe-plain)" = REJECTED ] || {
+            echo "::error::unflagged binary also trusted it — this guard no longer proves anything"
+            echo "Something outside the flag is feeding the binary extra roots. Cert-related env:"
+            env | grep -iE 'ssl|cert|ca_bundle' || echo "  (none set)"
+            exit 1
+          }
+
+          echo "system-CA trust verified: flagged=TRUSTED, unflagged=REJECTED"
+
   bump-freshness:
     # Guards the failure mode where the monorepo prod promotion's install bump
     # PR fails to merge: publish-chart reads install@main and skips

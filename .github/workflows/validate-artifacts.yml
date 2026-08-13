@@ -437,6 +437,23 @@ jobs:
     # store can tell a working flag from a silently-ignored one. Hence a job that
     # mints a throwaway root, installs it, and proves the trust difference.
     #
+    # WHICH install mode this uses, and why it is not `update-ca-certificates`:
+    # on Linux, Bun ALREADY reads OpenSSL's default CApath (the hashed symlinks in
+    # /etc/ssl/certs) with no flag at all, and `update-ca-certificates` writes
+    # exactly those symlinks. Installing that way makes the unflagged binary trust
+    # the root too — the first run of this job failed its own negative control on
+    # precisely that, and clearing SSL_CERT_FILE/SSL_CERT_DIR did not change it
+    # because no env var was involved. So the root goes in as the CA BUNDLE FILE
+    # only (/etc/ssl/certs/ca-certificates.crt, no hashed symlink), which is the
+    # mode the flag actually governs:
+    #
+    #   bundle file only  → unflagged REJECTED, flagged TRUSTED   ← discriminates
+    #   hashed symlink    → unflagged TRUSTED,  flagged TRUSTED   ← proves nothing
+    #
+    # Practical consequence worth knowing: on a Linux box whose corporate root was
+    # installed via update-ca-certificates, connect worked even before this flag.
+    # The flag is what covers macOS (keychain) and the bundle-file-only layouts.
+    #
     # The two negative controls are the point — without them a green check here
     # would be compatible with the flag doing nothing at all:
     #   - before install, BOTH binaries must reject (the root is genuinely unknown)
@@ -455,14 +472,10 @@ jobs:
           work="$(mktemp -d)"
           cd "$work"
 
-          # The GitHub-hosted image exports cert env vars (SSL_CERT_FILE /
-          # SSL_CERT_DIR, set for the preinstalled toolchains). Bun honors those
-          # regardless of --use-system-ca, so leaving them set makes the UNFLAGGED
-          # binary trust the system store too — which is precisely what the
-          # negative control below caught on the first run of this job. Clearing
-          # them is what keeps the comparison attributable to the flag.
+          # An unflagged Bun honors SSL_CERT_FILE / NODE_EXTRA_CA_CERTS too, so
+          # clear them: the comparison below must be attributable to the flag
+          # alone, never to inherited env.
           unset SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE
-          echo "cert env cleared: SSL_CERT_FILE='${SSL_CERT_FILE-unset}' SSL_CERT_DIR='${SSL_CERT_DIR-unset}'"
 
           # Throwaway CA + localhost leaf. Never leaves the runner; 1-day validity.
           openssl req -x509 -newkey rsa:2048 -keyout ca.key -out ca.pem -days 1 \
@@ -506,8 +519,12 @@ jobs:
           [ "$(./probe-sys)" = REJECTED ] ||
             { echo "::error::baseline broken — flagged binary trusted the root before it was installed"; exit 1; }
 
-          sudo cp ca.pem /usr/local/share/ca-certificates/anyray-ci-synthetic-root.crt
-          sudo update-ca-certificates >/dev/null
+          # Append to the CA BUNDLE FILE only. Deliberately NOT
+          # update-ca-certificates: that also writes the hashed CApath symlink an
+          # unflagged Bun already reads, which would collapse the comparison (see
+          # the table in this job's header).
+          sudo cp /etc/ssl/certs/ca-certificates.crt ./bundle.bak
+          cat ./bundle.bak ca.pem | sudo tee /etc/ssl/certs/ca-certificates.crt >/dev/null
 
           [ "$(./probe-sys)" = TRUSTED ] ||
             { echo "::error::--use-system-ca did NOT pick up a root installed in the system store. The released binaries would fail SELF_SIGNED_CERT_IN_CHAIN behind a TLS-inspecting proxy. Check the flag in release-connect-binaries.yml and the pinned Bun version."; exit 1; }

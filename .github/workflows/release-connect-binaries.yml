@@ -10,14 +10,16 @@ name: Release anyray-connect binaries
 # never needs access to the private monorepo. Run it after publishing a new
 # anyray-connect version to npm.
 #
-# Code signing (RFC 0010 §6, secret names in RELEASING.md): the darwin
-# binaries are Developer ID-signed + notarized, the windows binary is
-# Authenticode-signed, and the linux binaries are additionally packaged as
-# .deb/.rpm (GPG detach-signed once the release key exists). Every signing
-# step is conditional on its secrets being configured — with no secrets set
-# the binaries publish byte-identical to an unsigned run; the .deb/.rpm are
-# additive assets either way. SHA256SUMS is generated in the release job,
-# AFTER signing, because signing rewrites the binaries.
+# Code signing (RFC 0010 §6, setting names in RELEASING.md): the darwin
+# binaries are Developer ID-signed + notarized on an on-demand Mac, the windows
+# binary is Authenticode-signed by jsign against an AWS KMS-held key (on the
+# LINUX runner — jsign is pure Java, so no Windows runner is involved), and the
+# linux binaries are additionally packaged as .deb/.rpm (GPG detach-signed once
+# the release key exists). Every signing step is conditional on its own settings
+# being configured — with none set the binaries publish byte-identical to an
+# unsigned run; the .deb/.rpm are additive assets either way. SHA256SUMS is
+# generated in the release job, AFTER signing, because signing rewrites the
+# binaries.
 #
 # Release integrity (two independent paths, both in the release job):
 #   - SHA256SUMS is GPG detach-signed to SHA256SUMS.asc with the same release
@@ -132,7 +134,7 @@ jobs:
           build bun-linux-arm64   anyray-connect-linux-arm64
           build bun-windows-x64   anyray-connect-windows-x64.exe
           # SHA256SUMS is generated in the release job, after the signing jobs
-          # — codesign/signtool rewrite the binaries, so a checksum taken here
+          # — codesign/jsign rewrite the binaries, so a checksum taken here
           # would not match the released bytes.
           ls -lh out
 
@@ -323,8 +325,11 @@ jobs:
           aws-region: eu-central-1
       - run: ./scripts/mac-fleet.sh down
 
-  # Authenticode-signs the windows binary through Azure Artifact Signing when
-  # the account is configured; otherwise it passes through byte-identical.
+  # Authenticode-signs the windows binary with a CA-issued certificate whose
+  # private key lives in AWS KMS, driven by jsign. Inert until configured: with
+  # no `AWS_SIGNING_ROLE_ARN` every step below skips and the unsigned binary
+  # passes through byte-identical, so this cannot break a release before the
+  # key and certificate exist.
   #
   # WHY NOT A .pfx, WHICH THIS JOB USED TO EXPECT. Since June 2023 the
   # CA/Browser Forum requires code-signing private keys to live on FIPS 140-2
@@ -333,107 +338,177 @@ jobs:
   # shape could therefore never have been fed by a certificate bought today —
   # the job was not merely dormant, it was written against a model that no
   # longer exists. A hardware token is equally unusable here: there is no USB
-  # port on a cloud runner. That leaves a cloud-held key, and Azure Artifact
-  # Signing (formerly Trusted Signing) is the cheapest: $9.99/mo Basic covers
-  # 5,000 signatures against a release cadence of a few per week.
+  # port on a cloud runner. That leaves a cloud-held key.
+  #
+  # WHY AWS RATHER THAN AZURE TRUSTED SIGNING. Trusted Signing is cheaper on
+  # paper ($9.99/mo with the certificate included, because Microsoft is itself
+  # the CA) but it means onboarding a second cloud. We are an AWS shop, KMS has
+  # been FIPS 140-2 Level 2 since May 2023 — exactly the CA/B Forum bar, so no
+  # CloudHSM is needed — and this account already federates to GitHub over OIDC
+  # for three other roles. AWS SIGNER IS NOT THE SERVICE FOR THIS: it signs
+  # Lambda packages, IoT/FreeRTOS images and OCI artifacts, has no Windows PE
+  # path, and is not in the Microsoft Trusted Root Program. KMS holds the key;
+  # the trust comes from the CA-issued certificate.
+  #
+  # THE TRADE THIS MAKES. Azure bundles the certificate; AWS does not. KMS
+  # stores ONLY the private key, so an OV/EV certificate is bought separately
+  # from a CA in the Microsoft Trusted Root Program (DigiCert, Sectigo, SSL.com,
+  # GlobalSign, Certum, Entrust, IdenTrust) — roughly $200-600/yr on top of a
+  # few dollars of KMS. Organization identity validation is required either way,
+  # so this choice does not avoid the procurement step, only the second vendor.
+  #
+  # NO WINDOWS RUNNER. jsign is a pure-Java Authenticode implementation, so this
+  # runs on the ordinary Linux runner: no CodeBuild windows fleet, no Windows
+  # SDK download, no signtool. That removes the slowest and most fragile part of
+  # the old lane.
   #
   # Apple's lane keeps using a p12 (`APPLE_SIGNING_CERT_P12`) because Apple
   # imposes no equivalent hardware requirement. The two are not inconsistent.
   #
-  # STILL INERT UNTIL CONFIGURED, same posture as before: with no
-  # `AZURE_SIGNING_ENDPOINT` the sign step skips and the unsigned binary passes
-  # through, so this cannot break a release before the account exists.
-  #
-  # SETUP, and the order matters. Identity validation sources the certificate's
-  # subject from the AZURE BILLING ACCOUNT's legal name and address, and the
-  # billing account TYPE fixes what can be validated: an Individual account can
-  # only ever produce an individual certificate. Onboarding under a personal
-  # Microsoft account therefore yields a certificate that names a person rather
-  # than the company, and correcting it means redoing validation. Confirm the
-  # billing account's legal name matches the entity that should appear as the
-  # publisher BEFORE starting. Validation is portal-only; there is no CLI.
+  # SETUP. Order matters, because the certificate's subject comes from the
+  # organization validation the CA performs, not from anything here:
+  #   1. Create an asymmetric KMS key — spec RSA_3072 (or RSA_2048), usage
+  #      SIGN_VERIFY — in eu-central-1. Its key policy must let the OIDC role
+  #      below call kms:Sign, kms:GetPublicKey and kms:DescribeKey.
+  #   2. Generate a CSR against that key and buy an OV or EV code-signing
+  #      certificate with it. Confirm the legal entity name on the order is the
+  #      one that should appear as the publisher BEFORE validation starts —
+  #      correcting it afterwards means redoing validation. EV earns SmartScreen
+  #      reputation immediately; OV accrues it over time.
+  #   3. Set `AWS_SIGNING_ROLE_ARN` and `AWS_SIGNING_KMS_KEY_ID` (repo
+  #      variables) and `WINDOWS_SIGNING_CERT_CHAIN` (repo secret) to the full
+  #      PEM chain the CA issues, leaf first. The chain is public material; it
+  #      is a secret here only so it can be rotated without a commit.
   sign-windows:
     needs: build
-    runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
-      # Federated (OIDC) auth to Azure, so there is no client secret to store or
-      # rotate. `azure/login` exchanges this token; the signing action then
-      # reuses that context.
+      # Federated (OIDC) auth to AWS, so there is no access key to store or
+      # rotate. `configure-aws-credentials` exchanges this token for short-lived
+      # credentials, which jsign picks up from the default provider chain.
       id-token: write
     env:
-      # Non-secret coordinates: which signing account and certificate profile to
-      # use. Gating on the endpoint keeps the "unset means skip" posture the
-      # macOS lane already uses.
-      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-      AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-      AZURE_SIGNING_CERT_PROFILE: ${{ vars.AZURE_SIGNING_CERT_PROFILE }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # Non-secret coordinates. Gating on the role ARN keeps the "unset means
+      # skip" posture the macOS lane already uses.
+      AWS_SIGNING_ROLE_ARN: ${{ vars.AWS_SIGNING_ROLE_ARN }}
+      AWS_SIGNING_KMS_KEY_ID: ${{ vars.AWS_SIGNING_KMS_KEY_ID }}
+      # A secret only to keep it rotatable; a certificate carries no private
+      # material.
+      WINDOWS_SIGNING_CERT_CHAIN: ${{ secrets.WINDOWS_SIGNING_CERT_CHAIN }}
+      # Bump both together. The checksum is of the GitHub release asset and was
+      # cross-checked byte-identical against Maven Central (net/jsign/jsign).
+      JSIGN_VERSION: '7.5'
+      JSIGN_SHA256: 602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: binaries-unsigned
           path: out
 
-      # signtool ships with the Windows SDK, and the CodeBuild windows-base
-      # image does NOT carry it — the previous version of this job only
-      # suspected that in a comment. Installing just the signing feature keeps
-      # it to a couple of minutes rather than pulling the whole SDK.
-      - name: Install the Windows SDK signing tools
-        if: env.AZURE_SIGNING_ENDPOINT != ''
-        shell: pwsh
+      # Fail before doing any work if the lane is half-configured. A key with no
+      # certificate (or the reverse) would otherwise surface as an opaque jsign
+      # error minutes later.
+      - name: Preflight — signing material must be complete
+        if: env.AWS_SIGNING_ROLE_ARN != ''
         run: |
-          $ErrorActionPreference = 'Stop'
-          if (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue) {
-            Write-Host 'signtool already present; skipping SDK install'
-            exit 0
-          }
-          $iso = Join-Path $env:RUNNER_TEMP 'winsdksetup.exe'
-          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/?linkid=2320455' -OutFile $iso
-          # /features OptionId.SigningTools — the signing subset only.
-          $p = Start-Process $iso -Wait -PassThru -ArgumentList '/quiet','/norestart','/features','OptionId.SigningTools'
-          if ($p.ExitCode -ne 0) { Write-Error "Windows SDK install failed ($($p.ExitCode))" }
+          set -euo pipefail
+          missing=''
+          [ -n "$AWS_SIGNING_KMS_KEY_ID" ] || missing="$missing AWS_SIGNING_KMS_KEY_ID"
+          [ -n "$WINDOWS_SIGNING_CERT_CHAIN" ] || missing="$missing WINDOWS_SIGNING_CERT_CHAIN"
+          if [ -n "$missing" ]; then
+            echo "::error::missing signing material:$missing — KMS holds only the private key, so the CA-issued certificate chain must be supplied separately"
+            exit 1
+          fi
 
-      - name: Authenticate to Azure (OIDC)
-        if: env.AZURE_SIGNING_ENDPOINT != ''
-        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        if: env.AWS_SIGNING_ROLE_ARN != ''
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          distribution: temurin
+          java-version: '21'
 
-      - name: Sign the windows binary (Azure Artifact Signing)
-        if: env.AZURE_SIGNING_ENDPOINT != ''
-        uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+      - name: Install jsign (pinned + checksum-verified)
+        if: env.AWS_SIGNING_ROLE_ARN != ''
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
+            "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
+          echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
+
+      - name: Authenticate to AWS (OIDC)
+        if: env.AWS_SIGNING_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
-          endpoint: ${{ env.AZURE_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ env.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ env.AZURE_SIGNING_CERT_PROFILE }}
-          files: ${{ github.workspace }}\out\anyray-connect-windows-x64.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
+          role-to-assume: ${{ vars.AWS_SIGNING_ROLE_ARN }}
+          aws-region: eu-central-1
 
-      # Verify OUT OF BAND rather than trusting the action's exit code. A
-      # release that reports success while shipping an unsigned binary is the
-      # failure mode this whole lane exists to prevent, and it is exactly what
-      # the old secret-gated step did for months.
+      - name: Sign the windows binary (jsign + AWS KMS)
+        if: env.AWS_SIGNING_ROLE_ARN != ''
+        run: |
+          set -euo pipefail
+          # The chain goes to a file rather than the command line: argv is
+          # world-readable via /proc. Not secret material, but the habit is what
+          # keeps a credential out of argv later.
+          printf '%s\n' "$WINDOWS_SIGNING_CERT_CHAIN" > "$RUNNER_TEMP/codesign-chain.pem"
+          # --storepass is omitted DELIBERATELY: with no explicit credentials
+          # jsign falls back to the default AWS provider chain, which is the
+          # short-lived OIDC session above. Passing them would put a session
+          # token in argv for no benefit.
+          java -jar "$RUNNER_TEMP/jsign.jar" \
+            --storetype AWS \
+            --keystore eu-central-1 \
+            --alias "$AWS_SIGNING_KMS_KEY_ID" \
+            --certfile "$RUNNER_TEMP/codesign-chain.pem" \
+            --alg SHA-256 \
+            --tsaurl http://timestamp.digicert.com \
+            --tsmode RFC3161 \
+            --name 'Anyray Connect' \
+            --url 'https://anyray.ai' \
+            out/anyray-connect-windows-x64.exe
+
+      # Verify OUT OF BAND rather than trusting jsign's exit code. A release
+      # that reports success while shipping an unsigned binary is the failure
+      # mode this whole lane exists to prevent, and it is exactly what the old
+      # secret-gated step did for months. osslsigncode is an INDEPENDENT
+      # implementation, so this is a second opinion rather than asking the
+      # signer whether it signed.
+      #
+      # Every assertion below was written against real osslsigncode 2.14 output
+      # from a rehearsal that signed the actual 116 MB Bun binary. Three traps it
+      # exposed, all of which a plausible-looking check falls into:
+      #
+      #   - `-CAfile` is REQUIRED, not optional. Without it osslsigncode anchors
+      #     at the system trust store, which does not chain our leaf, so it
+      #     reports "PKCS7_verify error" / "Signature verification: failed" for a
+      #     perfectly good signature. Anchoring on the chain we just signed with
+      #     is the correct question here anyway: "is this file validly signed by
+      #     THIS certificate". Whether that certificate is publicly trusted is a
+      #     property of the CA purchase, not of the build.
+      #   - `grep -qi 'Signature verification: ok'` MATCHES A FAILED VERIFY,
+      #     because the output also contains "Timestamp Server Signature
+      #     verification: ok" — a different line, about the TSA. It must be
+      #     anchored to column 0.
+      #   - The timestamp line is "Timestamp time: ", not "Timestamp: ", and it
+      #     is TAB-indented under "Countersignatures:", not at column 0. The
+      #     obvious grep never matches and would fail every signed build.
+      #
+      # So: trust the exit code (0 only on a fully verified signature) AND assert
+      # the timestamp explicitly, since a signature with no timestamp exits 0 but
+      # expires WITH the certificate, taking every already-shipped binary with it.
       - name: Verify the signature
-        if: env.AZURE_SIGNING_ENDPOINT != ''
-        shell: pwsh
+        if: env.AWS_SIGNING_ROLE_ARN != ''
         run: |
-          $ErrorActionPreference = 'Stop'
-          $exe = 'out\anyray-connect-windows-x64.exe'
-          $sig = Get-AuthenticodeSignature $exe
-          Write-Host "status=$($sig.Status) signer=$($sig.SignerCertificate.Subject)"
-          if ($sig.Status -ne 'Valid') {
-            Write-Error "Authenticode verification failed: $($sig.Status) $($sig.StatusMessage)"
-          }
-          if (-not $sig.TimeStamperCertificate) {
-            Write-Error 'binary is signed but NOT timestamped — the signature would expire with the certificate'
-          }
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq osslsigncode
+          osslsigncode verify \
+            -CAfile "$RUNNER_TEMP/codesign-chain.pem" \
+            -in out/anyray-connect-windows-x64.exe \
+            | tee "$RUNNER_TEMP/verify.txt"
+          grep -qE '^[[:space:]]*Timestamp time: ' "$RUNNER_TEMP/verify.txt" \
+            || { echo '::error::binary is signed but NOT timestamped — the signature would expire with the certificate'; exit 1; }
+          grep -q '^Signature verification: ok$' "$RUNNER_TEMP/verify.txt" \
+            || { echo '::error::Authenticode verification failed'; exit 1; }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

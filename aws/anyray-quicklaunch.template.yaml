@@ -20,6 +20,8 @@ Metadata:
         Parameters: [AllowedCidr, DeploymentToken]
       - Label: { default: Images }
         Parameters: [ImageTag, EnableAutoUpdate, DefaultModel]
+      - Label: { default: Bedrock (Claude and other models from your own AWS account) }
+        Parameters: [EnableBedrock]
       - Label: { default: Ingress / TLS }
         Parameters: [LoadBalancerScheme, CertificateArn, GatewayPublicUrl, ConsolePublicUrl]
       - Label: { default: Anyray Cloud (metering) }
@@ -53,6 +55,7 @@ Metadata:
       LoadBalancerScheme: { default: "Load balancer reachability (internal = private, VPC-only)" }
       EnableRdsDeletionProtection: { default: "Protect the database from deletion (production)" }
       HighAvailability: { default: "Run redundant tasks and a Multi-AZ database (production)" }
+      EnableBedrock: { default: "Let the gateway call Bedrock with this stack's own role (no access keys)" }
       VpcId: { default: "VPC (leave blank = account default VPC)" }
       SubnetA: { default: "Public subnet in AZ 1 (leave blank)" }
       SubnetB: { default: "Public subnet in AZ 2 (leave blank)" }
@@ -121,6 +124,20 @@ Parameters:
       that rolls every app service together. Turning it off removes that arm;
       the gateway keeps notifying in the console either way. The operator can
       also flip it at runtime via PUT /admin/update/settings.
+  EnableBedrock:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Let the gateway serve AWS Bedrock using THIS stack's task role, so no
+      access key is stored anywhere: configure the bedrock provider in the
+      console with a region and both key fields left blank. Off by default
+      because it grants model-invoke permission, which a stack that never uses
+      Bedrock has no reason to hold. The two List actions it also grants are
+      what lets the gateway resolve a Claude model id to the id Bedrock serves
+      in your region; without them only the model ids built into the gateway
+      resolve, and anything newer fails. Safe to turn on later — it is an IAM
+      change, and no service is replaced.
   DefaultModel:
     Type: String
     Default: 'anthropic/claude-sonnet-4-5'
@@ -342,6 +359,7 @@ Conditions:
   AutoUpdate: !Equals [!Ref EnableAutoUpdate, 'true']
   InternalLb: !Equals [!Ref LoadBalancerScheme, 'internal']
   Ha: !Equals [!Ref HighAvailability, 'true']
+  Bedrock: !Equals [!Ref EnableBedrock, 'true']
 
 Resources:
   # ---- Network resolution -----------------------------------------------------
@@ -1027,6 +1045,37 @@ Resources:
                   - elasticfilesystem:ClientMount
                   - elasticfilesystem:ClientWrite
                 Resource: !GetAtt Efs.Arn
+        # Bedrock served with this role instead of a stored access key. Attached
+        # to the TASK role: the execution role only pulls images and reads
+        # startup secrets, and is not what application code signs with.
+        - !If
+          - Bedrock
+          - PolicyName: anyray-bedrock
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                # Invoke is scoped to models and inference profiles, and spans
+                # regions on purpose: a cross-region inference profile fans out
+                # to the foundation model in whichever region serves the call,
+                # so pinning this to the stack's own region breaks exactly the
+                # profiles Claude 4 and newer require.
+                - Effect: Allow
+                  Action:
+                    - bedrock:InvokeModel
+                    - bedrock:InvokeModelWithResponseStream
+                  Resource:
+                    - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
+                    - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*'
+                    - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:application-inference-profile/*'
+                # Read-only discovery: turns a Claude model id into the id
+                # Bedrock actually serves here. These two actions do not accept
+                # a resource scope, so `*` is the only valid form.
+                - Effect: Allow
+                  Action:
+                    - bedrock:ListFoundationModels
+                    - bedrock:ListInferenceProfiles
+                  Resource: '*'
+          - !Ref 'AWS::NoValue'
 
   # ---- Soft-update applier ----------------------------------------------------
   # The gateway owns the DECISION: it polls the release manifest, evaluates it

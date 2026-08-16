@@ -465,7 +465,9 @@ jobs:
         with:
           # Keep in step with release-connect-binaries.yml — this proves the flag
           # against the Bun version that actually compiles the released binaries.
-          bun-version: '1.3.5'
+          # A pin that drifts from that one makes both guards below vacuous: they
+          # would attest to a runtime we do not ship.
+          bun-version: '1.3.14'
       - name: compiled binary trusts a root installed in the system store
         run: |
           set -euo pipefail
@@ -536,6 +538,66 @@ jobs:
           }
 
           echo "system-CA trust verified: flagged=TRUSTED, unflagged=REJECTED"
+
+      # The other half of --compile-exec-argv. The step above proves the flag is
+      # APPLIED; this proves it is not applied at the cost of the CLI's own argv.
+      #
+      # On Bun 1.3.5 the exec argv was prepended to the real argv and parsed in
+      # one pass, so Bun consumed the leading run of connect's flags: `--help`
+      # printed Bun's help, `--version` printed Bun's version, and `-y`/`-V` exited
+      # 1 with `error: Invalid Argument`. That shipped, because nothing compiled
+      # WITH the flag and then ran WITH arguments — the monorepo's binarySmoke
+      # test does one or the other, never both.
+      #
+      # Parsing stopped at the first positional, so only the LEADING run is at
+      # risk; `probe sync -y` would pass on a binary where `probe -y` dies. The
+      # cases below are therefore all leading, and `--sso -y` is included because
+      # an unknown long flag does not end the run — the short flag after it still
+      # reaches Bun's parser.
+      - name: compiled binary passes its own CLI flags through
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cd "$work"
+
+          cat > argv.ts <<'EOF'
+          console.log(JSON.stringify(process.argv.slice(2)));
+          EOF
+
+          # Compiled exactly as the release job does, flag included.
+          bun build --compile --minify --compile-exec-argv="--use-system-ca" \
+            argv.ts --outfile argv-probe >/dev/null
+
+          # Real connect flags that Bun's runtime parser also recognises or
+          # rejects. Each must arrive verbatim, with exit 0.
+          fail=0
+          check() {
+            expected="$1"; shift
+            if ! got="$(./argv-probe "$@" 2>&1)"; then
+              echo "::error::\`$*\` exited non-zero: ${got}"
+              fail=1
+              return
+            fi
+            if [ "$got" != "$expected" ]; then
+              echo "::error::\`$*\` did not reach the program — Bun intercepted it. got=${got} want=${expected}"
+              fail=1
+            fi
+          }
+
+          check '["--help"]'        --help
+          check '["-h"]'            -h
+          check '["--version"]'     --version
+          check '["-v"]'            -v
+          check '["-V"]'            -V
+          check '["-y"]'            -y
+          check '["--sso","-y"]'    --sso -y
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::the pinned Bun is eating the CLI's flags before connect sees them. Do NOT fix this by appending '--' or a sentinel to --compile-exec-argv: that stops the interception by silently dropping --use-system-ca, which the step above would then catch. Raise the bun-version pin here and in release-connect-binaries.yml instead."
+            exit 1
+          fi
+
+          echo "argv passthrough verified: every leading-flag case reached the program"
 
   bump-freshness:
     # Guards the failure mode where the monorepo prod promotion's install bump

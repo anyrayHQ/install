@@ -64,7 +64,23 @@ jobs:
     steps:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.3.5'
+          # >= 1.3.6. On 1.3.5 `--compile-exec-argv` (added below by #335 for
+          # system-CA trust) prepends the exec argv to the REAL argv and parses
+          # the lot in one pass, so Bun ate the leading run of the CLI's own
+          # flags before connect saw them: `--help`/`-h` printed BUN's help,
+          # `--version`/`-v` printed BUN's version (1.3.5) instead of connect's,
+          # and `-y`/`-V` died `error: Invalid Argument` with exit 1 — `-y` being
+          # the documented scripted-rollout flag. Parsing stopped at the first
+          # positional, so `connect sync -y` worked and `connect -y` did not,
+          # which is why it read as a cosmetic help-text nit for a whole release.
+          #
+          # Do NOT "fix" this by appending `--` or a sentinel to the exec-argv
+          # string. It does stop Bun eating the flags — by silently dropping
+          # --use-system-ca, reinstating the #335 TLS-interception bug. The flag
+          # still shows up in process.execArgv, so it looks correct; only a real
+          # trust-store probe (validate-artifacts.yml) catches it. The two
+          # behaviours are the same parse pass on 1.3.5 and cannot be separated.
+          bun-version: '1.3.14'
 
       - name: Fetch the published package
         id: pkg

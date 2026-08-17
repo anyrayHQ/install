@@ -32,17 +32,17 @@ jobs:
           token: ${{ github.token }}
 
       - name: Lint
-        run: helm lint helm --set host=anyray.example.com
+        run: helm lint helm --set host=anyray.example.com --set postgres.storage=50Gi
 
       - name: Chart renders with default values, at scale, and autoscaled
         run: |
           set -euo pipefail
-          helm template t helm --set host=anyray.example.com > /dev/null
-          helm template t helm --set host=anyray.example.com \
+          helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi > /dev/null
+          helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
             --set gateway.persistence.enabled=false --set gateway.replicas=2 \
             --set optimizer.persistence.enabled=false --set optimizer.replicas=2 \
             > /dev/null
-          helm template t helm --set host=anyray.example.com \
+          helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
             --set gateway.persistence.enabled=false --set gateway.autoscaling.enabled=true \
             --set optimizer.persistence.enabled=false --set optimizer.autoscaling.enabled=true \
             > /dev/null
@@ -61,7 +61,7 @@ jobs:
       - name: Default render pins every app image to appVersion
         run: |
           set -euo pipefail
-          render="$(helm template t helm --set host=anyray.example.com)"
+          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi)"
           fail=0
           for c in gateway optimizer proxy endpoint-control; do
             if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:${APP_VERSION}"; then
@@ -79,7 +79,7 @@ jobs:
       - name: policy-stable is the only supported moving channel
         run: |
           set -euo pipefail
-          render="$(helm template t helm --set host=anyray.example.com \
+          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
             --set-string image.tag=policy-stable)"
           for c in gateway optimizer proxy endpoint-control; do
             printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:policy-stable"

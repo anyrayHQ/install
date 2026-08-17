@@ -10,6 +10,15 @@
 # --control-plane is for internal development builds only.
 set -euo pipefail
 
+# Datastore sizing comes from the one file every install artifact reads, so the
+# generated values file can never drift from the templates
+# (ci/check-storage-defaults.sh gates it). Fall back to the same literal when
+# the file is missing, so a partial checkout still produces a usable stack.
+STORAGE_DEFAULTS="$(dirname "$0")/ci/storage-defaults.env"
+# shellcheck source=ci/storage-defaults.env
+[ -f "$STORAGE_DEFAULTS" ] && . "$STORAGE_DEFAULTS"
+DB_STORAGE_GB="${ANYRAY_DB_STORAGE_GB:-50}"
+
 HOST=""
 K8S=0
 CONNECT_TOKEN=""
@@ -179,6 +188,17 @@ write_values_stub() {
     echo "# image:"
     echo "#   tag: policy-stable"
     echo "#   pullPolicy: Always"
+    echo ""
+    echo "# Postgres volume. The gateway keeps 90 days of trace content by default,"
+    echo "# so the store grows for its first three months before the first prune"
+    echo "# reclaims anything. This size lands in a StatefulSet volumeClaimTemplate,"
+    echo "# which Kubernetes makes IMMUTABLE — set it now, because growing later"
+    echo "# means expanding the PVC by hand (only on storage classes with"
+    echo "# allowVolumeExpansion), and a full volume stops Postgres."
+    echo "# Heavy whole-team + CI usage can add ~1 GB/day; see the sizing table in"
+    echo "# https://docs.anyray.ai/get-started/install/kubernetes"
+    echo "postgres:"
+    echo "  storage: ${DB_STORAGE_GB}Gi"
     echo ""
     echo "# Billing is required and always enabled by the chart."
     echo "# The deployment token + pseudonym salt live in anyray-secrets.yaml."

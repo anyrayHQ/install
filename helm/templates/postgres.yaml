@@ -1,4 +1,5 @@
 {{- if .Values.postgres.enabled }}
+{{- include "anyray.validatePostgresStorage" . }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

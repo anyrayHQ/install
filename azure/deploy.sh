@@ -34,6 +34,12 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OVERLAY="$(mktemp -t anyray-azure-values.XXXXXX.yaml)"
 trap 'rm -f "$OVERLAY"' EXIT
 
+# Datastore sizing: one shared file for every install artifact
+# (ci/check-storage-defaults.sh gates the copies).
+# shellcheck source=../ci/storage-defaults.env
+[ -f "$REPO_ROOT/ci/storage-defaults.env" ] && . "$REPO_ROOT/ci/storage-defaults.env"
+DB_STORAGE_GB="${ANYRAY_DB_STORAGE_GB:-50}"
+
 # ---- Defaults / inputs ------------------------------------------------------
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-}"
 LOCATION="${LOCATION:-eastus}"
@@ -133,6 +139,10 @@ echo "→ Generating secrets and Helm values…"
 cat > "$OVERLAY" <<YAML
 image:
   tag: "${IMAGE_TAG}"
+postgres:
+  # 90 days of trace retention accumulate before the first prune; the size is
+  # immutable after install (StatefulSet volumeClaimTemplate).
+  storage: "${DB_STORAGE_GB}Gi"
 gateway:
   defaultModel: "${DEFAULT_MODEL}"
   service:

@@ -540,6 +540,69 @@ External dependency guardrails.
 {{- end }}
 
 {{/*
+Normalize a Kubernetes storage quantity to whole MEBIBYTES.
+
+Integer maths throughout: Helm comparisons on floats are a foot-gun, and the
+only consumer is a floor check where truncation rounds the wrong way safely
+(a value that truncates DOWN can only make an undersized volume look smaller,
+never larger). "Gi" must be tested before "G", "Ti" before "T", and so on, or
+the binary suffix falls through to the decimal branch.
+*/}}
+{{- define "anyray.storageMi" -}}
+{{- $s := . | toString -}}
+{{- if hasSuffix "Gi" $s -}}{{- mul (trimSuffix "Gi" $s | int) 1024 -}}
+{{- else if hasSuffix "Ti" $s -}}{{- mul (trimSuffix "Ti" $s | int) 1048576 -}}
+{{- else if hasSuffix "Mi" $s -}}{{- trimSuffix "Mi" $s | int -}}
+{{- else if hasSuffix "T" $s -}}{{- mul (trimSuffix "T" $s | int) 953674 -}}
+{{- else if hasSuffix "G" $s -}}{{- mul (trimSuffix "G" $s | int) 953 -}}
+{{- else if hasSuffix "M" $s -}}{{- div (mul (trimSuffix "M" $s | int) 1000000) 1048576 -}}
+{{- else -}}{{- div ($s | int) 1048576 -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Refuse a FRESH install whose Postgres volume cannot hold the retention window.
+
+The gateway keeps 90 days of trace content by default, so the store grows for
+three months before the first prune reclaims anything, and a volume that fills
+stops Postgres and takes the spend + trace stores with it. The size lands in a
+StatefulSet volumeClaimTemplate, which Kubernetes makes IMMUTABLE, so this is
+the last moment it can be chosen freely rather than migrated.
+
+Guarded on .Release.IsInstall so a genuine `helm upgrade` of an existing small
+deployment still rolls (its live volume cannot be changed in place anyway, and
+blocking upgrades would block security updates). NOTE: `helm template`, and
+therefore ArgoCD/Flux rendering, reports IsInstall=true — a GitOps deployment
+running below the floor has to set acknowledgeSmallVolume, which is why the
+message names it.
+
+Skipped entirely for postgres.enabled=false: with an external/managed database
+the chart provisions no volume and this value is inert.
+*/}}
+{{- define "anyray.validatePostgresStorage" -}}
+{{- if and .Values.postgres.enabled .Release.IsInstall (not .Values.postgres.acknowledgeSmallVolume) -}}
+{{- $floorGi := .Values.postgres.minStorageGi | default 50 | int -}}
+{{- $haveMi := include "anyray.storageMi" .Values.postgres.storage | int -}}
+{{- if lt $haveMi (mul $floorGi 1024) -}}
+{{- fail (printf `postgres.storage is %s, below the %dGi that holds the gateway's 90-day trace retention window. This volume is IMMUTABLE after install (StatefulSet volumeClaimTemplate), so it cannot be grown later without a manual PVC expansion, and only on a StorageClass with allowVolumeExpansion.
+
+  Set it deliberately:
+    postgres:
+      storage: %dGi      # or your own measured 90-day figure
+
+  Keeping a smaller volume on purpose (short ANYRAY_SPEND_RETENTION_DAYS, or ANYRAY_CONTENT_MODE=off so no content is stored)? Acknowledge it:
+    postgres:
+      acknowledgeSmallVolume: true
+
+  Already running below the floor and hitting this through ArgoCD/Flux, or a plain "helm template" (all of them report IsInstall)? Your live volume is unchanged; add acknowledgeSmallVolume: true to keep rendering.
+
+  Sizing model and the queries that measure your own rate:
+  https://docs.anyray.ai/get-started/install/choose-your-setup#size-the-datastore-before-you-install` .Values.postgres.storage $floorGi $floorGi) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Gateway trace + spend store env. The gateway persists content-free traces +
 observations to Postgres (anyray_traces / anyray_observations, auto-created;
 content AES-256-GCM encrypted at rest) and reads them in-process. Defaults to the

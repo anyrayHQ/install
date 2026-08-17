@@ -467,14 +467,42 @@ postgres:
     periodSeconds: 15
     timeoutSeconds: 5
     failureThreshold: 8
-  # Size for the steady state: encrypted trace content accumulates until the
-  # 90-day retention window fills (roughly 90 x your daily request-content
-  # volume; ANYRAY_SPEND_RETENTION_DAYS shortens the window). 10Gi suits a
-  # small team — active orgs should start at 50Gi. Set this BEFORE first
-  # install: it lands in a StatefulSet volumeClaimTemplate, which Kubernetes
-  # makes immutable, so growing later means expanding the PVC by hand (only on
-  # storage classes with allowVolumeExpansion) — a full volume stops Postgres.
+  # SET THIS TO AT LEAST 50Gi ON A NEW INSTALL. Encrypted trace content
+  # accumulates until the 90-day retention window fills, so the store grows for
+  # its first three months before the first prune reclaims anything
+  # (ANYRAY_SPEND_RETENTION_DAYS shortens the window). 50Gi holds that window
+  # for a typical team; heavy whole-team + CI usage measured ~1 GB/day, so size
+  # from the table in https://docs.anyray.ai/get-started/install/kubernetes
+  #
+  # Set it BEFORE the first install: the value lands in a StatefulSet
+  # volumeClaimTemplate, which Kubernetes makes immutable, so growing later
+  # means expanding the PVC by hand (only on storage classes with
+  # allowVolumeExpansion), and a full volume stops Postgres.
+  #
+  # The CHART default stays 10Gi on purpose, and ci/check-storage-defaults.sh
+  # asserts it: raising it here would make the next `helm upgrade` fail for
+  # every existing install that never pinned the value, because that
+  # volumeClaimTemplate cannot be changed in place. New installs get 50Gi from
+  # the values file that setup.sh --k8s and the GKE/AKS scripts generate. The
+  # shared source of truth for all of them is ci/storage-defaults.env.
+  #
+  # Because the chart default is deliberately too small, a FRESH install that
+  # leaves it alone is refused at render time rather than provisioning a volume
+  # that wedges months later (minStorageGi below). An upgrade of an existing
+  # deployment is never blocked.
   storage: 10Gi
+  # Floor enforced on a fresh install, in Gi. The gateway keeps 90 days of trace
+  # content, so anything below this cannot hold the retention window for a
+  # typical team. This is the ONLY check that reaches a hand-written values file,
+  # so it must equal the size the install templates ship
+  # (ci/check-storage-defaults.sh asserts that). Lower it only alongside a
+  # shorter ANYRAY_SPEND_RETENTION_DAYS.
+  minStorageGi: 50
+  # Escape hatch for a deliberately small volume: short retention, or
+  # ANYRAY_CONTENT_MODE=off so no request content is stored at all. Also the
+  # one-line fix for an existing sub-floor deployment rendered through
+  # ArgoCD/Flux, which report IsInstall on every sync.
+  acknowledgeSmallVolume: false
   storageClass: ""
   resources:
     requests:

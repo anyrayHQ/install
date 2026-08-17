@@ -288,9 +288,14 @@ Parameters:
     Description: RDS PostgreSQL instance class.
   DbAllocatedStorage:
     Type: Number
-    Default: 20
+    Default: 50
     MinValue: 20
-    Description: RDS allocated storage in GiB.
+    Description: >-
+      RDS allocated storage in GiB. The gateway keeps 90 days of trace content
+      by default, so the database grows for its first three months before the
+      first prune reclaims anything; 50 GiB holds that window for a typical
+      team. Heavy whole-team + CI usage can add ~1 GB/day, which storage
+      autoscaling absorbs up to DbMaxAllocatedStorage.
   DbMaxAllocatedStorage:
     Type: Number
     Default: 100

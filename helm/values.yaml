@@ -485,7 +485,24 @@ postgres:
   # volumeClaimTemplate cannot be changed in place. New installs get 50Gi from
   # the values file that setup.sh --k8s and the GKE/AKS scripts generate. The
   # shared source of truth for all of them is ci/storage-defaults.env.
+  #
+  # Because the chart default is deliberately too small, a FRESH install that
+  # leaves it alone is refused at render time rather than provisioning a volume
+  # that wedges months later (minStorageGi below). An upgrade of an existing
+  # deployment is never blocked.
   storage: 10Gi
+  # Floor enforced on a fresh install, in Gi. The gateway keeps 90 days of trace
+  # content, so anything below this cannot hold the retention window for a
+  # typical team. This is the ONLY check that reaches a hand-written values file,
+  # so it must equal the size the install templates ship
+  # (ci/check-storage-defaults.sh asserts that). Lower it only alongside a
+  # shorter ANYRAY_SPEND_RETENTION_DAYS.
+  minStorageGi: 50
+  # Escape hatch for a deliberately small volume: short retention, or
+  # ANYRAY_CONTENT_MODE=off so no request content is stored at all. Also the
+  # one-line fix for an existing sub-floor deployment rendered through
+  # ArgoCD/Flux, which report IsInstall on every sync.
+  acknowledgeSmallVolume: false
   storageClass: ""
   resources:
     requests:

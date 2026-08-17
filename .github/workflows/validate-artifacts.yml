@@ -195,7 +195,7 @@ jobs:
               ingress)   flags=(--set ingress.enabled=true); svc='name: gateway' ;;
               httproute) flags=(--set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw'); svc='- name: gateway' ;;
             esac
-            edge_render="$(helm template t helm --set host=anyray.example.com \
+            edge_render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
               "${flags[@]}" -s "templates/${edge}.yaml")"
             # `-F --` because the HTTPRoute backend line starts with "- ",
             # which grep would otherwise parse as an option bundle.

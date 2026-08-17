@@ -107,6 +107,14 @@ check "AKS overlay postgres.storage" "$ANYRAY_DB_STORAGE_GB" \
 check "GCE data-disk size" "$ANYRAY_VM_DATA_DISK_GB" \
   gcp/gce/deploy.sh 'DISK_SIZE="\$\{DISK_SIZE'
 
+# The chart's own install-time floor (anyray.validatePostgresStorage). This is
+# the only check that reaches a HAND-WRITTEN values file: our templates cannot
+# police a value the customer authors, so the chart refuses a fresh install
+# below the floor itself. It has to equal the size the templates ship, or a
+# hand-authored install is held to a different bar than a scripted one.
+check "Helm chart install-time floor" "$ANYRAY_DB_STORAGE_GB" \
+  helm/values.yaml '^[[:space:]]*minStorageGi:'
+
 # --- The carve-out ----------------------------------------------------------
 #
 # The Helm CHART default must STAY at its pinned value. Postgres is a

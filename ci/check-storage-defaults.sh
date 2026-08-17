@@ -32,13 +32,17 @@ fail=0
 # (YAML/JSON/bash): the point is to catch a number edited out of step, and a
 # per-format parser would need jq/yq/cfn-lint just to read one scalar.
 check() {
-  local what="$1" expected="$2" file="$3" pattern="$4" line
+  local what="$1" expected="$2" file="$3" pattern="$4" line lineno
   if [ ! -f "$file" ]; then
     echo "::error::$file missing — cannot verify $what"
     fail=1
     return
   fi
-  line="$(grep -nE "$pattern" "$file" | head -1 || true)"
+  # Match against the line CONTENT only. Grepping a `grep -n` result for the
+  # expected number lets the line NUMBER satisfy the assertion — that false pass
+  # shipped in the first draft of this script and hid a reverted GCE disk size.
+  line="$(grep -E "$pattern" "$file" | head -1 || true)"
+  lineno="$(grep -nE "$pattern" "$file" | head -1 | cut -d: -f1 || true)"
   if [ -z "$line" ]; then
     echo "::error::$file: no line matching /$pattern/ — $what is not wired at all"
     fail=1
@@ -47,7 +51,7 @@ check() {
   if printf '%s' "$line" | grep -qE "(^|[^0-9])${expected}([^0-9]|$)"; then
     echo "  ✓ $what → $file ($expected)"
   else
-    echo "::error::$file: $what should be $expected, found: ${line#*:}"
+    echo "::error::$file:${lineno}: $what should be $expected, found: $line"
     fail=1
   fi
 }
@@ -77,7 +81,7 @@ check_cfn_param() {
   elif [ "$found" = "$expected" ]; then
     echo "  ✓ $what → $file ($param = $expected)"
   else
-    echo "::error::$file: $param should default to $expected, found $found"
+    echo "::error::$file: $what ($param) should default to $expected, found $found"
     fail=1
   fi
 }
@@ -125,6 +129,21 @@ else
   echo "::error::volumeClaimTemplate). Size new installs through the generated values file instead;"
   echo "::error::see the carve-out note in ci/storage-defaults.env."
   fail=1
+fi
+
+# --- End-to-end: the size the generator actually emits ----------------------
+#
+# Everything above checks SOURCE lines. This checks the artifact a real install
+# consumes, so a generator that renders the wrong value (or stops emitting the
+# block at all) still fails. Skipped when the file is absent, because the gate
+# must also run on a bare checkout; CI renders it first, exactly as the
+# env-coverage job does.
+if [ -f my-values.yaml ]; then
+  check "generated my-values.yaml postgres.storage" "$ANYRAY_DB_STORAGE_GB" \
+    my-values.yaml '^[[:space:]]+storage:[[:space:]]*[0-9]+Gi'
+else
+  echo "  · my-values.yaml not rendered — skipping the generated-values check"
+  echo "    (run ./setup.sh --k8s --connect adt_… --host … first to include it)"
 fi
 
 if [ "$fail" -ne 0 ]; then

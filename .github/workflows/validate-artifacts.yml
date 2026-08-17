@@ -410,6 +410,13 @@ jobs:
             --host anyray.internal --namespace anyray
       - name: every critical env var is wired onto its service in every template
         run: ci/check-service-env-coverage.sh
+      # Same failure class as the env gate above, for datastore SIZE: the
+      # gateway keeps 90 days of trace content, so a volume sized below that
+      # window fills and stops Postgres months after the install looked fine.
+      # Runs after the render so it also checks the values file setup.sh emits,
+      # not just the generator's source.
+      - name: datastore sizing is in sync across every install artifact
+        run: ci/check-storage-defaults.sh
 
   shell:
     runs-on: ubuntu-latest

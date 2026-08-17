@@ -195,7 +195,7 @@ jobs:
               ingress)   flags=(--set ingress.enabled=true); svc='name: gateway' ;;
               httproute) flags=(--set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw'); svc='- name: gateway' ;;
             esac
-            edge_render="$(helm template t helm --set host=anyray.example.com \
+            edge_render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
               "${flags[@]}" -s "templates/${edge}.yaml")"
             # `-F --` because the HTTPRoute backend line starts with "- ",
             # which grep would otherwise parse as an option bundle.
@@ -410,6 +410,13 @@ jobs:
             --host anyray.internal --namespace anyray
       - name: every critical env var is wired onto its service in every template
         run: ci/check-service-env-coverage.sh
+      # Same failure class as the env gate above, for datastore SIZE: the
+      # gateway keeps 90 days of trace content, so a volume sized below that
+      # window fills and stops Postgres months after the install looked fine.
+      # Runs after the render so it also checks the values file setup.sh emits,
+      # not just the generator's source.
+      - name: datastore sizing is in sync across every install artifact
+        run: ci/check-storage-defaults.sh
 
   shell:
     runs-on: ubuntu-latest

@@ -3,13 +3,18 @@
 #
 # EC2 Mac dedicated hosts bill a 24-HOUR MINIMUM per allocation and CodeBuild
 # MAC_ARM fleets cannot scale below baseCapacity=1, so a standing fleet would
-# cost ~$450+/month. Instead the release workflow allocates a Mac ONLY for the
-# duration of a signing run and releases it immediately after: `up` creates the
-# fleet + an ephemeral CodeBuild runner project (webhook-driven, gated to the
-# maintainer actor), `down` deletes both. Net cost is one 24h-minimum Mac charge
-# per release (~$15-16), never a standing bill.
+# cost ~$450+/month. Instead the release workflow allocates a Mac ONLY when a
+# signing run needs one: `up` creates the fleet + an ephemeral CodeBuild runner
+# project (webhook-driven, gated to the maintainer actor); `down` deletes the
+# RUNNER but leaves the fleet, so every run inside the already-paid 24h window
+# reuses the same Mac and AWS reclaims it afterwards.
 #
-# Idempotent: `up` reuses an existing fleet/project, `down` tolerates absence.
+# **The billing unit is the DAY, not the release.** Deleting the fleet after each
+# run does not refund the 24h minimum — it only guarantees the next run re-buys
+# it. That cost ~$720/mo against 2.7h of real use; see the note on `down`.
+#
+# Idempotent: `up` reuses an existing fleet/project (including one in
+# PENDING_DELETION, still buildable inside its window), `down` tolerates absence.
 set -euo pipefail
 
 REGION="${AWS_REGION:-eu-central-1}"
@@ -90,21 +95,57 @@ up() {
   echo "mac fleet + runner project ready."
 }
 
+# Tear down the RUNNER (the security-relevant half: the webhook a fork actor
+# could otherwise reach), but deliberately LEAVE THE FLEET.
+#
+# The Mac host bills a 24-HOUR MINIMUM per allocation, and `up` already knows a
+# `PENDING_DELETION` fleet stays buildable for the rest of that window at no
+# extra host charge. So deleting the fleet here buys nothing back — the 24h is
+# already sunk — while guaranteeing the NEXT run inside the same day allocates a
+# fresh one and pays the minimum again.
+#
+# That is exactly what happened. Measured 2026-08-01..17 in the shared account:
+# 11 `CreateFleet` calls in 17 days, ~274h billed (16,446 min, $395 — a ~$720/mo
+# run rate) against just 2.7h of actual fleet lifetime. 11 allocations x 24h
+# minimum = 264h, which is the entire bill. The design intended "one 24h charge
+# per release (~$15-16)"; the effective rate was $35.91 per allocation because
+# releases cluster: 2026-08-13 ran the lane SIX times and 08-12 four times, and
+# CloudTrail shows the shape plainly — 1 CreateFleet against 9 DeleteFleet calls
+# on 08-13, 1 against 8 on 08-12. `up` is idempotent so parallel runs share one
+# fleet, then every run's `down` deleted it and the next `up` re-bought the
+# window. The teardown was racing itself.
+#
+# Leaving the fleet makes the 24h window do the job it is already paid for: the
+# first release of a day allocates, every release within 24h reuses, and AWS
+# reclaims the host on its own afterwards. Same worst case (one minimum per
+# active day), no churn. Expected: ~$720/mo -> the number of DAYS the lane runs,
+# roughly $130-190/mo at the current cadence.
+#
+# Pass `--release-fleet` to force the old behaviour. It does not save money
+# inside an open window; it exists for the case where the fleet is wedged
+# (CREATE_FAILED / UPDATE_ROLLBACK_FAILED) and must be cleared so the next `up`
+# can build a healthy one.
 down() {
   if aws codebuild batch-get-projects --region "$REGION" --names "$PROJECT" \
        --query 'projects[0].name' --output text 2>/dev/null | grep -q "$PROJECT"; then
     aws codebuild delete-webhook --region "$REGION" --project-name "$PROJECT" 2>/dev/null || true
     aws codebuild delete-project --region "$REGION" --name "$PROJECT" && echo "deleted project $PROJECT"
   fi
-  local arn; arn="$(fleet_arn)"
-  if [ -n "$arn" ]; then
-    aws codebuild delete-fleet --region "$REGION" --arn "$arn" && echo "deleted fleet (Mac released; 24h-min still applies)"
+  if [ "${2:-}" = "--release-fleet" ] || [ "${RELEASE_MAC_FLEET:-}" = "true" ]; then
+    local arn; arn="$(fleet_arn)"
+    if [ -n "$arn" ]; then
+      aws codebuild delete-fleet --region "$REGION" --arn "$arn" \
+        && echo "deleted fleet (forced; the 24h minimum is already sunk and is NOT refunded)"
+    fi
+  else
+    echo "fleet left in place: the 24h minimum is already paid, so the next run"
+    echo "inside that window reuses this Mac for free (AWS reclaims it after)."
   fi
-  echo "mac fleet torn down."
+  echo "mac runner torn down."
 }
 
 case "${1:-}" in
   up) up ;;
-  down) down ;;
-  *) echo "usage: $0 up|down" >&2; exit 2 ;;
+  down) down "$@" ;;
+  *) echo "usage: $0 up|down [--release-fleet]" >&2; exit 2 ;;
 esac

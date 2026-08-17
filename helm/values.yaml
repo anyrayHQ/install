@@ -467,13 +467,24 @@ postgres:
     periodSeconds: 15
     timeoutSeconds: 5
     failureThreshold: 8
-  # Size for the steady state: encrypted trace content accumulates until the
-  # 90-day retention window fills (roughly 90 x your daily request-content
-  # volume; ANYRAY_SPEND_RETENTION_DAYS shortens the window). 10Gi suits a
-  # small team — active orgs should start at 50Gi. Set this BEFORE first
-  # install: it lands in a StatefulSet volumeClaimTemplate, which Kubernetes
-  # makes immutable, so growing later means expanding the PVC by hand (only on
-  # storage classes with allowVolumeExpansion) — a full volume stops Postgres.
+  # SET THIS TO AT LEAST 50Gi ON A NEW INSTALL. Encrypted trace content
+  # accumulates until the 90-day retention window fills, so the store grows for
+  # its first three months before the first prune reclaims anything
+  # (ANYRAY_SPEND_RETENTION_DAYS shortens the window). 50Gi holds that window
+  # for a typical team; heavy whole-team + CI usage measured ~1 GB/day, so size
+  # from the table in https://docs.anyray.ai/get-started/install/kubernetes
+  #
+  # Set it BEFORE the first install: the value lands in a StatefulSet
+  # volumeClaimTemplate, which Kubernetes makes immutable, so growing later
+  # means expanding the PVC by hand (only on storage classes with
+  # allowVolumeExpansion), and a full volume stops Postgres.
+  #
+  # The CHART default stays 10Gi on purpose, and ci/check-storage-defaults.sh
+  # asserts it: raising it here would make the next `helm upgrade` fail for
+  # every existing install that never pinned the value, because that
+  # volumeClaimTemplate cannot be changed in place. New installs get 50Gi from
+  # the values file that setup.sh --k8s and the GKE/AKS scripts generate. The
+  # shared source of truth for all of them is ci/storage-defaults.env.
   storage: 10Gi
   storageClass: ""
   resources:

@@ -21,7 +21,8 @@
 #   ZONE              VM zone (default: us-central1-a)
 #   INSTANCE          VM name (default: anyray)
 #   MACHINE_TYPE      VM size (default: e2-standard-2 — 2 vCPU / 8 GB)
-#   DISK_SIZE         Persistent data-disk size (default: 20GB)
+#   DISK_SIZE         Persistent data-disk size (default: 50GB — holds the
+#                     gateway's 90-day trace retention window)
 #   ALLOWED_CIDR      CIDR allowed to reach the console/gateway. REQUIRED.
 #                     Scope to your office/VPN range — never 0.0.0.0/0.
 #   DEPLOYMENT_TOKEN  Anyray Cloud deployment token (adt_...). REQUIRED for metering.
@@ -42,7 +43,11 @@ PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)
 ZONE="${ZONE:-us-central1-a}"
 INSTANCE="${INSTANCE:-anyray}"
 MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-2}"
-DISK_SIZE="${DISK_SIZE:-20GB}"
+# Datastore sizing: one shared file for every install artifact
+# (ci/check-storage-defaults.sh gates the copies).
+# shellcheck source=../../ci/storage-defaults.env
+[ -f "$HERE/../../ci/storage-defaults.env" ] && . "$HERE/../../ci/storage-defaults.env"
+DISK_SIZE="${DISK_SIZE:-${ANYRAY_VM_DATA_DISK_GB:-50}GB}"
 IMAGE_TAG="${IMAGE_TAG:-policy-stable}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}"
 NETWORK="${NETWORK:-default}"

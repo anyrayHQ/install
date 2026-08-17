@@ -460,8 +460,12 @@ jobs:
           path: out/fleetd.msi
           if-no-files-found: error
 
-  # Always release the Mac, even if the build failed — an orphaned fleet bills a
-  # standing Mac. Same OIDC lifecycle role, on the Linux runner.
+  # Always remove the RUNNER, even if the build failed — the webhook is the part
+  # a fork actor could otherwise reach. The fleet is left in place on purpose:
+  # the Mac's 24h minimum is already paid and is not refunded by deleting it, so
+  # releasing it early only makes the next run re-buy the window. AWS reclaims
+  # the host when the window closes. Same OIDC lifecycle role, on the Linux
+  # runner.
   teardown-mac:
     needs: build-macos
     if: ${{ always() }}

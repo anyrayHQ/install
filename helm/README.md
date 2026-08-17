@@ -30,6 +30,26 @@ helm install anyray oci://public.ecr.aws/anyray/anyray \
 Browse released versions with `helm show chart oci://public.ecr.aws/anyray/anyray`.
 Pulls are anonymous — nothing to authenticate.
 
+**Your values file must set `postgres.storage`.** The gateway keeps 90 days of
+trace content by default, so the store grows for three months before the first
+prune reclaims anything, and the size lands in a StatefulSet
+`volumeClaimTemplate` that Kubernetes makes immutable. A fresh install below
+`postgres.minStorageGi` (50Gi) is refused at render time rather than
+provisioning a volume that wedges later:
+
+```yaml
+postgres:
+  storage: 50Gi     # or your own measured 90-day figure
+```
+
+Running a smaller volume deliberately (short `ANYRAY_SPEND_RETENTION_DAYS`, or
+`ANYRAY_CONTENT_MODE=off` so no content is stored) needs
+`postgres.acknowledgeSmallVolume: true`. ArgoCD and Flux render with `helm
+template`, which reports an install, so an existing deployment already below the
+floor needs that same line to keep syncing; its live volume is untouched.
+Sizing model and the queries that measure your own rate:
+https://docs.anyray.ai/get-started/install/choose-your-setup#size-the-datastore-before-you-install
+
 ### ArgoCD
 
 Point an Application straight at the OCI chart:

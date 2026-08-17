@@ -20,9 +20,14 @@ set -euo pipefail
 
 chart_dir="$(cd "$(dirname "$0")/../helm" && pwd)"
 
-# host= is required by the chart but irrelevant to the image set.
+# host= is required by the chart but irrelevant to the image set. Likewise the
+# Postgres volume: this render provisions nothing, it only extracts image refs,
+# so it opts out of the install-time storage floor rather than asserting a size
+# that has no meaning here. Both are placeholders for a render that is not a
+# deployment. A caller can still pass a real --set postgres.storage in "$@".
 refs="$(
   helm template anyray "$chart_dir" --set host=mirror.invalid \
+    --set postgres.acknowledgeSmallVolume=true \
     "$@" \
     | grep -oE 'image:[[:space:]]*"?[^[:space:]"]+' \
     | sed -E 's/^image:[[:space:]]*"?//' \

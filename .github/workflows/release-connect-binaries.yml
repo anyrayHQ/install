@@ -164,10 +164,15 @@ jobs:
   # secrets are configured; with them unset every step below no-ops and the
   # binaries pass through byte-identical.
   # Allocate a macOS signing runner ON DEMAND: create the MAC_ARM CodeBuild
-  # fleet + ephemeral runner project, used only for this release, torn down in
-  # teardown-mac. Runs on the Linux runner and assumes a scoped GitHub-OIDC role
-  # to drive the fleet lifecycle (scripts/mac-fleet.sh). Net cost is one
-  # 24h-minimum EC2 Mac charge per release (~$15-16), never a standing bill.
+  # fleet + ephemeral runner project, with teardown-mac removing the runner.
+  # Runs on the Linux runner and assumes a scoped GitHub-OIDC role to drive the
+  # fleet lifecycle (scripts/mac-fleet.sh).
+  #
+  # Cost is one 24h-minimum EC2 Mac charge per DAY the lane runs, not per
+  # release: teardown deliberately leaves the fleet so every run inside that
+  # already-paid window reuses the same Mac. Deleting it per release re-bought
+  # the minimum each time (~$720/mo for 2.7h of use) — see `down` in
+  # scripts/mac-fleet.sh.
   provision-mac:
     needs: build
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
@@ -324,8 +329,12 @@ jobs:
           path: out/anyray-connect-darwin-*
           if-no-files-found: error
 
-  # Always release the Mac, even if signing failed — an orphaned fleet bills a
-  # standing Mac. Runs on the Linux runner with the same OIDC lifecycle role.
+  # Always remove the RUNNER, even if signing failed — the webhook is the part a
+  # fork actor could otherwise reach. The fleet is left in place on purpose: the
+  # Mac's 24h minimum is already paid and is not refunded by deleting it, so
+  # releasing it early only makes the next run re-buy the window. AWS reclaims
+  # the host when the window closes. Runs on the Linux runner with the same OIDC
+  # lifecycle role.
   teardown-mac:
     needs: sign-macos
     if: ${{ always() }}

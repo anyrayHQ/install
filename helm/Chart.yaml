@@ -2,12 +2,12 @@ apiVersion: v2
 name: anyray
 description: Self-hosted AI-spend optimizer - gateway, optimizer, console, and Postgres trace/spend store.
 type: application
-version: 0.5.45
+version: 0.5.46
 # The Anyray image tag this chart version ships. Images default to this pinned
 # tag (see values.yaml image.tag), so a given chart version always deploys the
 # same, auditable build. Bumped in lockstep with each release by the monorepo
 # prod promotion; override image.tag to test a different/moving tag.
-appVersion: "v1.10.286"
+appVersion: "v1.10.287"
 keywords:
   - anyray
   - ai-gateway

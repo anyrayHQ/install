@@ -82,24 +82,35 @@ not from anything in the workflow:
 
 1. **Identity validation** must be *Completed* for the legal entity that should
    appear as the Windows publisher. Anyray's is **`Othentic Labs LTD`** (Israel,
-   valid to 2028-11-14). This step is **portal-only**; the Azure CLI cannot do
-   it, and it needs the *Artifact Signing Identity Verifier* role.
-2. **Certificate profile** → type **Public Trust**, created against that
-   validation. `PublicTrustTest` chains to a root Windows does **not** trust —
-   rehearsal only, never a release.
-3. **Entra app + federated credential** for this repo, then grant its service
-   principal **Artifact Signing Certificate Profile Signer**, scoped to the
-   certificate profile. That role is what permits signing; Owner and Contributor
-   deliberately do **not** include it. Run
-   `PROFILE=<profile-name> scripts/azure-signing-setup.sh` — it does all three
-   idempotently and prints the `gh variable set` lines for step 4.
-4. Set the four variables above.
+   valid to 2028-11-14). This step is **genuinely portal-only** — it needs the
+   *Artifact Signing Identity Verifier* role, and `identityValidations` appears
+   in **no** api-version of the `Microsoft.CodeSigning` ARM surface (checked
+   against the published specs), so it can be neither created *nor listed* from
+   the CLI. Copy the validation id from the portal.
+2. **Everything else is one command.** From the account's *Identity validation*
+   blade, take the id of the Completed `Othentic Labs LTD` row, then:
 
-Steps 1 and 2 are portal-only and step 3 is scripted, which is not an
-arbitrary split: Microsoft does not expose identity validation to the CLI, and
-the profile decides the publisher name baked into every certificate it issues,
-so it is worth choosing in front of the validation list rather than passing as
-an argument.
+   ```bash
+   IDENTITY_VALIDATION_ID=<guid> scripts/azure-signing-setup.sh
+   ```
+
+   It creates the certificate profile (type **Public Trust** — `PublicTrustTest`
+   chains to a root Windows does **not** trust, rehearsal only), the Entra app,
+   the federated credential for this repo, and the **Artifact Signing Certificate
+   Profile Signer** role scoped to that profile — the role that permits signing,
+   which Owner and Contributor deliberately do *not* include. Idempotent, and it
+   prints the `gh variable set` lines for step 3.
+3. Set the four variables above.
+
+The script refuses to guess the validation id rather than defaulting to one,
+because that choice is baked into every certificate the profile ever issues and
+cannot be corrected without redoing validation.
+
+> **If `az login` fails with AADSTS530035** ("You don't have access to this",
+> *Device state: Unregistered*), the tenant's Conditional Access policy blocks
+> the Azure CLI from unregistered devices. That is a deliberate control — don't
+> work around it. Run the script from **Azure Cloud Shell** (portal → the `>_`
+> icon), where `az` is preinstalled and the session is already compliant.
 
 > **Why not a `.pfx`.** Since June 2023 the CA/Browser Forum requires code-signing
 > private keys — **OV and EV alike**, not just EV — to live on FIPS 140-2 Level 2

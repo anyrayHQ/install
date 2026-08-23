@@ -350,13 +350,13 @@ jobs:
           aws-region: eu-central-1
       - run: ./scripts/mac-fleet.sh down
 
-  # Authenticode-signs the windows binary with a CA-issued certificate whose
-  # private key lives in AWS KMS, driven by jsign. Inert until configured: with
-  # no `AWS_SIGNING_ROLE_ARN` every step below skips and the unsigned binary
+  # Authenticode-signs the windows binary through Azure Artifact Signing
+  # (formerly Trusted Signing), driven by jsign. Inert until configured: with no
+  # `AZURE_SIGNING_CLIENT_ID` every step below skips and the unsigned binary
   # passes through byte-identical, so this cannot break a release before the
-  # key and certificate exist.
+  # Azure side exists.
   #
-  # WHY NOT A .pfx, WHICH THIS JOB USED TO EXPECT. Since June 2023 the
+  # WHY NOT A .pfx, WHICH THIS JOB ONCE EXPECTED. Since June 2023 the
   # CA/Browser Forum requires code-signing private keys to live on FIPS 140-2
   # Level 2 hardware, so no CA issues an exportable PFX for an OV/EV
   # code-signing certificate any more. The old `signtool /f cert.pfx /p pass`
@@ -365,128 +365,279 @@ jobs:
   # longer exists. A hardware token is equally unusable here: there is no USB
   # port on a cloud runner. That leaves a cloud-held key.
   #
-  # WHY AWS RATHER THAN AZURE TRUSTED SIGNING. Trusted Signing is cheaper on
-  # paper ($9.99/mo with the certificate included, because Microsoft is itself
-  # the CA) but it means onboarding a second cloud. We are an AWS shop, KMS has
-  # been FIPS 140-2 Level 2 since May 2023 — exactly the CA/B Forum bar, so no
-  # CloudHSM is needed — and this account already federates to GitHub over OIDC
-  # for three other roles. AWS SIGNER IS NOT THE SERVICE FOR THIS: it signs
-  # Lambda packages, IoT/FreeRTOS images and OCI artifacts, has no Windows PE
-  # path, and is not in the Microsoft Trusted Root Program. KMS holds the key;
-  # the trust comes from the CA-issued certificate.
+  # WHY AZURE, HAVING PREVIOUSLY CHOSEN AWS KMS. The KMS lane was correct in
+  # shape and never ran: KMS stores only a private key, so it still needed an
+  # OV/EV certificate bought from a CA in the Microsoft Trusted Root Program
+  # (~$200-600/yr) issued against a CSR from that key. That certificate was
+  # never purchased, so `AWS_SIGNING_ROLE_ARN` stayed unset and every release to
+  # date shipped an unsigned .exe. Azure is itself the CA: one $9.99/mo
+  # subscription covers key custody AND the certificate, and the identity
+  # validation Anyray already completed (Othentic Labs LTD, Israel — on the
+  # Public Trust eligibility list) is the same organization vetting a commercial
+  # CA would have charged for. The second cloud is the price; a signing lane
+  # that actually has a certificate behind it is what it buys. The KMS key
+  # `alias/anyray-codesign-windows` is now unused — see RELEASING.md for the
+  # decommissioning note before deleting it.
   #
-  # THE TRADE THIS MAKES. Azure bundles the certificate; AWS does not. KMS
-  # stores ONLY the private key, so an OV/EV certificate is bought separately
-  # from a CA in the Microsoft Trusted Root Program (DigiCert, Sectigo, SSL.com,
-  # GlobalSign, Certum, Entrust, IdenTrust) — roughly $200-600/yr on top of a
-  # few dollars of KMS. Organization identity validation is required either way,
-  # so this choice does not avoid the procurement step, only the second vendor.
+  # THE 3-DAY CERTIFICATE, AND WHY TIMESTAMPING IS LOAD-BEARING HERE. Azure
+  # issues a fresh short-lived certificate per signing operation — 3 days of
+  # validity, not the 1-3 years a purchased certificate carries. An
+  # un-timestamped signature would therefore go invalid THREE DAYS after the
+  # release, on every machine that already installed it. jsign enables
+  # timestamping automatically for this storetype for exactly that reason, and
+  # the verify step below asserts the countersignature independently rather than
+  # trusting that behavior to stay true across a jsign bump.
   #
   # NO WINDOWS RUNNER. jsign is a pure-Java Authenticode implementation, so this
   # runs on the ordinary Linux runner: no CodeBuild windows fleet, no Windows
-  # SDK download, no signtool. That removes the slowest and most fragile part of
-  # the old lane.
+  # SDK download, no signtool, and specifically none of Microsoft's own
+  # SignTool + .NET 8 + dlib stack, which is Windows-only. That keeps the
+  # slowest and most fragile part of the old lane deleted.
   #
   # Apple's lane keeps using a p12 (`APPLE_SIGNING_CERT_P12`) because Apple
   # imposes no equivalent hardware requirement. The two are not inconsistent.
   #
-  # SETUP. Order matters, because the certificate's subject comes from the
-  # organization validation the CA performs, not from anything here:
-  #   1. Create an asymmetric KMS key — spec RSA_3072 (or RSA_2048), usage
-  #      SIGN_VERIFY — in eu-central-1. Its key policy must let the OIDC role
-  #      below call kms:Sign, kms:GetPublicKey and kms:DescribeKey.
-  #   2. Generate a CSR against that key and buy an OV or EV code-signing
-  #      certificate with it. Confirm the legal entity name on the order is the
-  #      one that should appear as the publisher BEFORE validation starts —
-  #      correcting it afterwards means redoing validation. EV earns SmartScreen
-  #      reputation immediately; OV accrues it over time.
-  #   3. Set `AWS_SIGNING_ROLE_ARN` and `AWS_SIGNING_KMS_KEY_ID` (repo
-  #      variables) and `WINDOWS_SIGNING_CERT_CHAIN` (repo secret) to the full
-  #      PEM chain the CA issues, leaf first. The chain is public material; it
-  #      is a secret here only so it can be rotated without a commit.
+  # SETUP. Order matters: the certificate's subject comes from the identity
+  # validation Microsoft performs, not from anything in this file.
+  #   1. Identity validation (portal only — the CLI cannot do this) must be
+  #      Completed for the legal entity that should appear as the Windows
+  #      publisher. Anyray's is `Othentic Labs LTD`. Confirm the name BEFORE
+  #      creating the profile: it is baked into every certificate issued under
+  #      it, and changing it means redoing validation.
+  #   2. Create a certificate profile of type **Public Trust** against that
+  #      validation. `PublicTrustTest` chains to a test root that Windows does
+  #      NOT trust — it is for rehearsal only and must never sign a release.
+  #   3. Register an Entra app, add a federated credential for this repo, and
+  #      grant its service principal the **Artifact Signing Certificate Profile
+  #      Signer** role. Scope it to the certificate profile, not the whole
+  #      account — that role is what permits signing, and Owner/Contributor
+  #      deliberately do NOT include it.
+  #   4. Set the four `AZURE_SIGNING_*` repo variables below. None is a secret:
+  #      OIDC federation means there is no client secret to store, which is the
+  #      main reason to prefer it over a password-based service principal.
   sign-windows:
     needs: build
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
-      # Federated (OIDC) auth to AWS, so there is no access key to store or
-      # rotate. `configure-aws-credentials` exchanges this token for short-lived
-      # credentials, which jsign picks up from the default provider chain.
+      # Federated (OIDC) auth to Entra, so there is no client secret to store or
+      # rotate. The token minted here is exchanged for an Azure access token
+      # scoped to the signing API, good for ~1 hour.
       id-token: write
     env:
-      # Non-secret coordinates. Gating on the role ARN keeps the "unset means
-      # skip" posture the macOS lane already uses.
-      AWS_SIGNING_ROLE_ARN: ${{ vars.AWS_SIGNING_ROLE_ARN }}
-      AWS_SIGNING_KMS_KEY_ID: ${{ vars.AWS_SIGNING_KMS_KEY_ID }}
-      # A secret only to keep it rotatable; a certificate carries no private
-      # material.
-      WINDOWS_SIGNING_CERT_CHAIN: ${{ secrets.WINDOWS_SIGNING_CERT_CHAIN }}
+      # Non-secret coordinates; OIDC carries the credential. Gating on the
+      # client id keeps the "unset means skip" posture the macOS lane uses.
+      AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+      AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+      # Regional data-plane endpoint of the signing account, from the account's
+      # Overview blade ("Account URI"). NOT the ARM management endpoint.
+      # Paste the portal's value as-is: jsign normalizes the full URL form
+      # (`https://neu.codesigning.azure.net/`) and the bare-host form the jsign
+      # docs use to the identical request URL — verified by running both against
+      # the live service, which produced byte-identical request URLs.
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      # "<account>/<certificate-profile>" — jsign's --alias for this storetype.
+      AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
       # Bump both together. The checksum is of the GitHub release asset and was
       # cross-checked byte-identical against Maven Central (net/jsign/jsign).
+      # TRUSTEDSIGNING requires jsign >= 7.0; do not downgrade below that.
       JSIGN_VERSION: '7.5'
       JSIGN_SHA256: 602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
     steps:
+      # For scripts/verify-authenticode.py. This job did not check out the repo
+      # before, because the old verify step shelled out to a package it
+      # (incorrectly) expected to install.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: binaries-unsigned
           path: out
 
-      # Fail before doing any work if the lane is half-configured. A key with no
-      # certificate (or the reverse) would otherwise surface as an opaque jsign
-      # error minutes later.
-      - name: Preflight — signing material must be complete
-        if: env.AWS_SIGNING_ROLE_ARN != ''
+      # Fail before doing any work if the lane is half-configured. A partial set
+      # would otherwise surface as an opaque jsign or OAuth error minutes later.
+      - name: Preflight — signing configuration must be complete
+        if: env.AZURE_SIGNING_CLIENT_ID != ''
         run: |
           set -euo pipefail
           missing=''
-          [ -n "$AWS_SIGNING_KMS_KEY_ID" ] || missing="$missing AWS_SIGNING_KMS_KEY_ID"
-          [ -n "$WINDOWS_SIGNING_CERT_CHAIN" ] || missing="$missing WINDOWS_SIGNING_CERT_CHAIN"
+          [ -n "$AZURE_SIGNING_TENANT_ID" ] || missing="$missing AZURE_SIGNING_TENANT_ID"
+          [ -n "$AZURE_SIGNING_ENDPOINT" ] || missing="$missing AZURE_SIGNING_ENDPOINT"
+          [ -n "$AZURE_SIGNING_ACCOUNT_PROFILE" ] || missing="$missing AZURE_SIGNING_ACCOUNT_PROFILE"
           if [ -n "$missing" ]; then
-            echo "::error::missing signing material:$missing — KMS holds only the private key, so the CA-issued certificate chain must be supplied separately"
+            echo "::error::missing Azure signing configuration:$missing"
+            exit 1
+          fi
+          # "<account>/<profile>" is jsign's --alias contract for this
+          # storetype. Getting it wrong produces a 403 from the signing API that
+          # reads like a permissions problem, so check the shape here instead.
+          case "$AZURE_SIGNING_ACCOUNT_PROFILE" in
+            */*/*|/*|*/) echo "::error::AZURE_SIGNING_ACCOUNT_PROFILE must be exactly '<account>/<certificate-profile>'"; exit 1 ;;
+            */*) : ;;
+            *) echo "::error::AZURE_SIGNING_ACCOUNT_PROFILE must be '<account>/<certificate-profile>', got a value with no '/'"; exit 1 ;;
+          esac
+
+          # ALLOW-LIST THE ENDPOINT. jsign POSTs the signing bearer token to
+          # whatever host this names, so an unconstrained repo variable is an
+          # outbound request with a config-controlled destination — the
+          # `js/request-forgery` shape, in workflow config rather than code. An
+          # `http://` value would put a token that can sign releases as Othentic
+          # Labs LTD on the wire in clear; a wrong host would hand it to someone
+          # else. Match on structure, never a substring: `.codesigning.azure.net`
+          # as a dotted SUFFIX, so `evil-codesigning.azure.net.attacker.tld`
+          # cannot pass (security-patterns.md, the URL-substring rule).
+          # `https://<label>.codesigning.azure.net` with an optional trailing
+          # slash and NOTHING else — no path, query or userinfo. A glob like
+          # `https://*.codesigning.azure.net/` looks right and is not: `*`
+          # matches slashes, so `https://attacker.tld/?x=.codesigning.azure.net`
+          # satisfies it. Anchoring the whole string is what closes that, and
+          # this rejected it under test.
+          # Strip the scheme and any single trailing slash, then require what
+          # remains to be a bare host: no slash left (so no path or query), no
+          # '@' (no userinfo), only host characters.
+          endpoint_host="${AZURE_SIGNING_ENDPOINT#https://}"
+          endpoint_host="${endpoint_host%/}"
+          case "$AZURE_SIGNING_ENDPOINT" in
+            https://*)
+              case "$endpoint_host" in
+                *[!a-zA-Z0-9.-]*) endpoint_ok='' ;;                       # '/', '@', ':' …
+                *[!/.].codesigning.azure.net) endpoint_ok=1 ;;            # dotted suffix
+                *) endpoint_ok='' ;;
+              esac
+              ;;
+            *) endpoint_ok='' ;;
+          esac
+          if [ -z "${endpoint_ok:-}" ]; then
+            echo "::error::AZURE_SIGNING_ENDPOINT must be exactly https://<region>.codesigning.azure.net (the account's Account URI, no path or query), got '${AZURE_SIGNING_ENDPOINT}'"
             exit 1
           fi
 
+          # A tenant id is a GUID and lands in a URL path. Cheap to prove.
+          # 8-4-4-4-12 hex: written out as explicit character classes because a
+          # glob's `?` matches ANY character, so `[0-9a-fA-F]????????` would
+          # accept eight arbitrary bytes after one hex digit.
+          hex='[0-9a-fA-F]'
+          # shellcheck disable=SC2254 # intentional glob, must not be quoted
+          case "$AZURE_SIGNING_TENANT_ID" in
+            $hex$hex$hex$hex$hex$hex$hex$hex-$hex$hex$hex$hex-$hex$hex$hex$hex-$hex$hex$hex$hex-$hex$hex$hex$hex$hex$hex$hex$hex$hex$hex$hex$hex) : ;;
+            *) echo "::error::AZURE_SIGNING_TENANT_ID must be a GUID (8-4-4-4-12 hex)"; exit 1 ;;
+          esac
+
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
-        if: env.AWS_SIGNING_ROLE_ARN != ''
+        if: env.AZURE_SIGNING_CLIENT_ID != ''
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Install jsign (pinned + checksum-verified)
-        if: env.AWS_SIGNING_ROLE_ARN != ''
+        if: env.AZURE_SIGNING_CLIENT_ID != ''
         run: |
           set -euo pipefail
           curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
             "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
           echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
 
-      - name: Authenticate to AWS (OIDC)
-        if: env.AWS_SIGNING_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
-        with:
-          role-to-assume: ${{ vars.AWS_SIGNING_ROLE_ARN }}
-          aws-region: eu-central-1
-
-      - name: Sign the windows binary (jsign + AWS KMS)
-        if: env.AWS_SIGNING_ROLE_ARN != ''
+      # DELIBERATELY hand-rolled instead of `azure/login` or
+      # `azure/trusted-signing-action`. connect 0.11.140-142 published to npm
+      # with no binaries behind them because a merged PR introduced Azure
+      # signing actions that the org Actions ALLOW-LIST did not carry: the run
+      # died at startup, the dispatching job went green, and three releases
+      # shipped nothing. Adding a new third-party action here would re-arm
+      # exactly that trap in exactly this job. curl and jq are already on the
+      # runner and need no allow-list entry, and the exchange below is a
+      # documented OAuth2 client-credentials flow, not a private protocol.
+      - name: Mint an Azure access token (GitHub OIDC → Entra federation)
+        if: env.AZURE_SIGNING_CLIENT_ID != ''
         run: |
           set -euo pipefail
-          # The chain goes to a file rather than the command line: argv is
-          # world-readable via /proc. Not secret material, but the habit is what
-          # keeps a credential out of argv later.
-          printf '%s\n' "$WINDOWS_SIGNING_CERT_CHAIN" > "$RUNNER_TEMP/codesign-chain.pem"
-          # --storepass is omitted DELIBERATELY: with no explicit credentials
-          # jsign falls back to the default AWS provider chain, which is the
-          # short-lived OIDC session above. Passing them would put a session
-          # token in argv for no benefit.
+          umask 077
+          # `api://AzureADTokenExchange` is the fixed audience an Entra
+          # federated credential expects; it is not a per-tenant value.
+          #
+          # The runtime token goes in via --config on stdin, NOT `-H`.
+          # ACTIONS_ID_TOKEN_REQUEST_TOKEN is the ROOT credential of this chain
+          # — it mints OIDC tokens for any audience for the life of the job —
+          # and curl arguments are world-readable through /proc/<pid>/cmdline.
+          # Protecting the two derived JWTs while passing this one in argv was
+          # backwards.
+          #
+          # --proto-redir, not just --proto: --proto constrains the FIRST
+          # transfer only, so with -L still on, a 307 would re-send the
+          # Authorization header (and below, the assertion in the POST body) to
+          # whatever host the redirect names, over any scheme.
+          gh_jwt="$(printf 'header = "Authorization: Bearer %s"\n' \
+              "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            | curl -fsSL --proto '=https' --proto-redir '=https' --config - \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api%3A%2F%2FAzureADTokenExchange" \
+            | jq -er '.value')"
+          # Mask FIRST. With client id and tenant id being non-secret repo
+          # variables, this JWT alone mints the signing token — so a later `-v`
+          # or `set -x` added while debugging would drop a live signing
+          # credential into a PUBLIC repository's workflow log.
+          echo "::add-mask::$gh_jwt"
+          printf '%s' "$gh_jwt" > "$RUNNER_TEMP/gh-oidc.jwt"
+          # Both JWTs travel via --data-urlencode @file rather than -d: curl
+          # arguments are world-readable through /proc/<pid>/cmdline, and these
+          # are bearer credentials.
+          # --data-urlencode throughout rather than hand-encoded -d values: the
+          # scope and assertion-type are full of ':' and '/' and a mis-encoded
+          # one fails as an unhelpful "invalid_request".
+          # --fail-with-body rather than -f: every way this exchange fails
+          # (subject mismatch, missing role assignment, wrong tenant) is an
+          # AADSTS code in the response body, and -f throws that body away,
+          # leaving a bare `curl: (22)`. This lane's whole history is opaque
+          # failures; the AADSTS code is the one thing that shortens the next
+          # diagnosis. It stays fail-closed — the exit status is unchanged.
+          if ! resp="$(curl -fsSL --fail-with-body \
+            --proto '=https' --proto-redir '=https' \
+            "https://login.microsoftonline.com/${AZURE_SIGNING_TENANT_ID}/oauth2/v2.0/token" \
+            --data-urlencode 'grant_type=client_credentials' \
+            --data-urlencode "client_id=${AZURE_SIGNING_CLIENT_ID}" \
+            --data-urlencode 'scope=https://codesigning.azure.net/.default' \
+            --data-urlencode 'client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer' \
+            --data-urlencode "client_assertion@$RUNNER_TEMP/gh-oidc.jwt")"; then
+            # Print only the two error fields, never the whole body.
+            echo "::error::Entra token exchange failed: $(printf '%s' "$resp" \
+              | jq -r '[.error, .error_description] | map(select(.)) | join(": ")' 2>/dev/null \
+              | head -c 400)"
+            exit 1
+          fi
+          access_token="$(printf '%s' "$resp" | jq -er '.access_token')"
+          unset resp
+          rm -f "$RUNNER_TEMP/gh-oidc.jwt"
+          # Mask before the value can reach a log through any later command.
+          echo "::add-mask::$access_token"
+          printf '%s' "$access_token" > "$RUNNER_TEMP/azure-signing.token"
+
+      - name: Sign the windows binary (jsign + Azure Artifact Signing)
+        if: env.AZURE_SIGNING_CLIENT_ID != ''
+        run: |
+          set -euo pipefail
+          # --storepass takes the access token, passed as `file:` so the bearer
+          # credential never enters argv — /proc/<pid>/cmdline is readable by
+          # any process on the runner, and this token can sign releases.
+          # VERIFIED against the pinned jsign 7.5, not just read in the docs: a
+          # `file:` password signs successfully where the same file holding the
+          # WRONG password fails, which is only possible if the prefix is being
+          # resolved rather than passed through as a literal string.
+          #
+          # The token file is written with `printf '%s'` (no trailing newline)
+          # because the file's bytes ARE the password.
+          #
+          # No --certfile: unlike the KMS path, the service returns the
+          # certificate chain, and jsign makes an extra API call to fetch the
+          # current one before signing. Supplying a chain here would be stale by
+          # construction — Azure issues a new certificate per signing operation.
+          #
+          # No --tsaurl/--tsmode either: jsign turns timestamping on
+          # automatically for this storetype precisely because the certificates
+          # live 3 days. The verify step asserts the countersignature landed
+          # rather than assuming that default holds.
           java -jar "$RUNNER_TEMP/jsign.jar" \
-            --storetype AWS \
-            --keystore eu-central-1 \
-            --alias "$AWS_SIGNING_KMS_KEY_ID" \
-            --certfile "$RUNNER_TEMP/codesign-chain.pem" \
+            --storetype TRUSTEDSIGNING \
+            --keystore "$AZURE_SIGNING_ENDPOINT" \
+            --storepass "file:$RUNNER_TEMP/azure-signing.token" \
+            --alias "$AZURE_SIGNING_ACCOUNT_PROFILE" \
             --alg SHA-256 \
-            --tsaurl http://timestamp.digicert.com \
-            --tsmode RFC3161 \
             --name 'Anyray Connect' \
             --url 'https://anyray.ai' \
             out/anyray-connect-windows-x64.exe
@@ -494,46 +645,77 @@ jobs:
       # Verify OUT OF BAND rather than trusting jsign's exit code. A release
       # that reports success while shipping an unsigned binary is the failure
       # mode this whole lane exists to prevent, and it is exactly what the old
-      # secret-gated step did for months. osslsigncode is an INDEPENDENT
-      # implementation, so this is a second opinion rather than asking the
-      # signer whether it signed.
+      # gated step did for months.
       #
-      # Every assertion below was written against real osslsigncode 2.14 output
-      # from a rehearsal that signed the actual 116 MB Bun binary. Three traps it
-      # exposed, all of which a plausible-looking check falls into:
+      # THE PREVIOUS VERSION OF THIS STEP COULD NEVER HAVE RUN. It began
+      # `sudo apt-get install osslsigncode`. This runner is
+      # `amazonlinux2-x86_64-standard:5.0`, which despite its name is Amazon
+      # Linux 2023: there is no apt, and osslsigncode is not in the AL2023
+      # repositories either, so an `apt`->`dnf` swap would not have fixed it.
+      # Nothing caught this because the job was gated on a variable that was
+      # never set, so the whole lane skipped on every release. A verification
+      # step that cannot execute is worse than none: it reads like a guarantee.
       #
-      #   - `-CAfile` is REQUIRED, not optional. Without it osslsigncode anchors
-      #     at the system trust store, which does not chain our leaf, so it
-      #     reports "PKCS7_verify error" / "Signature verification: failed" for a
-      #     perfectly good signature. Anchoring on the chain we just signed with
-      #     is the correct question here anyway: "is this file validly signed by
-      #     THIS certificate". Whether that certificate is publicly trusted is a
-      #     property of the CA purchase, not of the build.
-      #   - `grep -qi 'Signature verification: ok'` MATCHES A FAILED VERIFY,
-      #     because the output also contains "Timestamp Server Signature
-      #     verification: ok" — a different line, about the TSA. It must be
-      #     anchored to column 0.
-      #   - The timestamp line is "Timestamp time: ", not "Timestamp: ", and it
-      #     is TAB-indented under "Countersignatures:", not at column 0. The
-      #     obvious grep never matches and would fail every signed build.
+      # So verification is now a checked-in script using only python3 and
+      # openssl, both already on the runner — no package install, no compile,
+      # nothing fetched at release time except the pinned trust anchor.
       #
-      # So: trust the exit code (0 only on a fully verified signature) AND assert
-      # the timestamp explicitly, since a signature with no timestamp exits 0 but
-      # expires WITH the certificate, taking every already-shipped binary with it.
+      # It asserts five things, and each was rehearsed to FAIL on the case it
+      # exists to catch (see the script's own header for the oracle comparison):
+      #   1. a signature is present;
+      #   2. the digest recomputed from the shipped bytes matches the digest the
+      #      signature attests — the check that makes the others meaningful,
+      #      since without it a signature lifted from another file would pass;
+      #   3. the chain verifies to a PINNED anchor, not the system store;
+      #   4. the signature is timestamped;
+      #   5. the publisher is Othentic Labs LTD.
+      #
+      # THE ANCHOR IS A REAL TRUST ASSERTION, NOT A TAUTOLOGY. The KMS lane
+      # verified against the very chain it had just signed with, which could only
+      # ever answer "is this file signed by that certificate". Azure's chain is
+      # public and fixed, so this pins the actual root — Microsoft Identity
+      # Verification Root Certificate Authority 2020, the root Windows ships and
+      # every Trusted Signing certificate chains to. A signature that verifies
+      # against it is one Windows will accept, which is the question worth asking.
+      # Microsoft's timestamp authority (`Microsoft Public RSA Timestamping CA
+      # 2020`) chains to that SAME root — confirmed by fetching a live token from
+      # timestamp.acs.microsoft.com and verifying its leaf against this exact
+      # certificate — so one anchor covers both.
+      #
+      # WHAT COULD NOT BE REHEARSED is a real Azure-issued chain, because no
+      # certificate profile existed when this was written. That the code-signing
+      # leaf roots at this same CA is Microsoft's documented behavior, verified
+      # here only for the TSA. If the first real run fails at "does not chain to
+      # the pinned trust anchor" while jsign reports success, read the chain out
+      # of the signature and re-pin — do NOT drop the anchor to make it pass.
       - name: Verify the signature
-        if: env.AWS_SIGNING_ROLE_ARN != ''
+        if: env.AZURE_SIGNING_CLIENT_ID != ''
+        env:
+          # Published at aka.ms/RootCerts. Pinned by digest: a trust anchor
+          # fetched over the network and used unverified is not an anchor.
+          MS_ROOT_URL: 'https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt'
+          MS_ROOT_SHA256: 5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270
+          # The legal entity behind the Completed identity validation. This
+          # account carries several validations, so a profile built against the
+          # wrong one signs perfectly well under the wrong company name.
+          EXPECT_PUBLISHER: 'Othentic Labs LTD'
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq osslsigncode
-          osslsigncode verify \
-            -CAfile "$RUNNER_TEMP/codesign-chain.pem" \
-            -in out/anyray-connect-windows-x64.exe \
-            | tee "$RUNNER_TEMP/verify.txt"
-          grep -qE '^[[:space:]]*Timestamp time: ' "$RUNNER_TEMP/verify.txt" \
-            || { echo '::error::binary is signed but NOT timestamped — the signature would expire with the certificate'; exit 1; }
-          grep -q '^Signature verification: ok$' "$RUNNER_TEMP/verify.txt" \
-            || { echo '::error::Authenticode verification failed'; exit 1; }
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/ms-root.crt" "$MS_ROOT_URL"
+          echo "${MS_ROOT_SHA256}  $RUNNER_TEMP/ms-root.crt" | sha256sum -c -
+          # Distributed as DER; openssl verify wants PEM.
+          openssl x509 -inform DER -in "$RUNNER_TEMP/ms-root.crt" \
+            -out "$RUNNER_TEMP/ms-root.pem"
+          python3 scripts/verify-authenticode.py \
+            out/anyray-connect-windows-x64.exe \
+            --ca-file "$RUNNER_TEMP/ms-root.pem" \
+            --expect-publisher "$EXPECT_PUBLISHER"
+
+      # The token is short-lived, but leaving a bearer credential on a runner
+      # that outlives the job is how the next incident starts.
+      - name: Shred the access token
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/azure-signing.token" "$RUNNER_TEMP/gh-oidc.jwt"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

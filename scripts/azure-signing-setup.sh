@@ -4,22 +4,30 @@
 # .github/workflows/release-connect-binaries.yml and the Windows section of
 # RELEASING.md.
 #
-# WHAT THIS DOES AND DOES NOT DO. It creates the CI identity: an Entra app, a
-# federated credential trusting this repo's OIDC token, and the role assignment
-# that permits signing. It does NOT create the signing account, the identity
-# validation, or the certificate profile:
+# WHAT THIS DOES AND DOES NOT DO. It creates the certificate profile (unless one
+# already exists) and the CI identity: an Entra app, a federated credential
+# trusting this repo's OIDC token, and the role assignment that permits signing.
 #
-#   - identity validation is **portal-only** (Microsoft does not expose it to
-#     the CLI at all) and takes days to clear;
-#   - the certificate profile depends on a Completed validation, and picking
-#     which validation it hangs off decides the publisher name baked into every
-#     certificate — a decision that should be made deliberately, in front of the
-#     list, not by a script argument.
+# It does NOT create the signing account or the identity validation. **Identity
+# validation is genuinely portal-only** — Microsoft does not expose it to the
+# CLI — and takes days to clear. Everything after it is scriptable, including
+# the certificate profile, via `az trustedsigning certificate-profile create`.
 #
-# So: do those two in the portal, then run this.
+# The profile is created rather than assumed because the alternative is worse:
+# `--identity-validation-id` decides the publisher name baked into every
+# certificate the profile ever issues, so making it an explicit, recorded step
+# beats clicking through a portal list. The script refuses to guess — it fails
+# with the list of Completed validations when there is any ambiguity, and only
+# auto-selects when exactly one matches the expected organisation.
 #
-# Idempotent — re-running reuses an existing app, credential and role
+# Idempotent — re-running reuses an existing profile, app, credential and role
 # assignment rather than duplicating them.
+#
+# ACCESS NOTE. If `az login` fails with AADSTS530035 ("You don't have access to
+# this", Device state: Unregistered), the tenant's Conditional Access policy
+# blocks the Azure CLI from unregistered devices. That is a deliberate control,
+# not something to work around: run this from **Azure Cloud Shell** (the portal
+# session is already compliant), where az is preinstalled and authenticated.
 set -euo pipefail
 
 REPO="${REPO:-anyrayHQ/install}"
@@ -57,33 +65,87 @@ RESOURCE_GROUP="${RESOURCE_GROUP:-anyray-signing}"
 ACCOUNT="${ACCOUNT:-anyray-signing}"
 PROFILE="${PROFILE:-}"
 
-if [ -z "$PROFILE" ]; then
-  echo "usage: PROFILE=<certificate-profile-name> $0" >&2
-  echo "  (create the profile in the portal first — type Public Trust, against" >&2
-  echo "   the Completed 'Othentic Labs LTD' identity validation)" >&2
-  exit 2
-fi
+PROFILE="${PROFILE:-anyray-connect}"
+# The organisation whose Completed identity validation the certificate profile
+# must hang off. This string becomes the Windows publisher, and the verify step
+# in release-connect-binaries.yml asserts it — change both together.
+EXPECT_PUBLISHER="${EXPECT_PUBLISHER:-Othentic Labs LTD}"
+# PublicTrustTest chains to a root Windows does NOT trust. Rehearsal only.
+PROFILE_TYPE="${PROFILE_TYPE:-PublicTrust}"
 
 command -v az >/dev/null || { echo "az CLI not found: https://aka.ms/azure-cli" >&2; exit 1; }
+
+# Say WHICH thing is wrong. Bare `az account show` prints "Please run 'az login'"
+# for an unauthenticated shell, which reads like a missing step even when the
+# real cause is a Conditional Access policy refusing the CLI outright.
+if ! az account show >/dev/null 2>&1; then
+  cat >&2 <<'MSG'
+error: not authenticated to Azure.
+
+  az login
+
+If that fails with AADSTS530035 ("You don't have access to this", Device state:
+Unregistered), the tenant's Conditional Access policy blocks the Azure CLI from
+unregistered devices. Do not try to work around it — run this script from Azure
+Cloud Shell (portal -> the >_ icon), where az is preinstalled and the session is
+already compliant. Upload the script with the Cloud Shell file picker, or paste
+it in.
+MSG
+  exit 1
+fi
 
 # Never hardcode subscription or tenant: this repo is PUBLIC, same reason
 # scripts/mac-fleet.sh derives the AWS account id instead of literalising it.
 SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 TENANT_ID="$(az account show --query tenantId -o tsv)"
 
-SCOPE="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.CodeSigning/codeSigningAccounts/${ACCOUNT}/certificateProfiles/${PROFILE}"
+ACCOUNT_ID="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.CodeSigning/codeSigningAccounts/${ACCOUNT}"
+SCOPE="${ACCOUNT_ID}/certificateProfiles/${PROFILE}"
 
-# Fail here rather than after creating an identity that would have nothing to
-# sign with. A wrong profile name otherwise surfaces much later as a 403 from
-# the signing API, which reads like a permissions problem.
-az resource show --ids "$SCOPE" >/dev/null 2>&1 || {
-  echo "error: no certificate profile '${PROFILE}' on account '${ACCOUNT}' (rg '${RESOURCE_GROUP}')." >&2
-  echo "existing profiles:" >&2
-  az resource list \
-    --resource-type Microsoft.CodeSigning/codeSigningAccounts/certificateProfiles \
-    --query "[].name" -o tsv >&2 || true
-  exit 1
-}
+# The trustedsigning commands live in an extension. Install it explicitly rather
+# than relying on the auto-install prompt, which does not fire non-interactively.
+az extension show --name trustedsigning >/dev/null 2>&1 \
+  || az extension add --name trustedsigning --only-show-errors >/dev/null
+
+if az trustedsigning certificate-profile show \
+    -g "$RESOURCE_GROUP" --account-name "$ACCOUNT" -n "$PROFILE" >/dev/null 2>&1; then
+  echo "reusing certificate profile '${PROFILE}'"
+else
+  # WHICH IDENTITY VALIDATION decides the publisher name baked into every
+  # certificate this profile issues, and it cannot be corrected afterwards
+  # without redoing validation — so it must be passed in, deliberately.
+  #
+  # THERE IS NO LISTING API TO AUTO-SELECT FROM. `identityValidations` appears
+  # in no api-version of the Microsoft.CodeSigning ARM surface (checked against
+  # the published specs: stable 2025-10-13 and every preview expose only
+  # `certificateProfiles`). Identity validation is portal-only for reading as
+  # well as for creating, so an `az rest .../identityValidations` call — the
+  # obvious thing to reach for — 404s rather than returning an empty list.
+  if [ -z "${IDENTITY_VALIDATION_ID:-}" ]; then
+    cat >&2 <<MSG
+error: certificate profile '${PROFILE}' does not exist and IDENTITY_VALIDATION_ID was not given.
+
+Get it from the portal (there is no CLI or API for this):
+  Artifact Signing account '${ACCOUNT}' -> Identity validation
+
+Pick the row whose Organization name is exactly '${EXPECT_PUBLISHER}' and whose
+Status is Completed, and pass its Identity validation id:
+
+  IDENTITY_VALIDATION_ID=<guid> PROFILE=${PROFILE} $0
+
+The organisation on that row becomes the Windows publisher on every binary this
+profile ever signs, and release-connect-binaries.yml asserts it matches
+'${EXPECT_PUBLISHER}'. Choosing the wrong row ships under the wrong company.
+MSG
+    exit 1
+  fi
+  echo "creating certificate profile '${PROFILE}' (${PROFILE_TYPE}) against validation ${IDENTITY_VALIDATION_ID}"
+  az trustedsigning certificate-profile create \
+    -g "$RESOURCE_GROUP" --account-name "$ACCOUNT" -n "$PROFILE" \
+    --profile-type "$PROFILE_TYPE" \
+    --identity-validation-id "$IDENTITY_VALIDATION_ID" \
+    --only-show-errors >/dev/null
+fi
 
 APP_ID="$(az ad app list --display-name "$APP_NAME" --query '[0].appId' -o tsv)"
 if [ -z "$APP_ID" ] || [ "$APP_ID" = "None" ]; then

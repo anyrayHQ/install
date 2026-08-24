@@ -31,6 +31,13 @@ instead of deep inside jsign or `codesign`.
 > posture; if a lane is genuinely retired, remove it from the preflight list in
 > the same commit rather than leaving it listed and unset.
 
+This describes the legacy `release-connect-binaries.yml` lane. The newer
+`release-fleetd-installer.yml` endpoint-package lane is deliberately stricter:
+it fails closed unless the macOS installer/notarization credentials, Azure
+Artifact Signing configuration, and Linux GPG release key are all present. It
+publishes only assembled signed artifacts, along with detached Linux package
+signatures, `SHA256SUMS.asc`, and `endpoint-release.json.asc`.
+
 **Build provenance is the exception**: `actions/attest-build-provenance` is
 *not* secret-gated. It signs through the workflow's own OIDC identity, so every
 release carries verifiable provenance whether or not any signing secret exists.
@@ -184,7 +191,6 @@ cannot be corrected without redoing validation.
   subject plus required reviewers, which also adds a human approval per signing
   run: create a `release-signing` environment, add `environment: release-signing`
   to `sign-windows`, and re-run the setup script with `SUBJECT_MODE=environment`.
-- **`fleetd.msi` is still unsigned** (see below).
 >
 > **Decommissioning AWS — done 2026-08-24.** The `AWS_SIGNING_*` repo variables
 > are deleted, and KMS key `alias/anyray-codesign-windows` (eu-central-1,
@@ -234,12 +240,11 @@ forget:
       Anyray, not the brand, and Azure bakes the validated entity name into every
       certificate the profile issues.
 
-**`fleetd.msi` is still unsigned** and is out of scope here: it is built by
-`release-fleetd-installer.yml` on a Windows runner and is a separate lane. It
-would be signed the same way — jsign against the same certificate profile, no
-Windows dependency — but the gateway re-serves those bytes to enrolled machines,
-so that change needs its own verification that re-serving preserves the
-signature rather than being bolted on here.
+`fleetd.msi` is signed by `release-fleetd-installer.yml` through the same Azure
+Artifact Signing profile. The workflow then verifies the final MSI with Windows'
+native `Get-AuthenticodeSignature` before a release can consume it. That matters
+because the gateway re-serves this artifact to enrolled machines: the exact MSI
+verified on Windows is the one uploaded as the release asset.
 
 ### Linux — GPG-signed `.deb`/`.rpm` **and `SHA256SUMS`**
 
@@ -251,7 +256,9 @@ signature rather than being bolted on here.
 One key, two consumers. `package-linux` publishes the **public** key as the
 release asset `anyray-connect-signing-key.asc` plus a detached `.asc` next to
 each package; the `release` job additionally detach-signs the checksum file to
-`SHA256SUMS.asc`.
+`SHA256SUMS.asc`. The Fleet endpoint-package lane uses the same key as a hard
+release prerequisite, and also signs its `endpoint-release.json` manifest plus
+each `.deb`/`.rpm` asset.
 
 **After provisioning the key, record its fingerprint below.** The release job
 prints `signing key fingerprint: <40 hex>` in its log, and the release notes
@@ -370,4 +377,3 @@ Apple signing secrets (codesign path, all set): `APPLE_SIGNING_CERT_P12` +
 `APPLE_SIGNING_CERT_PASSWORD`, `APPLE_NOTARY_KEY` (base64 `.p8`), `APPLE_NOTARY_KEY_ID`,
 `APPLE_NOTARY_ISSUER_ID`. (`APPLE_SIGNING_CERT_PEM` was set for the abandoned rcodesign path and
 is unused.)
-

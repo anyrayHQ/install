@@ -1132,6 +1132,13 @@ Resources:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !GetAtt AppSecrets.AdminTokenArn
+              # Refresh db-url immediately before rolling (see REFRESH_PAYLOAD
+              # in the updater below). The compose logic stays in SecretFn --
+              # one function, one definition of the URL -- so this is an
+              # invoke, never a second copy of compose_db_url().
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt SecretFn.Arn
 
   UpdaterFn:
     Type: AWS::Lambda::Function
@@ -1147,11 +1154,24 @@ Resources:
           FAMILY_PREFIX: !Sub '${AWS::StackName}-'
           TOKEN_SECRET_ARN: !GetAtt AppSecrets.AdminTokenArn
           INDEX_URL: https://charts.anyray.ai/index.yaml
+          # Recompose db-url from the rotated master immediately before the
+          # roll. SecretFn owns the compose; this is the same bare-properties
+          # contract DbUrlRefreshRule uses (no RequestType, no ResponseURL).
+          SECRET_FN_ARN: !GetAtt SecretFn.Arn
+          REFRESH_PAYLOAD: !Sub |
+            {"ResourceProperties": {
+              "Action": "composeDbUrl",
+              "Prefix": "${AWS::StackName}/anyray/",
+              "MasterSecretArn": "${Db.MasterUserSecret.SecretArn}",
+              "DbHost": "${Db.Endpoint.Address}",
+              "DbName": "postgres"
+            }}
       Code:
         ZipFile: |
           import base64, hmac, json, os, re, urllib.request, traceback, boto3
           ecs = boto3.client('ecs')
           sm = boto3.client('secretsmanager')
+          lam = boto3.client('lambda')
           # The `v` is optional on the way IN and always present on the way OUT
           # (release_tag). The control plane serves versions bare -- it strips the
           # prefix -- while published images are tagged `vX.Y.Z`, so a gateway
@@ -1245,6 +1265,50 @@ Resources:
               # string, so nothing but digits can reach an image reference.
               return release_tag(version)
 
+          def refresh_db_url():
+              """Recompose db-url from the RDS master secret, before any roll.
+
+              THE POINT: a rolled service starts FRESH tasks, and a fresh task
+              is the first thing in a while to actually use the credential.
+              RDS rotates the master on its own schedule
+              (ManageMasterUserPassword) while running tasks keep working off
+              their already-open pools, so the stale URL stays invisible until
+              exactly this moment -- and then presents as a crash-loop, which
+              trips the ECS deployment circuit breaker and can wedge the stack
+              in UPDATE_ROLLBACK_FAILED. An unattended nightly update is
+              enough to fire it with no human involved.
+
+              DbUrlRefreshRule already runs hourly; this closes the gap it
+              cannot -- a rotation at T followed by a roll at T+10min. Rolling
+              is the only moment that MUST have a current credential, so it is
+              worth spending one invoke to be sure.
+
+              Delegates to SecretFn rather than composing here: the refresh
+              decides whether to write by comparing the composed URL against
+              the stored one, so a one-byte drift between two copies of that
+              logic would rewrite the secret forever. One function, one
+              definition.
+              """
+              arn = os.environ.get('SECRET_FN_ARN')
+              payload = os.environ.get('REFRESH_PAYLOAD')
+              if not arn or not payload:
+                  # A stack updated to this template always has both. Absent
+                  # means an older stack; roll as before rather than refuse.
+                  print('db-url refresh not configured; rolling without it')
+                  return
+              res = lam.invoke(FunctionName=arn, InvocationType='RequestResponse',
+                               Payload=payload.encode('utf-8'))
+              if res.get('FunctionError'):
+                  # Do NOT roll. Registering fresh tasks against a credential we
+                  # could not confirm is how the crash-loop above starts, and a
+                  # skipped update is recoverable where a wedged stack is not.
+                  # The gateway retries on its own schedule.
+                  raise Exception('db-url refresh failed: %s'
+                                  % res['FunctionError'])
+              body = json.loads(res['Payload'].read().decode('utf-8') or '{}')
+              # Never log the URL: it carries the master password.
+              print('db-url refresh:', json.dumps(body))
+
           def services_for(cluster, prefix):
               """This stack's app services, found by task-definition family."""
               out, token = [], None
@@ -1306,6 +1370,14 @@ Resources:
                               'a CloudFormation stack update instead' % service)
                       plan.append((service, td))
                   # Only a fully valid set reaches this point; mutate it.
+                  #
+                  # Refresh the database credential FIRST, and only when there
+                  # is something to roll. Placed after validation so a rejected
+                  # or already-current request never touches Secrets Manager,
+                  # and before the first register_task_definition so every task
+                  # this roll starts reads a credential composed seconds ago.
+                  if plan:
+                      refresh_db_url()
                   updated = []
                   for service, td in plan:
                       for k in ('taskDefinitionArn', 'revision', 'status',

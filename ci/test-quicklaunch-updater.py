@@ -20,6 +20,14 @@ os.environ.update({
     'CLUSTER': 'anyray-cluster',
     'FAMILY_PREFIX': 'anyray-',
     'INDEX_URL': 'https://charts.example.invalid/index.yaml',
+    'SECRET_FN_ARN': 'arn:aws:lambda:eu-central-1:111122223333:function:synthetic-secretfn',
+    'REFRESH_PAYLOAD': json.dumps({'ResourceProperties': {
+        'Action': 'composeDbUrl',
+        'Prefix': 'anyray/anyray/',
+        'MasterSecretArn': 'arn:aws:secretsmanager:eu-central-1:111122223333:secret:master-synthetic',
+        'DbHost': 'db.synthetic.invalid',
+        'DbName': 'postgres',
+    }}),
 })
 
 TPL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -43,7 +51,8 @@ code = '\n'.join(lines)
 # STATE['fleet'] (family -> deployed tag, insertion-ordered) models a
 # multi-service stack; None keeps the terse single-gateway default driven by
 # STATE['deployed'], which most cases use.
-STATE = {'deployed': 'v1.10.240', 'fleet': None, 'registered': [], 'updated': []}
+STATE = {'deployed': 'v1.10.240', 'fleet': None, 'registered': [], 'updated': [],
+         'refreshed': [], 'refresh_error': False}
 
 def fleet():
     return STATE['fleet'] or {'anyray-gateway': STATE['deployed']}
@@ -73,8 +82,24 @@ class FakeSm:
     def get_secret_value(self, SecretId):
         return {'SecretString': 'tok-synthetic'}
 
+class FakePayload:
+    def __init__(self, body):
+        self._body = body
+    def read(self):
+        return self._body.encode('utf-8')
+
+class FakeLambda:
+    """Stands in for SecretFn, which the updater invokes to refresh db-url."""
+    def invoke(self, FunctionName, InvocationType, Payload):
+        STATE['refreshed'].append(json.loads(Payload.decode('utf-8')))
+        if STATE['refresh_error']:
+            return {'FunctionError': 'Unhandled',
+                    'Payload': FakePayload('{"errorMessage": "boom"}')}
+        return {'Payload': FakePayload(json.dumps({'Changed': True}))}
+
 boto3 = types.ModuleType('boto3')
-boto3.client = lambda svc, *a, **k: FakeEcs() if svc == 'ecs' else FakeSm()
+boto3.client = lambda svc, *a, **k: (
+    FakeEcs() if svc == 'ecs' else FakeLambda() if svc == 'lambda' else FakeSm())
 sys.modules['boto3'] = boto3
 
 ns = {}
@@ -85,7 +110,7 @@ ns['latest_release'] = lambda: 'v1.10.242'   # stub the index (no network)
 AUTH = {'authorization': 'Bearer tok-synthetic'}
 
 def call(body=None, headers=AUTH, b64=False):
-    STATE['registered'].clear(); STATE['updated'].clear()
+    STATE['registered'].clear(); STATE['updated'].clear(); STATE['refreshed'].clear()
     ev = {'headers': headers}
     if body is not None:
         ev['body'] = base64.b64encode(body.encode()).decode() if b64 else body
@@ -205,6 +230,57 @@ c, b = call('{}', headers={'authorization': 'bearer tok-synthetic'})
 check('scheme is case-insensitive (RFC 7235)', c == 200, '%s %s' % (c, b))
 c, b = call('{}', headers={'authorization': 'Bearer    '})
 check('blank token rejected', c == 403, '%s %s' % (c, b))
+
+print('== db-url is refreshed BEFORE any task definition is registered ==')
+# The whole point: a roll starts FRESH tasks, and a fresh task is the first
+# thing in a while to actually use the credential. If the master rotated since
+# boot, rolling without this refresh crash-loops the new tasks and can wedge
+# the stack in UPDATE_ROLLBACK_FAILED.
+c, b = call(json.dumps({'target': '1.10.245'}))
+check('roll succeeded', c == 200, '%s %s' % (c, b))
+check('SecretFn was invoked exactly once', len(STATE['refreshed']) == 1,
+      STATE['refreshed'])
+check('refresh used the composeDbUrl contract (no RequestType => no CFN reply)',
+      STATE['refreshed'][0]['ResourceProperties']['Action'] == 'composeDbUrl'
+      and 'RequestType' not in STATE['refreshed'][0], STATE['refreshed'])
+
+print('== an already-current stack refreshes nothing (no needless secret write) ==')
+STATE['deployed'] = 'v1.10.242'
+c, b = call()   # index path resolves to v1.10.242 == deployed
+check('reported already current', c == 200 and b['alreadyCurrent'], b)
+check('no refresh when there is nothing to roll', STATE['refreshed'] == [],
+      STATE['refreshed'])
+STATE['deployed'] = 'v1.10.240'
+
+print('== a rejected request never touches Secrets Manager ==')
+c, b = call(json.dumps({'target': 'not-a-version'}))
+check('rejected', c == 400, '%s %s' % (c, b))
+check('no refresh on a rejected request', STATE['refreshed'] == [],
+      STATE['refreshed'])
+
+print('== a FAILED refresh aborts the roll rather than rolling blind ==')
+STATE['refresh_error'] = True
+try:
+    c, b = call(json.dumps({'target': '1.10.245'}))
+    check('roll refused', c == 500, '%s %s' % (c, b))
+    check('nothing was registered', STATE['registered'] == [], STATE['registered'])
+    check('nothing was rolled', STATE['updated'] == [], STATE['updated'])
+    check('failure detail stays out of the response',
+          'db-url' not in json.dumps(b), b)
+finally:
+    STATE['refresh_error'] = False
+
+print('== an older stack without the refresh wiring still rolls ==')
+# The env vars arrive with this template version. A stack that has not been
+# updated yet must keep updating as before, not refuse.
+saved = (os.environ.pop('SECRET_FN_ARN'), os.environ.pop('REFRESH_PAYLOAD'))
+try:
+    c, b = call(json.dumps({'target': '1.10.245'}))
+    check('rolls without the refresh configured', c == 200, '%s %s' % (c, b))
+    check('and did not invoke anything', STATE['refreshed'] == [],
+          STATE['refreshed'])
+finally:
+    os.environ['SECRET_FN_ARN'], os.environ['REFRESH_PAYLOAD'] = saved
 
 print('== an internal failure tells the CALLER nothing about the deployment ==')
 # This endpoint is public (AuthType NONE) and the catch-all also covers

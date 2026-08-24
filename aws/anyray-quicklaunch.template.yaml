@@ -546,11 +546,9 @@ Resources:
                   - secretsmanager:DeleteSecret
                   - secretsmanager:TagResource
                 Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/anyray/*'
-              # The DbUrl composer reads the RDS-managed master secret (named rds!db-…,
-              # outside the ${StackName}/anyray/* prefix) to compose the connection URL.
-              - Effect: Allow
-                Action: secretsmanager:GetSecretValue
-                Resource: !GetAtt Db.MasterUserSecret.SecretArn
+              # The master credential is now <stack>/anyray/db-master, already
+              # covered by the prefixed grant above — no separate statement, and
+              # no read of an RDS-managed rds!db-… secret any more.
 
   SecretFn:
     Type: AWS::Lambda::Function
@@ -604,15 +602,18 @@ Resources:
                   q(m['username']), q(m['password']), props['DbHost'], props['DbName'])
 
           def refresh_db_url(props):
-              # ManageMasterUserPassword means RDS rotates the master password on
-              # its own schedule, into its own secret. Nothing else ever rewrites
-              # db-url, so without this it is correct only until the first
-              # rotation: every running task survives on its already-open pool
-              # while every NEW connection authenticates with a dead password.
-              # The symptom is a task that crash-loops on `password
-              # authentication failed for user "postgres"`, which trips the ECS
-              # deployment circuit breaker and can wedge the stack in
-              # UPDATE_ROLLBACK_FAILED — long after the rotation that caused it.
+              # Re-derive db-url from whatever the master secret holds NOW.
+              #
+              # The stack no longer rotates that password (the Db resource sets
+              # MasterUserPassword from <stack>/anyray/db-master instead of
+              # ManageMasterUserPassword), so on a current stack this is a
+              # no-op in the steady state. It stays because it is the
+              # convergence path for the two cases that still diverge: a stack
+              # created before that change, whose RDS-managed password rotated
+              # while its db-url did not, and an operator who deliberately
+              # rotates db-master by hand. Both then heal on the next hourly
+              # tick or the next roll, rather than surfacing as a crash-loop on
+              # some later fresh connection.
               name = props['Prefix'] + 'db-url'
               # Follow an existing secret; never create one. The composer owns
               # creation. If db-url is absent the stack is either not up yet or
@@ -663,6 +664,25 @@ Resources:
                           'OptimizerTokenArn': ensure(prefix + 'optimizer-token', lambda: rnd.token_hex(32)),
                           'AdminTokenArn': ensure(prefix + 'admin-token', lambda: 'ar-adm-' + rnd.token_hex(16)),
                           'SaltArn': ensure(prefix + 'pseudonym-salt', lambda: rnd.token_hex(32)),
+                          # The database master credential, ours instead of
+                          # RDS-managed. Shaped EXACTLY like the secret
+                          # ManageMasterUserPassword used to produce
+                          # ({"username","password"}), so compose_db_url below
+                          # is unchanged and reads either one identically.
+                          #
+                          # token_hex: RDS rejects '/', '"', '@' and space in a
+                          # master password, and any of them would also have to
+                          # survive URL-encoding into the connection string.
+                          # Hex dodges both constraints by construction.
+                          #
+                          # `ensure` is create-if-missing and NEVER overwrites,
+                          # which is what makes this stable: a stack update
+                          # re-runs generate and must not change the password
+                          # out from under the running database.
+                          'DbMasterArn': ensure(
+                              prefix + 'db-master',
+                              lambda: json.dumps({'username': 'postgres',
+                                                  'password': rnd.token_hex(32)})),
                       }
                       return send(event, context, 'SUCCESS', data, prefix + 'generate')
                   if action == 'composeDbUrl':
@@ -680,7 +700,7 @@ Resources:
       ServiceToken: !GetAtt SecretFn.Arn
       Action: generate
       Prefix: !Sub '${AWS::StackName}/anyray/'
-      Names: [content-key, optimizer-token, admin-token, pseudonym-salt]
+      Names: [content-key, optimizer-token, admin-token, pseudonym-salt, db-master]
 
   DbUrlSecret:
     Type: Custom::AnyrayDbUrl
@@ -689,7 +709,7 @@ Resources:
       Action: composeDbUrl
       Prefix: !Sub '${AWS::StackName}/anyray/'
       Names: [db-url]
-      MasterSecretArn: !GetAtt Db.MasterUserSecret.SecretArn
+      MasterSecretArn: !GetAtt AppSecrets.DbMasterArn
       DbHost: !GetAtt Db.Endpoint.Address
       DbName: postgres
       # Bumped to re-run the composer on an existing stack. CloudFormation
@@ -697,21 +717,31 @@ Resources:
       # change, so on an unchanged block the upgrade that carries this fix
       # would NOT recompose db-url — a stack whose master has already rotated
       # would stay broken until the schedule below caught it up.
-      RefreshVersion: 1
+      #
+      # 2 (static master): MasterSecretArn above moves from the RDS-managed
+      # secret to <stack>/anyray/db-master, which is itself a property change
+      # and would re-run this anyway. Bumped regardless — the recompose is what
+      # points db-url at the new credential, and it is not worth depending on
+      # a subtlety of CFN's diff for the step that decides whether the whole
+      # stack can reach its database after the update.
+      RefreshVersion: 2
 
-  # ---- db-url follows the master rotation ------------------------------------
+  # ---- db-url convergence (belt and braces) ----------------------------------
   # The composer above is a one-shot: it captures the master password at stack
-  # create/update. ManageMasterUserPassword keeps rotating it afterwards, so
-  # db-url decays into a credential that authenticates nothing while every
-  # already-running task keeps working off its open pool — the failure stays
-  # invisible until the next task start (an image roll, a scale event, the
-  # auto-updater, a new service) and then presents as a crash-loop, not as an
-  # expired secret. Hourly is well inside the shortest rotation RDS will
-  # schedule, and the handler is a no-op write when nothing changed.
+  # create/update. Since the master password is now OURS and static, this
+  # should never have anything to do on a current stack — it is a no-op write
+  # when nothing changed.
+  #
+  # Kept because two populations still drift. A stack created before the static
+  # password (its RDS-managed master rotates on AWS's schedule, and its db-url
+  # does not follow) heals on the first tick after it takes this template. And
+  # an operator who rotates db-master by hand gets convergence without having
+  # to know that db-url is derived from it. Deleting this would quietly make
+  # both of those permanent breakages again.
   DbUrlRefreshRule:
     Type: AWS::Events::Rule
     Properties:
-      Description: !Sub 'Recompose ${AWS::StackName} db-url after an RDS master password rotation.'
+      Description: !Sub 'Recompose ${AWS::StackName} db-url if the master credential ever drifts.'
       ScheduleExpression: rate(1 hour)
       State: ENABLED
       Targets:
@@ -724,7 +754,7 @@ Resources:
             {"ResourceProperties": {
               "Action": "composeDbUrl",
               "Prefix": "${AWS::StackName}/anyray/",
-              "MasterSecretArn": "${Db.MasterUserSecret.SecretArn}",
+              "MasterSecretArn": "${AppSecrets.DbMasterArn}",
               "DbHost": "${Db.Endpoint.Address}",
               "DbName": "postgres"
             }}
@@ -904,7 +934,24 @@ Resources:
       StorageType: gp3
       StorageEncrypted: true
       MasterUsername: postgres
-      ManageMasterUserPassword: true
+      # NOT ManageMasterUserPassword. RDS-managed rotation sounds strictly
+      # better and was strictly worse here: nothing in this stack follows the
+      # rotation, so every rotation silently invalidated the stored connection
+      # URL. Running tasks survive on their open pools, so the break stays
+      # invisible until the next fresh connection -- a roll, a scale event, the
+      # auto-updater -- and then presents as a crash-loop far from its cause.
+      # One customer lost 14 days of usage data to exactly that (SQLSTATE
+      # 28P01), and no amount of following the rotation removes the race; only
+      # not rotating does.
+      #
+      # The password is minted once by SecretFn's `generate` (create-if-missing,
+      # never overwritten) and lives in <stack>/anyray/db-master with the same
+      # {"username","password"} shape the RDS-managed secret had, so
+      # compose_db_url reads either identically. Rotating it is a deliberate
+      # operator act: change the secret, then update the stack.
+      MasterUserPassword: !Sub
+        - '{{resolve:secretsmanager:${Arn}:SecretString:password}}'
+        - Arn: !GetAtt AppSecrets.DbMasterArn
       DBSubnetGroupName: !Ref DbSubnetGroup
       VPCSecurityGroups: [!Ref RdsSg]
       PubliclyAccessible: false
@@ -1162,7 +1209,7 @@ Resources:
             {"ResourceProperties": {
               "Action": "composeDbUrl",
               "Prefix": "${AWS::StackName}/anyray/",
-              "MasterSecretArn": "${Db.MasterUserSecret.SecretArn}",
+              "MasterSecretArn": "${AppSecrets.DbMasterArn}",
               "DbHost": "${Db.Endpoint.Address}",
               "DbName": "postgres"
             }}

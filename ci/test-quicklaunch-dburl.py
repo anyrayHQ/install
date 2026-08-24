@@ -18,7 +18,7 @@ long after the rotation that actually caused it.
 
 Run: python3 ci/test-quicklaunch-dburl.py
 """
-import json, os, sys, types, urllib.parse
+import json, os, re, sys, types, urllib.parse
 
 TPL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    'aws', 'anyray-quicklaunch.template.yaml')
@@ -190,6 +190,51 @@ ev = dict(CFN); ev['RequestType'] = 'Delete'; ev['ResourceProperties'] = dict(PR
 ev['ResourceProperties']['Names'] = ['db-url']
 mod.handler(ev, CTX)
 check('delete removes db-url', sm.deleted == [PREFIX + 'db-url'], sm.deleted)
+
+print('== the master password is OURS, minted once, and never rewritten ==')
+# The stack sets MasterUserPassword from <stack>/anyray/db-master instead of
+# ManageMasterUserPassword. Two properties carry the whole design: the secret
+# is shaped exactly like the RDS-managed one (so compose_db_url is unchanged),
+# and `ensure` is create-if-missing -- a stack UPDATE re-runs `generate`, and
+# must never change the password out from under a live database.
+GEN = {'Action': 'generate', 'Prefix': PREFIX}
+sm = FakeSm({}, 'unused-synthetic')
+mod, sent = load(sm)
+ev = dict(CFN); ev['ResourceProperties'] = GEN
+mod.handler(ev, CTX)
+minted = sm.store.get(PREFIX + 'db-master')
+check('db-master is minted on create', minted is not None, sm.creates)
+doc = json.loads(minted)
+# Failure details below describe the SHAPE, never the value: `check` prints the
+# detail, and a test that leaks a credential into CI logs on failure is the
+# same class of bug this whole change is about (py/clear-text-logging-sensitive-data).
+check('shaped like the RDS-managed secret it replaces',
+      sorted(doc) == ['password', 'username'] and doc['username'] == 'postgres',
+      {'keys': sorted(doc), 'username': doc.get('username')})
+# RDS rejects '/', '"', '@' and space in a master password; hex avoids all of
+# them, and also survives URL-encoding into the connection string unchanged.
+check('password is URL/RDS-safe hex',
+      re.fullmatch(r'[0-9a-f]{64}', doc['password']) is not None,
+      'length=%d, charset-ok=%s' % (len(doc['password']),
+                                    bool(re.fullmatch(r'[0-9a-f]*', doc['password']))))
+check('compose_db_url reads it unchanged',
+      mod.compose_db_url({'MasterSecretArn': PREFIX + 'db-master',
+                          'DbHost': 'db.internal', 'DbName': 'postgres'})
+      == url_for(doc['password']), 'compose mismatch')
+
+# The load-bearing one: re-running generate (every stack UPDATE does) must NOT
+# rotate the password. Changing it here would leave RDS on the old credential
+# while db-url advertised the new one -- the exact outage this change removes.
+before = dict(sm.store)
+sm.creates.clear(); sm.puts.clear()
+mod.handler(dict(ev), CTX)
+# Compares by value but REPORTS only which names moved — never a stored value.
+check('a stack update does not re-mint the password',
+      sm.store == before,
+      {'changed': sorted(k for k in set(before) | set(sm.store)
+                         if before.get(k) != sm.store.get(k))})
+check('and writes nothing at all', sm.puts == [] and sm.creates == [],
+      {'puts': sm.puts, 'creates': sm.creates})
 
 print()
 print('FAILED: %d' % len(fails) if fails else 'ALL PASS')

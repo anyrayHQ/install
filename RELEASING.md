@@ -243,17 +243,39 @@ prints `signing key fingerprint: <40 hex>` in its log, and the release notes
 tell users to compare what they import against this file — a fingerprint nobody
 publishes out-of-band is a fingerprint nobody can check.
 
-> Current fingerprint: **not yet provisioned.** No release to date carries a
-> `.asc` asset, so the key does not exist yet and its fingerprint cannot be
-> derived from anything public. Fill this in from the release log the first time
-> the workflow runs with `LINUX_SIGNING_GPG_KEY` set.
+> **Current fingerprint:**
+>
+> ```
+> 9712 9EA5 63BF B3FC D731  1D45 FDC8 3EAF C93E 4DD8
+> ```
+>
+> Uid `Anyray Release Signing (Othentic Labs LTD) <security@anyray.ai>`, RSA 4096,
+> created 2026-08-24, **no expiry**. Both secrets are set on this repository, so
+> the lane is live from the next release onward.
+
+**Key parameters, and why.** RSA 4096 rather than Ed25519: these signatures are
+verified by customers on enterprise Linux, and GnuPG only gained Ed25519 in 2.1
+(RHEL 7 shipped 2.0.22). A signature a customer cannot check is worth nothing,
+and the size difference costs us nothing. **No expiry**, because the compromise
+response for a release key is revocation, not waiting: an expiry date is a
+release-breaking landmine that fires at the worst possible moment, and now that
+signing is mandatory an expired key would block the release outright. A
+revocation certificate was generated with the key and is stored alongside it.
+
+> **The private key exists in exactly two places: this repository's secrets
+> (write-only, unreadable even to an admin) and whatever backup was taken at
+> generation time.** If both are lost the key cannot be recovered. Already
+> published signatures keep verifying (the public key ships in each release), but
+> no future release can be signed by the same key, and every user who pinned the
+> fingerprint above sees it change. Confirm the backup exists before relying on
+> this lane.
 
 ## Verifying a download
 
 Two independent paths, both available from the first release cut after this
 landed. Release notes link back here for the key fingerprint.
 
-**The checksums are signed** (once the release key above exists). Verify the
+**The checksums are signed.** Verify the
 checksum file first, then the binary against it — checking a binary against an
 unsigned checksum file from the same release only proves the download was not
 corrupted, not that the release is genuine:

@@ -205,12 +205,18 @@ mod.handler(ev, CTX)
 minted = sm.store.get(PREFIX + 'db-master')
 check('db-master is minted on create', minted is not None, sm.creates)
 doc = json.loads(minted)
+# Failure details below describe the SHAPE, never the value: `check` prints the
+# detail, and a test that leaks a credential into CI logs on failure is the
+# same class of bug this whole change is about (py/clear-text-logging-sensitive-data).
 check('shaped like the RDS-managed secret it replaces',
-      sorted(doc) == ['password', 'username'] and doc['username'] == 'postgres', doc)
+      sorted(doc) == ['password', 'username'] and doc['username'] == 'postgres',
+      {'keys': sorted(doc), 'username': doc.get('username')})
 # RDS rejects '/', '"', '@' and space in a master password; hex avoids all of
 # them, and also survives URL-encoding into the connection string unchanged.
 check('password is URL/RDS-safe hex',
-      re.fullmatch(r'[0-9a-f]{64}', doc['password']) is not None, doc['password'])
+      re.fullmatch(r'[0-9a-f]{64}', doc['password']) is not None,
+      'length=%d, charset-ok=%s' % (len(doc['password']),
+                                    bool(re.fullmatch(r'[0-9a-f]*', doc['password']))))
 check('compose_db_url reads it unchanged',
       mod.compose_db_url({'MasterSecretArn': PREFIX + 'db-master',
                           'DbHost': 'db.internal', 'DbName': 'postgres'})
@@ -222,8 +228,11 @@ check('compose_db_url reads it unchanged',
 before = dict(sm.store)
 sm.creates.clear(); sm.puts.clear()
 mod.handler(dict(ev), CTX)
+# Compares by value but REPORTS only which names moved — never a stored value.
 check('a stack update does not re-mint the password',
-      sm.store == before, {'puts': sm.puts, 'creates': sm.creates})
+      sm.store == before,
+      {'changed': sorted(k for k in set(before) | set(sm.store)
+                         if before.get(k) != sm.store.get(k))})
 check('and writes nothing at all', sm.puts == [] and sm.creates == [],
       {'puts': sm.puts, 'creates': sm.creates})
 

@@ -11,27 +11,66 @@ on:
 
 permissions:
   contents: read
+  id-token: write # OIDC, to authenticate the ECR Public pulls below
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      # AUTHENTICATE THE PULLS. Anonymous ECR Public pulls share one low per-IP
+      # rate limit across every GitHub-hosted runner, and this job pulls five
+      # images with `pull_policy: always`. The retry loop below was not enough:
+      # 22 of the last 30 runs failed, all with `toomanyrequests: Rate exceeded`
+      # after exhausting all five attempts, so `main` has been red for days and
+      # this check stopped carrying information.
+      #
+      # An authenticated pull is throttled far more generously and resolves the
+      # SAME public manifest a customer gets — the repos are public, the token
+      # only lifts the rate ceiling. Exactly what publish-ecr.sh's Phase 3 probe
+      # and await-images.sh already do for the same reason.
+      #
+      # Reuses the existing AWS_CFN_SMOKE_ROLE_ARN: it already trusts
+      # `repo:anyrayHQ/install:ref:refs/heads/main` and already holds
+      # `ecr-public:*`, so nothing new is granted. Gated on the variable being
+      # set so a fork (or an unconfigured clone) still runs the anonymous path
+      # rather than failing on a missing role.
+      - name: Configure AWS credentials (OIDC)
+        if: vars.AWS_CFN_SMOKE_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ vars.AWS_CFN_SMOKE_ROLE_ARN }}
+          aws-region: us-east-1 # ECR Public's API is us-east-1 only
+      - name: Authenticate to ECR Public
+        if: vars.AWS_CFN_SMOKE_ROLE_ARN != ''
+        run: |
+          set -euo pipefail
+          # Best-effort: a login failure must fall back to the anonymous path
+          # (which still has the retry loop) rather than fail a test that is
+          # about the install flow, not about our registry credentials.
+          if aws ecr-public get-login-password --region us-east-1 2>/dev/null \
+             | docker login --username AWS --password-stdin public.ecr.aws >/dev/null 2>&1; then
+            echo "authenticated to ECR Public — pulls are no longer anonymous-rate-limited"
+          else
+            echo "::warning::ECR Public login failed — falling back to anonymous pulls (throttle-prone)"
+          fi
+
       - name: Generate secrets
         run: ./setup.sh --connect adt_ci0000000000000000
       - name: Start the stack
         env:
-          # ECR Public pulls are anonymous — no registry login needed. `latest`
-          # is the documented testing-opt-in moving channel (customer default
-          # is the pinned Chart appVersion / ANYRAY_IMAGE_TAG); see
+          # `latest` is the documented testing-opt-in moving channel (customer
+          # default is the pinned Chart appVersion / ANYRAY_IMAGE_TAG); see
           # anyrayHQ/monorepo .github/workflows/publish-images.yml +
           # promote-ecr-channels.sh for how gateway/optimizer/proxy:latest gets
           # published on every prod promotion.
-          # Retry with backoff: anonymous ECR Public pulls share a low per-IP
-          # rate limit across every GitHub-hosted runner, so `toomanyrequests`
-          # is expected occasionally, not a real failure — and every service
-          # here has pull_policy: always, so a separate pre-pull step wouldn't
-          # shield this `up` from repulling anyway.
+          # The pulls are AUTHENTICATED by the login step above (they used to be
+          # anonymous, which is what made this job flaky enough to be useless).
+          # The retry stays as the fallback for the unauthenticated path and for
+          # ordinary registry blips — every service here has pull_policy: always,
+          # so a separate pre-pull step would not shield this `up` from repulling
+          # anyway.
           ANYRAY_GATEWAY_IMAGE: public.ecr.aws/anyray/gateway:latest
           ANYRAY_OPTIMIZER_IMAGE: public.ecr.aws/anyray/optimizer:latest
           ANYRAY_ENDPOINT_CONTROL_IMAGE: public.ecr.aws/anyray/endpoint-control:latest

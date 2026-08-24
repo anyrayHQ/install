@@ -28,8 +28,9 @@ name: Release fleetd installer
 # Unsigned, the package still installs fine over MDM (Gatekeeper is bypassed on
 # that path) — but the console offers this asset as a human download, and a
 # double-click of an unsigned pkg is refused outright. So signing is REQUIRED
-# here and the job fails loudly when the secrets are absent, rather than
-# skipping the way the Windows/Linux legs of the connect lane do.
+# here and the job fails loudly when the secrets are absent. The same rule now
+# applies to Windows Authenticode and the Linux GPG release key: a public
+# endpoint package is either signed for its platform or it is not published.
 #
 # `--enable-scripts` is MANDATORY and baked at package time: without it orbit
 # 422s every remediation script, silently killing the failed-policy -> repair
@@ -39,7 +40,9 @@ name: Release fleetd installer
 # Required secrets (all already configured on this repo):
 #   APPLE_INSTALLER_CERT_P12, APPLE_INSTALLER_CERT_PASSWORD   — pkg signing
 #   APPLE_NOTARY_KEY, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID — notarization
-# Required vars: AWS_MAC_FLEET_ROLE_ARN — the on-demand Mac lifecycle role.
+# Required vars: AWS_MAC_FLEET_ROLE_ARN — the on-demand Mac lifecycle role;
+# AZURE_SIGNING_* — the OIDC-backed Windows Artifact Signing lane.
+# Required Linux secrets: LINUX_SIGNING_GPG_KEY, LINUX_SIGNING_GPG_PASSPHRASE.
 #
 # SCOPE — macOS, Linux and Windows, built differently because fleetctl is.
 #
@@ -460,6 +463,116 @@ jobs:
           path: out/fleetd.msi
           if-no-files-found: error
 
+  sign-windows:
+    needs: build-windows
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+      AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
+      JSIGN_VERSION: '7.5'
+      JSIGN_SHA256: 602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fleetd-installer-windows
+          path: out
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Fetch pinned jsign
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
+            "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
+          echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
+      - name: Sign fleetd MSI through Azure Artifact Signing
+        env:
+          JSIGN_JAR: ${{ runner.temp }}/jsign.jar
+        run: |
+          set -euo pipefail
+          ./scripts/azure-artifact-sign.sh out/fleetd.msi \
+            'Anyray Endpoint Agent' \
+            'https://anyray.ai'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fleetd-installer-windows-signed
+          path: out/fleetd.msi
+          if-no-files-found: error
+
+  verify-windows-signature:
+    needs: sign-windows
+    runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fleetd-installer-windows-signed
+          path: out
+      - name: Verify fleetd MSI with Windows Authenticode
+        shell: pwsh
+        run: ./scripts/verify-authenticode-windows.ps1 -Path out/fleetd.msi
+
+  assemble-signed-release:
+    needs: [build-macos, sign-windows, verify-windows-signature]
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+    env:
+      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fleetd-installer
+          path: mac
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fleetd-installer-windows-signed
+          path: windows
+      - name: Assemble the signed platform artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          cp mac/fleetd.pkg assets/fleetd.pkg
+          cp mac/fleetd.deb assets/fleetd.deb
+          cp mac/fleetd.rpm assets/fleetd.rpm
+          cp windows/fleetd.msi assets/fleetd.msi
+      - name: Sign Linux packages and export the public key
+        run: ./scripts/sign-gpg-artifacts.sh assets assets/fleetd.deb assets/fleetd.rpm
+      - name: Generate signed release manifest
+        id: manifest
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          (
+            cd assets
+            sha256sum fleetd.pkg fleetd.deb fleetd.rpm fleetd.msi > SHA256SUMS
+          )
+          jq -Rn \
+            --arg version "$FLEETCTL_VERSION" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '[inputs | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")] as $artifacts
+             | {schemaVersion: 1, artifact: "anyray-endpoint", version: $version, sourceCommit: $sourceCommit, createdAt: $createdAt, artifacts: $artifacts}' \
+            assets/SHA256SUMS > assets/endpoint-release.json
+          ./scripts/sign-gpg-artifacts.sh assets assets/SHA256SUMS assets/endpoint-release.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fleetd-installer-release-assets
+          path: assets
+          if-no-files-found: error
+
   # Always remove the RUNNER, even if the build failed — the webhook is the part
   # a fork actor could otherwise reach. The fleet is left in place on purpose:
   # the Mac's 24h minimum is already paid and is not refunded by deleting it, so
@@ -482,7 +595,7 @@ jobs:
       - run: ./scripts/mac-fleet.sh down
 
   release:
-    needs: [build-macos, build-windows]
+    needs: assemble-signed-release
     if: ${{ !inputs.dry_run }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
@@ -504,37 +617,30 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: fleetd-installer
-          path: assets
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: fleetd-installer-windows
+          name: fleetd-installer-release-assets
           path: assets
 
-      # The asset names ARE the contract with connect, and nothing else checks
-      # them. connect resolves `fleetd.<kind>` out of SHA256SUMS by exact string
-      # match, so a rename here does not degrade — it 404s that platform's
-      # install with `release-unavailable`, silently, on every seat. The
-      # published v4.89.2 release was hand-built and shipped `fleetd.pkg` ALONE:
-      # no .deb, .rpm or .msi, so Linux and Windows could never install at all,
-      # and nothing surfaced it. Assert all four exist before publishing.
-      - name: Gate — every asset connect asks for must be present
+      # The asset names are a hard contract with connect. The assembly job has
+      # already signed and validated each native package; repeat the shape gate
+      # here so a future artifact rename cannot turn a green signed build into a
+      # release that endpoint install cannot resolve.
+      - name: Gate — signed release asset set is complete
         run: |
           set -euo pipefail
           missing=''
-          for a in fleetd.pkg fleetd.deb fleetd.rpm fleetd.msi; do
+          for a in \
+            fleetd.pkg fleetd.deb fleetd.rpm fleetd.msi \
+            fleetd.deb.asc fleetd.rpm.asc \
+            anyray-endpoint-signing-key.asc \
+            SHA256SUMS SHA256SUMS.asc \
+            endpoint-release.json endpoint-release.json.asc; do
             [ -f "assets/$a" ] || missing="$missing $a"
           done
           if [ -n "$missing" ]; then
-            echo "::error::missing asset(s):$missing — connect resolves these names exactly (endpointAssetName in connect/src/commands/endpoint.ts); publishing without one makes that platform's \`endpoint install\` report release-unavailable"
+            echo "::error::missing signed release asset(s):$missing"
             exit 1
           fi
-          echo 'all four platform assets present'
-
-      - name: Generate SHA256SUMS
-        run: |
-          set -euo pipefail
-          ( cd assets && sha256sum -- * > SHA256SUMS )
+          echo 'signed release asset set complete'
           cat assets/SHA256SUMS
           # Belt and braces on the contract above: prove each name survived into
           # the sums file connect actually parses, in the `<sha>  <name>` shape
@@ -564,5 +670,5 @@ jobs:
           gh release create "$TAG" \
             --latest=false \
             --title "fleetd installer ${FLEETCTL_VERSION}" \
-            --notes "Installers for the Anyray end-point agent (fleetd ${FLEETCTL_VERSION}): macOS (.pkg), Debian/Ubuntu (.deb), RHEL/Fedora (.rpm) and Windows (.msi). Every one is org-agnostic and carries NO enroll secret. The .pkg carries no server URL either — orbit reads it at runtime from the com.fleetdm.fleetd.config MDM configuration profile, or from the service environment that \`anyray-connect endpoint install\` writes. The .deb/.rpm/.msi bake the shared control-server URL plus an inert placeholder secret, because fleetctl has no --use-system-configuration off macOS; connect overrides both at install time. Inner binaries are signed by Fleet Device Management Inc (8VBZ3948LU); the macOS installer wrapper is signed by Anyray and notarized by Apple." \
+            --notes "Installers for the Anyray end-point agent (fleetd ${FLEETCTL_VERSION}): macOS (.pkg), Debian/Ubuntu (.deb), RHEL/Fedora (.rpm) and Windows (.msi). Every one is org-agnostic and carries NO enroll secret. The .pkg carries no server URL either — orbit reads it at runtime from the com.fleetdm.fleetd.config MDM configuration profile, or from the service environment that \`anyray-connect endpoint install\` writes. The .deb/.rpm/.msi bake the shared control-server URL plus an inert placeholder secret, because fleetctl has no --use-system-configuration off macOS; connect overrides both at install time. The macOS package is Anyray-signed and Apple-notarized; the Windows MSI is timestamped and Authenticode-signed; Linux package and release-manifest signatures are published with the Anyray public release key. SHA256SUMS and endpoint-release.json are GPG-signed. Inner binaries remain signed by Fleet Device Management Inc (8VBZ3948LU)." \
             assets/*

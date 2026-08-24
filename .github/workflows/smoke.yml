@@ -31,29 +31,41 @@ jobs:
       # only lifts the rate ceiling. Exactly what publish-ecr.sh's Phase 3 probe
       # and await-images.sh already do for the same reason.
       #
-      # Reuses the existing AWS_CFN_SMOKE_ROLE_ARN: it already trusts
-      # `repo:anyrayHQ/install:ref:refs/heads/main` and already holds
-      # `ecr-public:*`, so nothing new is granted. Gated on the variable being
-      # set so a fork (or an unconfigured clone) still runs the anonymous path
-      # rather than failing on a missing role.
+      # DEDICATED ROLE, and deliberately not AWS_CFN_SMOKE_ROLE_ARN. That role
+      # carries PowerUserAccess plus a `DenyPublicRegistryEntirely` guardrail
+      # (an explicit Deny on `ecr-public:*`), so it CANNOT mint a pull token and
+      # must not be weakened to — the guardrail is the point of it.
+      # `anyray-install-smoke-ecrpull` instead holds exactly two token-minting
+      # actions, `ecr-public:GetAuthorizationToken` + `sts:GetServiceBearerToken`
+      # (neither is resource-scopable), and nothing else: PutImage, BatchDelete
+      # and every other registry action evaluate implicitDeny, verified with
+      # `aws iam simulate-principal-policy`. It cannot read or write anything.
+      # Gated on the variable being set so a fork (or an unconfigured clone)
+      # still runs the anonymous path rather than failing on a missing role.
       - name: Configure AWS credentials (OIDC)
-        if: vars.AWS_CFN_SMOKE_ROLE_ARN != ''
+        if: vars.AWS_SMOKE_ECR_PULL_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
-          role-to-assume: ${{ vars.AWS_CFN_SMOKE_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_SMOKE_ECR_PULL_ROLE_ARN }}
           aws-region: us-east-1 # ECR Public's API is us-east-1 only
       - name: Authenticate to ECR Public
-        if: vars.AWS_CFN_SMOKE_ROLE_ARN != ''
+        if: vars.AWS_SMOKE_ECR_PULL_ROLE_ARN != ''
         run: |
           set -euo pipefail
-          # Best-effort: a login failure must fall back to the anonymous path
-          # (which still has the retry loop) rather than fail a test that is
-          # about the install flow, not about our registry credentials.
-          if aws ecr-public get-login-password --region us-east-1 2>/dev/null \
-             | docker login --username AWS --password-stdin public.ecr.aws >/dev/null 2>&1; then
+          # Still best-effort (the anonymous path with its retry loop remains a
+          # working fallback), but SHOW THE REASON. The first version discarded
+          # stderr, so when the role could not mint a token the job degraded to
+          # exactly the anonymous throttling it was meant to fix and reported
+          # only "login failed" — the fix looked applied and changed nothing.
+          # A best-effort path that hides why it fell back is how you ship a
+          # no-op and believe it worked.
+          if ! err="$(aws ecr-public get-login-password --region us-east-1 2>&1 >/dev/null)"; then
+            echo "::warning::could not mint an ECR Public token, falling back to anonymous pulls: ${err:-unknown error}"
+          elif aws ecr-public get-login-password --region us-east-1 2>/dev/null \
+               | docker login --username AWS --password-stdin public.ecr.aws 2>&1; then
             echo "authenticated to ECR Public — pulls are no longer anonymous-rate-limited"
           else
-            echo "::warning::ECR Public login failed — falling back to anonymous pulls (throttle-prone)"
+            echo "::warning::docker login to public.ecr.aws failed — falling back to anonymous pulls (throttle-prone)"
           fi
 
       - name: Generate secrets

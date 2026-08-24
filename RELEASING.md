@@ -8,20 +8,28 @@ anyray-connect binaries* → `version` = the npm version, or `latest`).
 
 ## Signing (RFC 0010 §6)
 
-Signing is **strictly conditional on the settings below being configured**.
-With none of them set, the workflow publishes the same unsigned binaries as it
-always has, byte for byte — provisioning a platform's settings is the only
-switch that turns its signing on. The `.deb`/`.rpm` packages are built either
-way as additive assets; their GPG signatures appear once the release key
-exists.
+Signing is **mandatory on every platform**, and the `signing-preflight` job
+enforces it before anything is built: a missing secret or variable fails the run
+with the names of what is absent, rather than downgrading the release to unsigned
+output. The `.deb`/`.rpm` packages are built as additive assets and carry
+detached GPG signatures.
 
-Each platform gates on a different thing, and the gate is always a *presence*
-check on one value: macOS on `APPLE_SIGNING_CERT_P12`, Windows on
-`AZURE_SIGNING_CLIENT_ID`, Linux on `LINUX_SIGNING_GPG_KEY`. **The gate makes an
-unconfigured lane silent, not loud** — a release with the Windows variables unset
-publishes an unsigned `.exe` and goes green. That is deliberate (a half-provisioned
-lane must not block a release), but it means "the release passed" is not evidence
-the binary is signed. Check the `sign-windows` job actually ran.
+Each platform still gates its own steps on a *presence* check of one value —
+macOS on `APPLE_SIGNING_CERT_P12`, Windows on `AZURE_SIGNING_CLIENT_ID`, Linux on
+`LINUX_SIGNING_GPG_KEY` — but those gates can no longer be false on a real
+release. They are kept so an unconfigured fork fails legibly at the preflight
+instead of deep inside jsign or `codesign`.
+
+> **Why this changed.** The gate used to make an unconfigured lane **silent, not
+> loud**: a release with the Windows variables unset published an unsigned `.exe`
+> and went green. The intent was that a half-provisioned lane must not block a
+> release. The result was that `AWS_SIGNING_ROLE_ARN` was never set, the
+> `sign-windows` job skipped on every run, and **every connect release for a year
+> shipped an unsigned binary** with nothing surfacing it — a skipped step and a
+> successful one are indistinguishable from outside the run. "The release passed"
+> was never evidence the binary was signed. Now it is. Do not restore the old
+> posture; if a lane is genuinely retired, remove it from the preflight list in
+> the same commit rather than leaving it listed and unset.
 
 **Build provenance is the exception**: `actions/attest-build-provenance` is
 *not* secret-gated. It signs through the workflow's own OIDC identity, so every
@@ -178,10 +186,24 @@ cannot be corrected without redoing validation.
   to `sign-windows`, and re-run the setup script with `SUBJECT_MODE=environment`.
 - **`fleetd.msi` is still unsigned** (see below).
 >
-> **Decommissioning AWS.** KMS key `alias/anyray-codesign-windows` (eu-central-1)
-> and the `AWS_SIGNING_*` variables are now unused. The key holds no certificate
-> and signed nothing, so deleting it loses nothing — schedule its deletion and
-> remove the stale variables once a release has signed green through Azure.
+> **Decommissioning AWS — done 2026-08-24.** The `AWS_SIGNING_*` repo variables
+> are deleted, and KMS key `alias/anyray-codesign-windows` (eu-central-1,
+> `a671d4b6-4407-446a-97b7-f3b5b8db3c7d`) is **scheduled for deletion on
+> 2026-09-23** with the maximum 30-day window. It is already disabled.
+>
+> Before scheduling, CloudTrail was checked over the key's entire lifetime
+> (created 2026-08-13): every event against it is a read-only metadata call
+> (`DescribeKey`, `GetKeyPolicy`, `GetKeyRotationStatus`, `ListResourceTags`).
+> There is **no `Sign` and no `GetPublicKey` event, no grant, and no CloudWatch
+> `NumberOfOperations` datapoint** — so the key never signed anything, which is
+> what makes deleting it lossless. It held a key but never a certificate.
+>
+> **Cancel with `aws kms cancel-key-deletion --key-id
+> a671d4b6-4407-446a-97b7-f3b5b8db3c7d --region eu-central-1`** any time before
+> that date. After it, the key material is unrecoverable. Nothing should need it:
+> the Windows lane has signed through Azure since #357, and a KMS-signed artifact
+> was never published, so no released binary depends on this key for
+> verification.
 
 **When the first signed release ships, these go stale in the same hour** — they
 are true only while the lane is inert, which is exactly why they are easy to
@@ -195,9 +217,22 @@ forget:
       it is a correctness bug, not a tidy-up. Note that the SmartScreen warning
       does **not** vanish on day one: Public Trust is OV-class, so reputation
       accrues with download volume.
-- [ ] Retire the `AWS_SIGNING_*` variables and schedule the KMS key deletion.
-- [ ] Record the publisher string users will actually see on the UAC prompt, so
-      support can answer "is this really you?" without guessing.
+- [x] Retire the `AWS_SIGNING_*` variables and schedule the KMS key deletion —
+      **both done 2026-08-24**. `AWS_SIGNING_KMS_KEY_ID` is deleted from the repo
+      variables; it was the last one, and it was worth deleting rather than
+      leaving inert, because a stale variable named like a live lane is what
+      invites someone to re-wire against it. The KMS key is disabled and
+      scheduled for deletion on **2026-09-23** (30-day window, cancellable until
+      then). Evidence that it signed nothing, and the cancel command, are in the
+      "Decommissioning AWS" note above.
+- [x] Record the publisher string users will actually see on the UAC prompt —
+      **`Othentic Labs LTD`**. Verified on the shipped
+      `anyray-connect-windows-x64.exe` from `connect-v0.11.158`: subject
+      `CN=Othentic Labs LTD, O=Othentic Labs LTD, L=Tel Aviv, C=IL`, issued by
+      `Microsoft ID Verified CS AOC CA 04`, timestamped. Support can quote that
+      name when a user asks "is this really you?" — it is the legal entity behind
+      Anyray, not the brand, and Azure bakes the validated entity name into every
+      certificate the profile issues.
 
 **`fleetd.msi` is still unsigned** and is out of scope here: it is built by
 `release-fleetd-installer.yml` on a Windows runner and is a separate lane. It
@@ -223,17 +258,39 @@ prints `signing key fingerprint: <40 hex>` in its log, and the release notes
 tell users to compare what they import against this file — a fingerprint nobody
 publishes out-of-band is a fingerprint nobody can check.
 
-> Current fingerprint: **not yet provisioned.** No release to date carries a
-> `.asc` asset, so the key does not exist yet and its fingerprint cannot be
-> derived from anything public. Fill this in from the release log the first time
-> the workflow runs with `LINUX_SIGNING_GPG_KEY` set.
+> **Current fingerprint:**
+>
+> ```
+> 9712 9EA5 63BF B3FC D731  1D45 FDC8 3EAF C93E 4DD8
+> ```
+>
+> Uid `Anyray Release Signing (Othentic Labs LTD) <security@anyray.ai>`, RSA 4096,
+> created 2026-08-24, **no expiry**. Both secrets are set on this repository, so
+> the lane is live from the next release onward.
+
+**Key parameters, and why.** RSA 4096 rather than Ed25519: these signatures are
+verified by customers on enterprise Linux, and GnuPG only gained Ed25519 in 2.1
+(RHEL 7 shipped 2.0.22). A signature a customer cannot check is worth nothing,
+and the size difference costs us nothing. **No expiry**, because the compromise
+response for a release key is revocation, not waiting: an expiry date is a
+release-breaking landmine that fires at the worst possible moment, and now that
+signing is mandatory an expired key would block the release outright. A
+revocation certificate was generated with the key and is stored alongside it.
+
+> **The private key exists in exactly two places: this repository's secrets
+> (write-only, unreadable even to an admin) and whatever backup was taken at
+> generation time.** If both are lost the key cannot be recovered. Already
+> published signatures keep verifying (the public key ships in each release), but
+> no future release can be signed by the same key, and every user who pinned the
+> fingerprint above sees it change. Confirm the backup exists before relying on
+> this lane.
 
 ## Verifying a download
 
 Two independent paths, both available from the first release cut after this
 landed. Release notes link back here for the key fingerprint.
 
-**The checksums are signed** (once the release key above exists). Verify the
+**The checksums are signed.** Verify the
 checksum file first, then the binary against it — checking a binary against an
 unsigned checksum file from the same release only proves the download was not
 corrupted, not that the release is genuine:

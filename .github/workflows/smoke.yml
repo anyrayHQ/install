@@ -94,18 +94,39 @@ jobs:
             if docker compose up -d --quiet-pull gateway optimizer endpoint-control proxy postgres; then
               exit 0
             fi
-            echo "attempt $attempt failed (likely ECR Public anonymous pull rate limit) — backing off"
+            echo "attempt $attempt failed — backing off"
+            # Dump state BEFORE the teardown. `down` removes the containers, so
+            # the `Logs on failure` step at the end of this job found nothing to
+            # print and reported an empty table: the retry loop was destroying
+            # the only evidence of why the stack would not come up, which is why
+            # a lease-gate failure looked identical to a registry throttle for
+            # days. Never move this below the `down`.
+            docker compose ps || true
+            docker compose logs --tail 50 || true
             docker compose down --remove-orphans
             sleep $((attempt * 20))
           done
           echo "stack never started after 5 attempts"; exit 1
       - name: Wait for health
+        # /livez, NOT /. `GET /` is a READINESS probe and a metered gateway
+        # answers it 503 while it holds no entitlement lease (gateway
+        # src/index.ts). This job connects with a synthetic adt_ token, so the
+        # Billing app 401s the metering round, no lease ever lands, and `/`
+        # 503s forever — by design, not a fault. That gate shipped 2026-08-20
+        # (ANY-142) and every smoke run since has failed on it, masked by the
+        # ECR throttling until that was fixed.
+        #
+        # Do NOT "fix" this by unsetting ANYRAY_METERING_ENABLED: connecting to
+        # the Billing app is a product invariant, and a smoke test that skips it
+        # stops testing the documented install. /livez answers 200 whenever the
+        # process can serve and checks no dependency, which is exactly the
+        # question this step asks.
         run: |
           for _ in $(seq 1 30); do
-            if curl -fs http://localhost:8787/ >/dev/null 2>&1; then exit 0; fi
+            if curl -fs http://localhost:8787/livez >/dev/null 2>&1; then exit 0; fi
             sleep 5
           done
-          echo "gateway never became healthy"; docker compose ps; docker compose logs gateway; exit 1
+          echo "gateway never became live"; docker compose ps; docker compose logs gateway; exit 1
       - name: Wait for console
         run: |
           for _ in $(seq 1 30); do
@@ -127,7 +148,11 @@ jobs:
         run: |
           set -e
           ADMIN=$(grep '^ANYRAY_ADMIN_TOKEN=' .env | cut -d= -f2)
-          curl -fs http://localhost:8787/ | grep -q "AI Gateway"
+          # Same reason as `Wait for health`: `/` is readiness and 503s without
+          # a lease. Both bodies start "AI Gateway", so this assertion held on
+          # either — assert the LIVENESS body explicitly instead of a prefix
+          # that a 503 also satisfies.
+          test "$(curl -fs http://localhost:8787/livez)" = "ok"
           curl -fso /dev/null http://localhost:3000/anyray-login
           test "$(curl -so /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN" http://localhost:8787/admin/auth)" = "200"
           test "$(curl -so /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" http://localhost:8787/admin/auth)" = "401"

@@ -122,8 +122,21 @@ services:
       ANYRAY_ENDPOINT_CONTROL_URL: http://endpoint-control:8090
     volumes:
       - anyray_gateway_data:/data
+    # /livez, NOT `/`. `GET /` is the gateway's READINESS probe and a metered
+    # gateway answers it 503 for as long as it holds no entitlement lease
+    # (gateway src/index.ts, ANY-142). That is correct for a load balancer —
+    # a replica with no lease 503s every /v1/* request, so it should leave the
+    # Service — but it is the wrong signal for a compose healthcheck, because
+    # `depends_on: service_healthy` then refuses to start the console for a
+    # gateway that is running perfectly well and merely has not been granted a
+    # lease yet (a fresh install, a Billing app blip, an expired trial).
+    #
+    # The console does not need the gateway to be READY: nginx auth_request
+    # calls /admin/auth, which answers 200/401 with no lease at all (verified).
+    # /livez is 200 whenever the process can serve and checks no dependency,
+    # which is exactly what "may the console start" depends on.
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/livez').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 10

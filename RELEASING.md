@@ -8,20 +8,28 @@ anyray-connect binaries* → `version` = the npm version, or `latest`).
 
 ## Signing (RFC 0010 §6)
 
-Signing is **strictly conditional on the settings below being configured**.
-With none of them set, the workflow publishes the same unsigned binaries as it
-always has, byte for byte — provisioning a platform's settings is the only
-switch that turns its signing on. The `.deb`/`.rpm` packages are built either
-way as additive assets; their GPG signatures appear once the release key
-exists.
+Signing is **mandatory on every platform**, and the `signing-preflight` job
+enforces it before anything is built: a missing secret or variable fails the run
+with the names of what is absent, rather than downgrading the release to unsigned
+output. The `.deb`/`.rpm` packages are built as additive assets and carry
+detached GPG signatures.
 
-Each platform gates on a different thing, and the gate is always a *presence*
-check on one value: macOS on `APPLE_SIGNING_CERT_P12`, Windows on
-`AZURE_SIGNING_CLIENT_ID`, Linux on `LINUX_SIGNING_GPG_KEY`. **The gate makes an
-unconfigured lane silent, not loud** — a release with the Windows variables unset
-publishes an unsigned `.exe` and goes green. That is deliberate (a half-provisioned
-lane must not block a release), but it means "the release passed" is not evidence
-the binary is signed. Check the `sign-windows` job actually ran.
+Each platform still gates its own steps on a *presence* check of one value —
+macOS on `APPLE_SIGNING_CERT_P12`, Windows on `AZURE_SIGNING_CLIENT_ID`, Linux on
+`LINUX_SIGNING_GPG_KEY` — but those gates can no longer be false on a real
+release. They are kept so an unconfigured fork fails legibly at the preflight
+instead of deep inside jsign or `codesign`.
+
+> **Why this changed.** The gate used to make an unconfigured lane **silent, not
+> loud**: a release with the Windows variables unset published an unsigned `.exe`
+> and went green. The intent was that a half-provisioned lane must not block a
+> release. The result was that `AWS_SIGNING_ROLE_ARN` was never set, the
+> `sign-windows` job skipped on every run, and **every connect release for a year
+> shipped an unsigned binary** with nothing surfacing it — a skipped step and a
+> successful one are indistinguishable from outside the run. "The release passed"
+> was never evidence the binary was signed. Now it is. Do not restore the old
+> posture; if a lane is genuinely retired, remove it from the preflight list in
+> the same commit rather than leaving it listed and unset.
 
 **Build provenance is the exception**: `actions/attest-build-provenance` is
 *not* secret-gated. It signs through the workflow's own OIDC identity, so every
@@ -195,9 +203,21 @@ forget:
       it is a correctness bug, not a tidy-up. Note that the SmartScreen warning
       does **not** vanish on day one: Public Trust is OV-class, so reputation
       accrues with download volume.
-- [ ] Retire the `AWS_SIGNING_*` variables and schedule the KMS key deletion.
-- [ ] Record the publisher string users will actually see on the UAC prompt, so
-      support can answer "is this really you?" without guessing.
+- [x] Retire the `AWS_SIGNING_*` variables — **done 2026-08-24**:
+      `AWS_SIGNING_KMS_KEY_ID` is deleted from the repo variables. It was the last
+      one, and it was worth deleting rather than leaving inert: a stale variable
+      named like a live lane is what invites someone to re-wire against it. **The
+      KMS key `alias/anyray-codesign-windows` (eu-central-1) still exists** and
+      still needs its deletion scheduled — it holds no certificate and signed
+      nothing, so nothing is lost by removing it.
+- [x] Record the publisher string users will actually see on the UAC prompt —
+      **`Othentic Labs LTD`**. Verified on the shipped
+      `anyray-connect-windows-x64.exe` from `connect-v0.11.158`: subject
+      `CN=Othentic Labs LTD, O=Othentic Labs LTD, L=Tel Aviv, C=IL`, issued by
+      `Microsoft ID Verified CS AOC CA 04`, timestamped. Support can quote that
+      name when a user asks "is this really you?" — it is the legal entity behind
+      Anyray, not the brand, and Azure bakes the validated entity name into every
+      certificate the profile issues.
 
 **`fleetd.msi` is still unsigned** and is out of scope here: it is built by
 `release-fleetd-installer.yml` on a Windows runner and is a separate lane. It

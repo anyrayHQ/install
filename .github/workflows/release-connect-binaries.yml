@@ -12,20 +12,24 @@ name: Release anyray-connect binaries
 #
 # Code signing (RFC 0010 §6, setting names in RELEASING.md): the darwin
 # binaries are Developer ID-signed + notarized on an on-demand Mac, the windows
-# binary is Authenticode-signed by jsign against an AWS KMS-held key (on the
-# LINUX runner — jsign is pure Java, so no Windows runner is involved), and the
-# linux binaries are additionally packaged as .deb/.rpm (GPG detach-signed once
-# the release key exists). Every signing step is conditional on its own settings
-# being configured — with none set the binaries publish byte-identical to an
-# unsigned run; the .deb/.rpm are additive assets either way. SHA256SUMS is
-# generated in the release job, AFTER signing, because signing rewrites the
-# binaries.
+# binary is Authenticode-signed by jsign against a certificate held by **Azure
+# Artifact Signing** (on the LINUX runner — jsign is pure Java, so no Windows
+# runner is involved), and the linux binaries are additionally packaged as
+# .deb/.rpm and GPG detach-signed. SHA256SUMS is generated in the release job,
+# AFTER signing, because signing rewrites the binaries.
+#
+# EVERY LANE IS MANDATORY, and `signing-preflight` enforces that before anything
+# builds — see its comment for why. The per-step `if: env.X != ''` gates below
+# are retained (they make an unconfigured fork fail legibly rather than deep
+# inside a signer) but on a real release they can no longer be false. Do not
+# reintroduce "unset means skip" as the release posture: that is precisely how
+# every connect release to date shipped an unsigned `.exe`.
 #
 # Release integrity (two independent paths, both in the release job):
 #   - SHA256SUMS is GPG detach-signed to SHA256SUMS.asc with the same release
 #     key, so the checksum file the installers fetch is not merely self-
 #     consistent with a release an attacker could have rewritten end to end.
-#     Secret-gated like the package signing above.
+#     Mandatory, like the package signing above.
 #   - actions/attest-build-provenance records signed build provenance for every
 #     shipped executable and package. Not secret-gated — it runs off the
 #     workflow's OIDC identity — so `gh attestation verify` works from the next
@@ -59,7 +63,67 @@ permissions:
   contents: read
 
 jobs:
+  # EVERY signing lane must be configured before anything is built.
+  #
+  # Each lane below is individually gated on one secret/variable being non-empty
+  # (`if: env.X != ''`), which was the right posture while they were being landed
+  # one at a time — a half-configured repo still cut releases. It is the wrong
+  # posture now, and it has already cost us the thing it was supposed to make
+  # safe: `AWS_SIGNING_ROLE_ARN` was never set, so the Windows job skipped in
+  # silence and EVERY connect release to date shipped an unsigned `.exe`. Nobody
+  # noticed for a year, because a skipped step and a signed one look identical
+  # from the outside — both are a green run with assets attached.
+  #
+  # So the gate moved here, ahead of the work: an unconfigured lane fails the
+  # release instead of quietly downgrading it. The per-step `if:` conditions stay
+  # exactly as they are — with this job as a `needs:` on the signers, they can no
+  # longer evaluate false on a real release, and they still let a hand-run in a
+  # fork (where no secrets exist) fail here with one legible message instead of
+  # deep inside jsign.
+  #
+  # Adding a signing lane means adding it to this list. If a lane is ever
+  # deliberately retired, delete its entry here in the same commit — never leave
+  # it listed and unset, which is how this trap re-arms.
+  signing-preflight:
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    env:
+      # A step `if:` cannot read `secrets.*`, and neither can a job-level `if:` —
+      # so the values are mapped into env and checked in a `run:` block, the same
+      # shape the per-lane gates already use.
+      APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
+      APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+      AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+      AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
+      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
+    steps:
+      - name: Every signing lane must be configured
+        run: |
+          set -euo pipefail
+          missing=''
+          # Only the NAMES are echoed on failure, never the values — several of
+          # these are credentials and this repository is public.
+          for name in \
+            APPLE_SIGNING_CERT_P12 APPLE_SIGNING_CERT_PASSWORD \
+            APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID \
+            AZURE_SIGNING_CLIENT_ID AZURE_SIGNING_TENANT_ID \
+            AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT_PROFILE \
+            LINUX_SIGNING_GPG_KEY LINUX_SIGNING_GPG_PASSPHRASE; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::signing is not fully configured — refusing to cut a release that would ship unsigned or unverifiable artifacts. Missing:$missing (see RELEASING.md for where each one comes from)"
+            exit 1
+          fi
+          echo 'all signing lanes configured: macOS (Developer ID + notarization), Windows (Azure Artifact Signing), Linux (GPG)'
+
   build:
+    needs: signing-preflight
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     outputs:
       version: ${{ steps.pkg.outputs.version }}

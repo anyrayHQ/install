@@ -282,6 +282,51 @@ jobs:
             || { echo "::error::ORBIT_ENABLE_SCRIPTS missing — every remediation script would 422"; exit 1; }
           rm -rf expanded
 
+      # Retitle the installer window BEFORE signing. `fleetctl package` writes
+      # upstream's Distribution XML, so a human double-clicking this from the
+      # console saw an Installer titled "Fleet osquery" with no mention of
+      # Anyray. The console offers this as a human download, so that window is a
+      # customer-facing surface, not an implementation detail.
+      #
+      # Order matters: productsign covers the whole archive including
+      # Distribution, so this MUST run before it. Editing after signing would
+      # invalidate the signature, and after notarization would invalidate the
+      # ticket too.
+      #
+      # Deliberately only the presentation strings. The package identifier,
+      # payload, version and the ORBIT_* launchd contract asserted above are
+      # untouched — this must not change what installs, only what it is called.
+      - name: Retitle the installer window
+        run: |
+          set -euo pipefail
+          pkgutil --expand fleetd.pkg retitle
+          python3 - <<'PY'
+          import pathlib, re
+          d = pathlib.Path('retitle/Distribution')
+          x = d.read_text()
+          before = x
+          x = x.replace('<title>Fleet osquery</title>', '<title>Anyray Endpoint Agent</title>')
+          x = re.sub(r'title="Fleet osquery"', 'title="Anyray Endpoint Agent"', x)
+          x = x.replace('Standard installation for Fleet osquery.',
+                        'Standard installation for the Anyray end-point agent.')
+          if x == before:
+              raise SystemExit('Distribution carried none of the expected upstream strings; '
+                               'fleetctl changed its template, re-derive them before shipping')
+          d.write_text(x)
+          print('retitled installer window strings')
+          PY
+          rm -f fleetd.pkg
+          pkgutil --flatten retitle fleetd.pkg
+          rm -rf retitle
+          # Prove the rewrite survived the reflatten, and that the payload is
+          # still intact — a truncated flatten would otherwise ship silently.
+          pkgutil --expand fleetd.pkg check
+          grep -q '<title>Anyray Endpoint Agent</title>' check/Distribution \
+            || { echo '::error::retitle did not survive the reflatten'; exit 1; }
+          test "$(pkgutil --payload-files fleetd.pkg | wc -l)" -gt 0 \
+            || { echo '::error::reflattened package has an empty payload'; exit 1; }
+          rm -rf check
+
       - name: Sign the package (Developer ID Installer)
         run: |
           set -euo pipefail

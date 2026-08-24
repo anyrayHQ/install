@@ -76,8 +76,10 @@ Three invariants the workflow encodes — keep them if you touch it:
 ### Windows — Authenticode (Azure Artifact Signing + jsign)
 
 All four are **variables, not secrets**: OIDC federation means there is no client
-secret to store. `AZURE_SIGNING_CLIENT_ID` is also the on/off switch for the
-whole lane — unset, every step skips and an unsigned binary passes through.
+secret to store. `AZURE_SIGNING_CLIENT_ID` still gates each step of the lane, but
+it is **no longer an on/off switch**: `signing-preflight` fails the release when
+any of the four is absent, so leaving them unset produces a failed run, never an
+unsigned `.exe`.
 
 | Setting | Kind | What it is | Where to get it |
 | --- | --- | --- | --- |

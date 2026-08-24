@@ -224,9 +224,10 @@ jobs:
           path: out/
           if-no-files-found: error
 
-  # Developer ID-signs + notarizes the two darwin binaries when the Apple
-  # secrets are configured; with them unset every step below no-ops and the
-  # binaries pass through byte-identical.
+  # Developer ID-signs + notarizes the two darwin binaries. The per-step gates
+  # below still check the Apple secrets, but `signing-preflight` has already
+  # failed the run if any is missing, so on a real release they cannot be false
+  # and an unsigned binary cannot pass through.
   # Allocate a macOS signing runner ON DEMAND: create the MAC_ARM CodeBuild
   # fleet + ephemeral runner project, with teardown-mac removing the runner.
   # Runs on the Linux runner and assumes a scoped GitHub-OIDC role to drive the
@@ -415,10 +416,12 @@ jobs:
       - run: ./scripts/mac-fleet.sh down
 
   # Authenticode-signs the windows binary through Azure Artifact Signing
-  # (formerly Trusted Signing), driven by jsign. Inert until configured: with no
-  # `AZURE_SIGNING_CLIENT_ID` every step below skips and the unsigned binary
-  # passes through byte-identical, so this cannot break a release before the
-  # Azure side exists.
+  # (formerly Trusted Signing), driven by jsign. The per-step
+  # `AZURE_SIGNING_CLIENT_ID` gates below are retained, but the lane is no longer
+  # "inert until configured": `signing-preflight` fails the run when any of the
+  # four Azure variables is missing, so an unset lane is a failed release rather
+  # than a silently unsigned `.exe` — which is exactly how this lane shipped
+  # unsigned binaries for a year.
   #
   # WHY NOT A .pfx, WHICH THIS JOB ONCE EXPECTED. Since June 2023 the
   # CA/Browser Forum requires code-signing private keys to live on FIPS 140-2

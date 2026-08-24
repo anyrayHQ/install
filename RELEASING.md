@@ -186,10 +186,24 @@ cannot be corrected without redoing validation.
   to `sign-windows`, and re-run the setup script with `SUBJECT_MODE=environment`.
 - **`fleetd.msi` is still unsigned** (see below).
 >
-> **Decommissioning AWS.** KMS key `alias/anyray-codesign-windows` (eu-central-1)
-> and the `AWS_SIGNING_*` variables are now unused. The key holds no certificate
-> and signed nothing, so deleting it loses nothing — schedule its deletion and
-> remove the stale variables once a release has signed green through Azure.
+> **Decommissioning AWS — done 2026-08-24.** The `AWS_SIGNING_*` repo variables
+> are deleted, and KMS key `alias/anyray-codesign-windows` (eu-central-1,
+> `a671d4b6-4407-446a-97b7-f3b5b8db3c7d`) is **scheduled for deletion on
+> 2026-09-23** with the maximum 30-day window. It is already disabled.
+>
+> Before scheduling, CloudTrail was checked over the key's entire lifetime
+> (created 2026-08-13): every event against it is a read-only metadata call
+> (`DescribeKey`, `GetKeyPolicy`, `GetKeyRotationStatus`, `ListResourceTags`).
+> There is **no `Sign` and no `GetPublicKey` event, no grant, and no CloudWatch
+> `NumberOfOperations` datapoint** — so the key never signed anything, which is
+> what makes deleting it lossless. It held a key but never a certificate.
+>
+> **Cancel with `aws kms cancel-key-deletion --key-id
+> a671d4b6-4407-446a-97b7-f3b5b8db3c7d --region eu-central-1`** any time before
+> that date. After it, the key material is unrecoverable. Nothing should need it:
+> the Windows lane has signed through Azure since #357, and a KMS-signed artifact
+> was never published, so no released binary depends on this key for
+> verification.
 
 **When the first signed release ships, these go stale in the same hour** — they
 are true only while the lane is inert, which is exactly why they are easy to
@@ -203,13 +217,14 @@ forget:
       it is a correctness bug, not a tidy-up. Note that the SmartScreen warning
       does **not** vanish on day one: Public Trust is OV-class, so reputation
       accrues with download volume.
-- [x] Retire the `AWS_SIGNING_*` variables — **done 2026-08-24**:
-      `AWS_SIGNING_KMS_KEY_ID` is deleted from the repo variables. It was the last
-      one, and it was worth deleting rather than leaving inert: a stale variable
-      named like a live lane is what invites someone to re-wire against it. **The
-      KMS key `alias/anyray-codesign-windows` (eu-central-1) still exists** and
-      still needs its deletion scheduled — it holds no certificate and signed
-      nothing, so nothing is lost by removing it.
+- [x] Retire the `AWS_SIGNING_*` variables and schedule the KMS key deletion —
+      **both done 2026-08-24**. `AWS_SIGNING_KMS_KEY_ID` is deleted from the repo
+      variables; it was the last one, and it was worth deleting rather than
+      leaving inert, because a stale variable named like a live lane is what
+      invites someone to re-wire against it. The KMS key is disabled and
+      scheduled for deletion on **2026-09-23** (30-day window, cancellable until
+      then). Evidence that it signed nothing, and the cancel command, are in the
+      "Decommissioning AWS" note above.
 - [x] Record the publisher string users will actually see on the UAC prompt —
       **`Othentic Labs LTD`**. Verified on the shipped
       `anyray-connect-windows-x64.exe` from `connect-v0.11.158`: subject

@@ -1467,7 +1467,23 @@ jobs:
             gh release create "$TAG" \
               --title "anyray-connect ${VERSION} (binaries and macOS package)" \
               --notes-file "$NOTES" \
+              --latest \
               assets/*
+
+            actual_latest="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+            if [ "$actual_latest" != "$TAG" ]; then
+              echo "::error::expected releases/latest to resolve to $TAG, got $actual_latest"
+              exit 1
+            fi
+
+            pkg_count="$(
+              gh api "repos/${REPO}/releases/tags/${TAG}" \
+                --jq '[.assets[] | select(.name == "anyray-connect.pkg")] | length'
+            )"
+            if [ "$pkg_count" != "1" ]; then
+              echo "::error::expected release $TAG to contain exactly one anyray-connect.pkg asset"
+              exit 1
+            fi
           fi
 
       # dry_run: prove the whole build->sign->notarize->fleet path without a

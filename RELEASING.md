@@ -1,17 +1,19 @@
 # Releasing `anyray-connect` binaries
 
 `.github/workflows/release-connect-binaries.yml` compiles the published
-`anyray-connect` npm package into standalone executables and attaches them to a
-GitHub Release on this repo. The monorepo's `publish-connect.yml` dispatches it
-after every npm publish; it can also be run by hand (Actions → *Release
-anyray-connect binaries* → `version` = the npm version, or `latest`).
+`anyray-connect` npm package into standalone executables and a universal macOS
+MDM installer, then attaches them to a GitHub Release on this repo. The
+monorepo's `publish-connect.yml` dispatches it after every npm publish; it can
+also be run by hand (Actions → *Release anyray-connect binaries* → `version` =
+the npm version, or `latest`).
 
 ## Signing (RFC 0010 §6)
 
 Signing is **mandatory on every platform**, and the `signing-preflight` job
 enforces it before anything is built: a missing secret or variable fails the run
 with the names of what is absent, rather than downgrading the release to unsigned
-output. The `.deb`/`.rpm` packages are built as additive assets and carry
+output. The macOS `.pkg` is Developer ID Installer-signed, notarized, and
+stapled. The `.deb`/`.rpm` packages are built as additive assets and carry
 detached GPG signatures.
 
 Each platform still gates its own steps on a *presence* check of one value —
@@ -31,12 +33,11 @@ instead of deep inside jsign or `codesign`.
 > posture; if a lane is genuinely retired, remove it from the preflight list in
 > the same commit rather than leaving it listed and unset.
 
-This describes the legacy `release-connect-binaries.yml` lane. The newer
-`release-fleetd-installer.yml` endpoint-package lane is deliberately stricter:
-it fails closed unless the macOS installer/notarization credentials, Azure
-Artifact Signing configuration, and Linux GPG release key are all present. It
-publishes only assembled signed artifacts, along with detached Linux package
-signatures, `SHA256SUMS.asc`, and `endpoint-release.json.asc`.
+Both `release-connect-binaries.yml` and the endpoint-package workflow
+`release-fleetd-installer.yml` fail closed unless the macOS application and
+installer certificates, notarization credentials, Azure Artifact Signing
+configuration, and Linux GPG release key are all present. Neither workflow may
+publish a partly signed asset set.
 
 **Build provenance is the exception**: `actions/attest-build-provenance` is
 *not* secret-gated. It signs through the workflow's own OIDC identity, so every
@@ -55,11 +56,11 @@ Three invariants the workflow encodes — keep them if you touch it:
   imported a second time there on purpose. Both import steps use the identical
   mechanism (isolated `GNUPGHOME` under `$RUNNER_TEMP`, loopback pinentry,
   passphrase over fd 0, `always()` cleanup); if you change one, change both.
-- **A bare mach-o binary cannot be stapled.** `xcrun stapler staple` only
-  applies to bundles/dmg/pkg, so the notarized CLI binaries ship as-is and
-  Gatekeeper fetches the notarization ticket online. When the desktop tray
-  ships as a `.app` bundle, its lane is sign → notarize → staple (seam comment
-  in the `sign-macos` job).
+- **A bare mach-o binary cannot be stapled, but a `.pkg` can.** The notarized
+  standalone CLI binaries ship as-is and Gatekeeper fetches their ticket online.
+  `anyray-connect.pkg` is notarized and stapled after its two universal inner
+  binaries and outer package have been signed, so MDM installation can validate
+  it without a live Apple lookup.
 
 ## Secrets to provision (repo → Settings → Secrets and variables → Actions)
 
@@ -69,9 +70,45 @@ Three invariants the workflow encodes — keep them if you touch it:
 | --- | --- | --- |
 | `APPLE_SIGNING_CERT_P12` | Base64 of the **Developer ID Application** certificate + private key (`.p12`) | [Apple Developer Program](https://developer.apple.com/account) ($99/yr) → Certificates → create *Developer ID Application*; import into Keychain Access, export as `.p12` with a password, then `base64 -i cert.p12` |
 | `APPLE_SIGNING_CERT_PASSWORD` | The `.p12` export password | Chosen at export time |
+| `APPLE_INSTALLER_CERT_P12` | Base64 of the separate **Developer ID Installer** certificate + private key (`.p12`) | Apple Developer Program → Certificates → create *Developer ID Installer*; import and export it with its private key |
+| `APPLE_INSTALLER_CERT_PASSWORD` | The Installer `.p12` export password | Chosen at export time |
 | `APPLE_NOTARY_KEY_ID` | App Store Connect API key ID | [App Store Connect](https://appstoreconnect.apple.com) → Users and Access → Integrations → App Store Connect API → create a **Team key** (Developer role suffices) |
 | `APPLE_NOTARY_ISSUER_ID` | Issuer ID (UUID) shown on the same page | Same page as the key |
 | `APPLE_NOTARY_KEY` | Base64 of the `.p8` private key (`base64 -i AuthKey_XXXX.p8`) | Downloadable **once** at key creation — store the original safely |
+
+The two Apple certificates are different types and are both required. The
+Developer ID Application identity signs the universal `anyray-connect` and
+`anyray-device-proof` Mach-O files inside the package. `pkgbuild --ownership
+recommended` creates the component package, and the Developer ID Installer
+identity signs that outer package with `productsign`. The workflow then submits
+the final `.pkg` to Apple, staples the ticket, and checks it with both
+`pkgutil --check-signature` and `spctl -t install`.
+
+`anyray-device-proof` keeps each Mac's private device key non-exportable in the
+user's Data Protection Keychain. Apple permits that access only when the helper
+is signed with its application identifier, Team Identifier, and Keychain access
+group. The workflow derives the Team Identifier from the imported Developer ID
+Application identity and uses the group
+`TEAMID.ai.anyray.connect.device-proof`; there is no separate Team ID setting to
+maintain. It verifies the embedded entitlements and runs a real signing request
+before building the package. These identity entitlements belong only to the
+helper. The Bun-based `anyray-connect` binary keeps its existing `allow-jit`
+entitlement and does not receive Keychain access.
+
+The package carries no enrollment token or customer certificate. It installs a
+LaunchAgent that handles either MDM ordering safely:
+
+- **Profile before package:** `postinstall` bootstraps and kickstarts the agent
+  for the current desktop user; `RunAtLoad` performs enrollment immediately.
+- **Package before profile:** the first run exits cleanly while the managed
+  preference is absent. `WatchPaths` starts it when MDM creates
+  `/Library/Managed Preferences/ai.anyray.connect.plist`.
+- A later temporary enrollment failure exits nonzero, so `KeepAlive` retries it
+  with a 300-second throttle. A new login also gets `RunAtLoad` automatically
+  from `/Library/LaunchAgents`; that login run rechecks cached state so an
+  expired certificate, lost Keychain key, or rotated profile can recover. A
+  full local `anyray-connect --revert` records an opt-out and stays reverted
+  until the user explicitly applies Connect again.
 
 ### Windows — Authenticode (Azure Artifact Signing + jsign)
 
@@ -309,6 +346,8 @@ gpg --import anyray-connect-signing-key.asc   # compare against the fingerprint 
 gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum --ignore-missing --check SHA256SUMS
 gpg --verify anyray-connect_<version>_amd64.deb.asc anyray-connect_<version>_amd64.deb
+pkgutil --check-signature anyray-connect.pkg
+spctl -a -vvv -t install anyray-connect.pkg
 ```
 
 **Every binary and package carries build provenance**, signed through Sigstore
@@ -319,6 +358,7 @@ change have no attestation and cannot retroactively gain one:
 
 ```bash
 gh attestation verify anyray-connect-linux-x64 --repo anyrayHQ/install
+gh attestation verify anyray-connect.pkg --repo anyrayHQ/install
 ```
 
 That confirms the file was produced by this workflow, in this repository, at a
@@ -375,7 +415,9 @@ Both persistent projects and the ephemeral mac project are webhook-driven
 required because the repo is public, so a fork-PR actor can never start a runner. Adding a
 release maintainer means extending that id in the webhook filters and `mac-fleet.sh`.
 
-Apple signing secrets (codesign path, all set): `APPLE_SIGNING_CERT_P12` +
-`APPLE_SIGNING_CERT_PASSWORD`, `APPLE_NOTARY_KEY` (base64 `.p8`), `APPLE_NOTARY_KEY_ID`,
-`APPLE_NOTARY_ISSUER_ID`. (`APPLE_SIGNING_CERT_PEM` was set for the abandoned rcodesign path and
-is unused.)
+Apple signing secrets (all required): `APPLE_SIGNING_CERT_P12` +
+`APPLE_SIGNING_CERT_PASSWORD` for the inner binaries,
+`APPLE_INSTALLER_CERT_P12` + `APPLE_INSTALLER_CERT_PASSWORD` for the outer
+package, and `APPLE_NOTARY_KEY` (base64 `.p8`) + `APPLE_NOTARY_KEY_ID` +
+`APPLE_NOTARY_ISSUER_ID` for notarization. (`APPLE_SIGNING_CERT_PEM` was set for
+the abandoned rcodesign path and is unused.)

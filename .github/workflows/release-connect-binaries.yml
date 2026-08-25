@@ -170,7 +170,10 @@ jobs:
           VERSION="$(node -p "require('./package/package.json').version")"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           test -f package/dist/index.js
-          test -f package/native/macos/Package.swift
+          if [ ! -f package/native/macos/Package.swift ]; then
+            echo "::error::anyray-connect@${VERSION} does not include the native macOS helper source. Publish a Connect package containing native/macos before running this release."
+            exit 1
+          fi
 
       - name: Install runtime dependencies for bundling
         working-directory: package

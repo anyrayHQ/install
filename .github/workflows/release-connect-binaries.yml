@@ -490,6 +490,29 @@ jobs:
           # --sign <hash>` reports "no identity found". Make the throwaway
           # keychain the default and put it on the session search list.
           security default-keychain -s "$KEYCHAIN"
+          # Fresh ephemeral Mac runners do not reliably carry Apple's Developer
+          # ID intermediates. Import the two public Apple intermediates after
+          # checksum verification, and keep the system root keychain in the
+          # search list so codesign can build the complete trusted chain.
+          apple_ca_dir="$RUNNER_TEMP/apple-developer-id-ca"
+          mkdir -p "$apple_ca_dir"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://www.apple.com/certificateauthority/DeveloperIDCA.cer \
+            --output "$apple_ca_dir/DeveloperIDCA.cer"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+            --output "$apple_ca_dir/DeveloperIDG2CA.cer"
+          printf '%s  %s\n' \
+            '7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f' \
+            "$apple_ca_dir/DeveloperIDCA.cer" \
+            'f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a' \
+            "$apple_ca_dir/DeveloperIDG2CA.cer" \
+            | shasum -a 256 -c -
+          security import "$apple_ca_dir/DeveloperIDCA.cer" -k "$KEYCHAIN"
+          security import "$apple_ca_dir/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
+          rm -rf "$apple_ca_dir"
+          SYSTEM_ROOT_KEYCHAIN='/System/Library/Keychains/SystemRootCertificates.keychain'
+          test -r "$SYSTEM_ROOT_KEYCHAIN"
           printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/signing-cert.p12"
           security import "$RUNNER_TEMP/signing-cert.p12" -k "$KEYCHAIN" -f pkcs12 \
             -P "$APPLE_SIGNING_CERT_PASSWORD" -A -T /usr/bin/codesign
@@ -498,17 +521,14 @@ jobs:
           # command dumps key attributes on success, so discard its stdout.
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
-          security list-keychains -s "$KEYCHAIN"
+          security list-keychains -s "$KEYCHAIN" "$SYSTEM_ROOT_KEYCHAIN"
           # Diagnostics: what actually landed in the throwaway keychain.
           echo "--- codesigning identities (all / valid-only) ---"
           security find-identity -p codesigning "$KEYCHAIN" || true
           security find-identity -v -p codesigning "$KEYCHAIN" || true
-          # Select by name WITHOUT -v: on a fresh CI keychain the Developer ID
-          # chain often can't establish anchor trust for the `-v` validity
-          # filter (no login keychain, no OCSP), so `-v` hides an identity that
-          # signs perfectly well. The key + cert are ours; codesign validates
-          # the real signature afterwards.
-          IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" \
+          # Require a valid identity here. Continuing with an untrusted leaf
+          # only fails later as the opaque codesign errSecInternalComponent.
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
             | awk '/Developer ID Application/ {print $2; exit}')"
           if [ -z "$IDENTITY" ]; then
             echo "::error::APPLE_SIGNING_CERT_P12 imported no Developer ID Application identity (see diagnostics above)"
@@ -719,7 +739,7 @@ jobs:
           rm -f "$RUNNER_TEMP/installer-cert.p12"
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
-          security list-keychains -s "$KEYCHAIN"
+          security list-keychains -s "$KEYCHAIN" "$SYSTEM_ROOT_KEYCHAIN"
           echo '--- installer identities in the throwaway keychain ---'
           security find-identity -v "$KEYCHAIN" || true
           INSTALLER_IDENTITY="$(security find-identity -v "$KEYCHAIN" \

@@ -11,7 +11,8 @@ name: Release anyray-connect binaries
 # anyray-connect version to npm.
 #
 # Code signing (RFC 0010 §6, setting names in RELEASING.md): the darwin
-# binaries are Developer ID-signed + notarized on an on-demand Mac, the windows
+# binaries are Developer ID-signed + notarized on an on-demand Mac; the macOS
+# MDM package is additionally Installer-signed, notarized, and stapled; the Windows
 # binary is Authenticode-signed by jsign against a certificate held by **Azure
 # Artifact Signing** (on the LINUX runner — jsign is pure Java, so no Windows
 # runner is involved), and the linux binaries are additionally packaged as
@@ -49,12 +50,12 @@ on:
         required: false
         default: ''
       dry_run:
-        description: 'Test run: build + sign + notarize + exercise the on-demand Mac fleet, but do NOT publish a GitHub release (no customer-facing change). Signed binaries are uploaded as a workflow artifact for inspection.'
+        description: 'Test run: build + sign + notarize + exercise the on-demand Mac fleet, but do NOT publish a GitHub release (no customer-facing change). Signed assets are uploaded as a workflow artifact for inspection.'
         required: false
         type: boolean
         default: false
       staging:
-        description: 'Staging release: publish the SAME signed binaries under a connect-staging-v<version> pre-release tag, so a tester can fetch a real build by URL without changing anything customers receive. Ignored when dry_run is set.'
+        description: 'Staging release: publish the SAME signed assets under a connect-staging-v<version> pre-release tag, so a tester can fetch a real build by URL without changing anything customers receive. Ignored when dry_run is set.'
         required: false
         type: boolean
         default: false
@@ -92,6 +93,8 @@ jobs:
       # shape the per-lane gates already use.
       APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
       APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+      APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
       APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
@@ -110,6 +113,7 @@ jobs:
           # these are credentials and this repository is public.
           for name in \
             APPLE_SIGNING_CERT_P12 APPLE_SIGNING_CERT_PASSWORD \
+            APPLE_INSTALLER_CERT_P12 APPLE_INSTALLER_CERT_PASSWORD \
             APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID \
             AZURE_SIGNING_CLIENT_ID AZURE_SIGNING_TENANT_ID \
             AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT_PROFILE \
@@ -166,6 +170,10 @@ jobs:
           VERSION="$(node -p "require('./package/package.json').version")"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           test -f package/dist/index.js
+          if [ ! -f package/native/macos/Package.swift ]; then
+            echo "::error::anyray-connect@${VERSION} does not include the native macOS helper source. Publish a Connect package containing native/macos before running this release."
+            exit 1
+          fi
 
       - name: Install runtime dependencies for bundling
         working-directory: package
@@ -224,6 +232,12 @@ jobs:
           path: out/
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-helper-source
+          path: package/native/macos/
+          if-no-files-found: error
+
   # Developer ID-signs + notarizes the two darwin binaries. The per-step gates
   # below still check the Apple secrets, but `signing-preflight` has already
   # failed the run if any is missing, so on a real release they cannot be false
@@ -252,18 +266,22 @@ jobs:
           aws-region: eu-central-1
       - run: ./scripts/mac-fleet.sh up
 
-  # Developer ID-signs + notarizes the two darwin binaries on the on-demand Mac
+  # Developer ID-signs + notarizes the two darwin binaries and the universal
+  # macOS installer on the on-demand Mac
   # using Apple's own codesign + notarytool — the only tooling that correctly
   # signs Bun-compiled binaries (rcodesign/quill mishandle the x64 Mach-O and
   # produce a signature that verifies but won't launch; proven by E2E).
   sign-macos:
-    needs: provision-mac
+    needs: [build, provision-mac]
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
     env:
+      VERSION: ${{ needs.build.outputs.version }}
       # GitHub Actions can't read `secrets.*` in a step `if:` — map the secrets
       # into job env and gate each step on `env.X != ''` instead.
       APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
       APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+      APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
       APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
@@ -273,7 +291,183 @@ jobs:
           name: binaries-unsigned
           path: out
 
-      - name: Sign the darwin binaries (Developer ID)
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: macos-helper-source
+          path: native/macos
+
+      - name: Build the universal macOS package payload
+        run: |
+          set -euo pipefail
+          arm_scratch="$RUNNER_TEMP/anyray-helper-arm64"
+          x64_scratch="$RUNNER_TEMP/anyray-helper-x64"
+          swift build --package-path native/macos --configuration release \
+            --product anyray-device-proof --arch arm64 --scratch-path "$arm_scratch"
+          swift build --package-path native/macos --configuration release \
+            --product anyray-device-proof --arch x86_64 --scratch-path "$x64_scratch"
+          arm_bin_dir="$(swift build --package-path native/macos --configuration release \
+            --product anyray-device-proof --arch arm64 --scratch-path "$arm_scratch" \
+            --show-bin-path)"
+          x64_bin_dir="$(swift build --package-path native/macos --configuration release \
+            --product anyray-device-proof --arch x86_64 --scratch-path "$x64_scratch" \
+            --show-bin-path)"
+          test -x "$arm_bin_dir/anyray-device-proof"
+          test -x "$x64_bin_dir/anyray-device-proof"
+
+          root="$RUNNER_TEMP/anyray-connect-pkgroot"
+          scripts="$RUNNER_TEMP/anyray-connect-pkgscripts"
+          mkdir -p \
+            "$root/usr/local/bin" \
+            "$root/usr/local/lib/anyray-connect" \
+            "$root/Library/LaunchAgents" \
+            "$scripts"
+          lipo -create \
+            out/anyray-connect-darwin-arm64 \
+            out/anyray-connect-darwin-x64 \
+            -output "$root/usr/local/bin/anyray-connect"
+          lipo -create \
+            "$arm_bin_dir/anyray-device-proof" \
+            "$x64_bin_dir/anyray-device-proof" \
+            -output "$root/usr/local/lib/anyray-connect/anyray-device-proof"
+          chmod 0755 \
+            "$root/usr/local/bin/anyray-connect" \
+            "$root/usr/local/lib/anyray-connect/anyray-device-proof"
+
+          cat > "$root/usr/local/lib/anyray-connect/managed-enroll-runner" <<'RUNNER'
+          #!/bin/sh
+          set -eu
+
+          # Keep enrollment failures visible to the signed-in user without
+          # allowing the log to grow forever. The file is local, mode 0600, and
+          # contains enrollment diagnostics, never prompt or response content.
+          log_dir="$HOME/Library/Logs/Anyray Connect"
+          log_file="$log_dir/managed-enroll.log"
+          previous_log="$log_dir/managed-enroll.previous.log"
+          umask 077
+          mkdir -p "$log_dir"
+          if [ -f "$log_file" ]; then
+            log_size="$(wc -c < "$log_file" | tr -d '[:space:]')"
+            if [ "$log_size" -gt 1048576 ]; then
+              mv -f "$log_file" "$previous_log"
+            fi
+          fi
+          touch "$log_file"
+          chmod 0600 "$log_file"
+          exec >> "$log_file" 2>&1
+
+          # Connect currently returns the same failure code for temporary and
+          # permanent enrollment errors. Retry a few times for network/service
+          # recovery, then stop until the profile changes or the user logs in
+          # again. This prevents a bad profile from retrying every five minutes
+          # forever.
+          max_attempts=4
+          attempt=1
+          delay_seconds=0
+          while [ "$attempt" -le "$max_attempts" ]; do
+            if [ "$delay_seconds" -gt 0 ]; then
+              printf '%s retrying managed enrollment in %s seconds (attempt %s/%s)\n' \
+                "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+                "$delay_seconds" "$attempt" "$max_attempts"
+              sleep "$delay_seconds"
+            fi
+
+            printf '%s running managed enrollment (attempt %s/%s)\n' \
+              "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$attempt" "$max_attempts"
+            if /usr/local/bin/anyray-connect __anyray-managed-enroll; then
+              printf '%s managed enrollment completed\n' \
+                "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+              exit 0
+            else
+              status=$?
+            fi
+
+            case "$attempt" in
+              1) delay_seconds=60 ;;
+              2) delay_seconds=300 ;;
+              3) delay_seconds=900 ;;
+            esac
+            attempt=$((attempt + 1))
+          done
+
+          printf '%s managed enrollment stopped after %s failures (last status %s); it will run again after a profile change or the next login\n' \
+            "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$max_attempts" "$status"
+          exit 0
+          RUNNER
+          chmod 0755 "$root/usr/local/lib/anyray-connect/managed-enroll-runner"
+          /bin/sh -n "$root/usr/local/lib/anyray-connect/managed-enroll-runner"
+
+          cat > "$root/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>ai.anyray.connect.managed-enroll</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/usr/local/lib/anyray-connect/managed-enroll-runner</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+            <!-- Package after profile: RunAtLoad enrolls immediately. Package
+                 before profile: WatchPaths starts the job when MDM creates the
+                 preference. The runner makes four bounded attempts, records
+                 failures in the user's Library/Logs directory, then waits for
+                 a profile change or the next login. -->
+            <key>WatchPaths</key>
+            <array>
+              <string>/Library/Managed Preferences/ai.anyray.connect.plist</string>
+            </array>
+            <key>ProcessType</key>
+            <string>Background</string>
+            <key>LimitLoadToSessionType</key>
+            <string>Aqua</string>
+          </dict>
+          </plist>
+          PLIST
+          chmod 0644 "$root/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist"
+          plutil -lint "$root/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist"
+          test "$(plutil -extract RunAtLoad raw -o - \
+            "$root/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist")" = true
+          test "$(plutil -extract WatchPaths.0 raw -o - \
+            "$root/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist")" \
+            = '/Library/Managed Preferences/ai.anyray.connect.plist'
+          test "$(plutil -extract ProgramArguments.0 raw -o - \
+            "$root/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist")" \
+            = '/usr/local/lib/anyray-connect/managed-enroll-runner'
+          if plutil -extract KeepAlive raw -o - \
+            "$root/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist" \
+            >/dev/null 2>&1; then
+            echo '::error::managed enrollment LaunchAgent must not retry forever with KeepAlive'
+            exit 1
+          fi
+
+          cat > "$scripts/postinstall" <<'SCRIPT'
+          #!/bin/sh
+          # Load the agent for the current desktop user. New logins are handled
+          # automatically by /Library/LaunchAgents.
+          console_user="$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true)"
+          case "$console_user" in
+            ''|root|loginwindow|_mbsetupuser) exit 0 ;;
+          esac
+          console_uid="$(/usr/bin/id -u "$console_user" 2>/dev/null || true)"
+          [ -n "$console_uid" ] || exit 0
+          domain="gui/$console_uid"
+          label="$domain/ai.anyray.connect.managed-enroll"
+          agent='/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist'
+          /bin/launchctl bootout "$label" >/dev/null 2>&1 || true
+          /bin/launchctl bootstrap "$domain" "$agent" >/dev/null 2>&1 || true
+          /bin/launchctl kickstart -k "$label" >/dev/null 2>&1 || true
+          exit 0
+          SCRIPT
+          chmod 0755 "$scripts/postinstall"
+
+          lipo -archs "$root/usr/local/bin/anyray-connect" | grep -q 'arm64'
+          lipo -archs "$root/usr/local/bin/anyray-connect" | grep -q 'x86_64'
+          lipo -archs "$root/usr/local/lib/anyray-connect/anyray-device-proof" | grep -q 'arm64'
+          lipo -archs "$root/usr/local/lib/anyray-connect/anyray-device-proof" | grep -q 'x86_64'
+
+      - name: Sign the darwin binaries and package payload (Developer ID Application)
         if: env.APPLE_SIGNING_CERT_P12 != ''
         run: |
           set -euo pipefail
@@ -281,6 +475,9 @@ jobs:
           # the always() step below destroys it even when signing fails.
           KEYCHAIN="$RUNNER_TEMP/anyray-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          umask 077
+          printf '%s' "$KEYCHAIN_PASSWORD" \
+            > "$RUNNER_TEMP/anyray-keychain-password"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           # No inactivity auto-lock — a long notarization wait must not lock the
           # key out mid-build.
@@ -354,6 +551,119 @@ jobs:
             esac
           done
 
+          root="$RUNNER_TEMP/anyray-connect-pkgroot"
+          universal_connect="$root/usr/local/bin/anyray-connect"
+          helper="$root/usr/local/lib/anyray-connect/anyray-device-proof"
+          codesign --force --options runtime --timestamp \
+            --entitlements "$RUNNER_TEMP/entitlements.plist" \
+            --identifier ai.anyray.connect --sign "$IDENTITY" "$universal_connect"
+
+          # Derive the Apple Team Identifier from the identity that actually
+          # signed a probe copy. Do not duplicate it in a repo variable: the
+          # certificate is the authority, and validating the fixed shape before
+          # writing XML prevents a malformed value from becoming an entitlement.
+          team_probe="$RUNNER_TEMP/anyray-device-proof-team-id-probe"
+          cp "$helper" "$team_probe"
+          codesign --force --sign "$IDENTITY" "$team_probe"
+          codesign --verify --strict --verbose=2 "$team_probe"
+          signature_metadata="$(codesign -d --verbose=4 "$team_probe" 2>&1)"
+          TEAM_ID="$(printf '%s\n' "$signature_metadata" \
+            | awk -F= '$1 == "TeamIdentifier" {print $2}')"
+          if ! printf '%s\n' "$TEAM_ID" | grep -Eq '^[A-Z0-9]{10}$'; then
+            echo "::error::could not derive a valid 10-character Apple Team Identifier from the Developer ID Application identity"
+            exit 1
+          fi
+          rm -f "$team_probe"
+
+          # The helper does no JIT. It gets only the identity entitlements that
+          # let its permanent, non-exportable private key live in the user's
+          # Data Protection Keychain. The Bun/main entitlement file above stays
+          # unchanged and continues to contain allow-jit only.
+          helper_application_id="${TEAM_ID}.ai.anyray.connect.device-proof"
+          cat > "$RUNNER_TEMP/device-proof-entitlements.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.application-identifier</key>
+            <string>${helper_application_id}</string>
+            <key>com.apple.developer.team-identifier</key>
+            <string>${TEAM_ID}</string>
+            <key>keychain-access-groups</key>
+            <array>
+              <string>${helper_application_id}</string>
+            </array>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$RUNNER_TEMP/device-proof-entitlements.plist"
+          codesign --force --options runtime --timestamp \
+            --entitlements "$RUNNER_TEMP/device-proof-entitlements.plist" \
+            --identifier ai.anyray.connect.device-proof \
+            --sign "$IDENTITY" "$helper"
+          codesign --verify --strict --verbose=2 "$universal_connect"
+          codesign --verify --strict --verbose=2 "$helper"
+
+          # Verify the signature contains exactly the helper's three intended
+          # entitlements. This catches an omitted entitlement file, a wrong Team
+          # Identifier, or accidental inheritance of Bun's allow-jit permission.
+          embedded_entitlements="$RUNNER_TEMP/device-proof-embedded-entitlements.plist"
+          codesign -d --entitlements :- "$helper" > "$embedded_entitlements"
+          plutil -lint "$embedded_entitlements"
+          plutil -convert json -o - "$embedded_entitlements" \
+            | jq -e --arg app_id "$helper_application_id" --arg team_id "$TEAM_ID" '
+                type == "object"
+                and ((keys | sort) == ([
+                  "com.apple.application-identifier",
+                  "com.apple.developer.team-identifier",
+                  "keychain-access-groups"
+                ] | sort))
+                and .["com.apple.application-identifier"] == $app_id
+                and .["com.apple.developer.team-identifier"] == $team_id
+                and .["keychain-access-groups"] == [$app_id]
+              ' > /dev/null
+
+          # Exercise the exact operation Connect uses with a fresh, canonical
+          # gateway-verification challenge. Creating and using the permanent key
+          # here proves the signed helper can access the Data Protection Keychain.
+          issued_at="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
+          nonce="$(openssl rand -hex 16)"
+          challenge="$(jq -cnS \
+            --arg deployment_id 'dep_release_smoke' \
+            --arg issued_at "$issued_at" \
+            --arg nonce "$nonce" \
+            '{deploymentId: $deployment_id, issuedAt: $issued_at, nonce: $nonce}')"
+          encoded_challenge="$(printf '%s' "$challenge" \
+            | openssl base64 -A \
+            | tr '+/' '-_' \
+            | tr -d '=')"
+          sign_request="$(jq -cn --arg data "$encoded_challenge" \
+            '{v: 1, operation: "sign", data: $data}')"
+          sign_response="$(printf '%s' "$sign_request" | "$helper")"
+          printf '%s\n' "$sign_response" | jq -e '
+            type == "object"
+            and ((keys | sort) == (["devPublicKey", "operation", "signature", "v"] | sort))
+            and .v == 1
+            and .operation == "sign"
+            and (.devPublicKey | type == "string"
+              and startswith("-----BEGIN PUBLIC KEY-----\n")
+              and contains("\n-----END PUBLIC KEY-----"))
+            and (.signature | type == "string" and test("^[A-Za-z0-9_-]+$"))
+          ' > /dev/null
+          "$universal_connect" --help > /dev/null
+
+      - name: Prepare the App Store Connect API key
+        # Both notarization steps consume this file. Gate its creation on the
+        # one secret that creates it, rather than inheriting either consumer's
+        # unrelated signing-certificate condition.
+        if: env.APPLE_NOTARY_KEY != ''
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$APPLE_NOTARY_KEY" \
+            | base64 -d > "$RUNNER_TEMP/notary-key.p8"
+          test -s "$RUNNER_TEMP/notary-key.p8"
+
       - name: Notarize the darwin binaries
         # Needs the Developer ID signature from the step above plus the App
         # Store Connect API key. A bare mach-o binary CANNOT be stapled —
@@ -365,7 +675,6 @@ jobs:
         if: env.APPLE_SIGNING_CERT_P12 != '' && env.APPLE_NOTARY_KEY != ''
         run: |
           set -euo pipefail
-          printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/notary-key.p8"
           for bin in out/anyray-connect-darwin-*; do
             zip="$RUNNER_TEMP/$(basename "$bin").zip"
             ditto -c -k "$bin" "$zip"
@@ -380,10 +689,89 @@ jobs:
             fi
           done
 
+      - name: Build and sign the macOS installer (Developer ID Installer)
+        if: env.APPLE_INSTALLER_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/anyray-connect-pkgroot"
+          scripts="$RUNNER_TEMP/anyray-connect-pkgscripts"
+          unsigned_pkg="$RUNNER_TEMP/anyray-connect-unsigned.pkg"
+          pkgbuild \
+            --root "$root" \
+            --scripts "$scripts" \
+            --identifier ai.anyray.connect \
+            --version "$VERSION" \
+            --install-location / \
+            --ownership recommended \
+            "$unsigned_pkg"
+
+          KEYCHAIN="$RUNNER_TEMP/anyray-signing.keychain-db"
+          KEYCHAIN_PASSWORD_FILE="$RUNNER_TEMP/anyray-keychain-password"
+          # The application-signing step created this keychain. Keep its random
+          # password only in a 0600 file between steps; never put it in output.
+          test -f "$KEYCHAIN_PASSWORD_FILE"
+          KEYCHAIN_PASSWORD="$(cat "$KEYCHAIN_PASSWORD_FILE")"
+          printf '%s' "$APPLE_INSTALLER_CERT_P12" \
+            | base64 -d > "$RUNNER_TEMP/installer-cert.p12"
+          security import "$RUNNER_TEMP/installer-cert.p12" \
+            -k "$KEYCHAIN" -f pkcs12 \
+            -P "$APPLE_INSTALLER_CERT_PASSWORD" -A -T /usr/bin/productsign
+          rm -f "$RUNNER_TEMP/installer-cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -s "$KEYCHAIN"
+          echo '--- installer identities in the throwaway keychain ---'
+          security find-identity -v "$KEYCHAIN" || true
+          INSTALLER_IDENTITY="$(security find-identity -v "$KEYCHAIN" \
+            | awk '/Developer ID Installer/ {print $2; exit}')"
+          if [ -z "$INSTALLER_IDENTITY" ]; then
+            echo "::error::APPLE_INSTALLER_CERT_P12 imported no Developer ID Installer identity (see diagnostics above)"
+            exit 1
+          fi
+          echo "using installer signing identity $INSTALLER_IDENTITY"
+          productsign --sign "$INSTALLER_IDENTITY" \
+            "$unsigned_pkg" out/anyray-connect.pkg
+          pkgutil --check-signature out/anyray-connect.pkg
+          payload_files="$(pkgutil --payload-files out/anyray-connect.pkg)"
+          printf '%s\n' "$payload_files"
+          printf '%s\n' "$payload_files" | grep -Eq '^\.?/?usr/local/bin/anyray-connect$'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/lib/anyray-connect/anyray-device-proof$'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/lib/anyray-connect/managed-enroll-runner$'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?Library/LaunchAgents/ai\.anyray\.connect\.managed-enroll\.plist$'
+
+      - name: Notarize and staple the macOS installer
+        if: env.APPLE_INSTALLER_CERT_P12 != '' && env.APPLE_NOTARY_KEY != ''
+        run: |
+          set -euo pipefail
+          pkg=out/anyray-connect.pkg
+          status="$(xcrun notarytool submit "$pkg" \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::notarization failed for anyray-connect.pkg (status: $status)"
+            exit 1
+          fi
+          xcrun stapler staple "$pkg"
+          xcrun stapler validate "$pkg"
+          spctl -a -vvv -t install "$pkg"
+
       - name: Delete the throwaway keychain
         if: always()
         run: |
-          rm -f "$RUNNER_TEMP/signing-cert.p12" "$RUNNER_TEMP/notary-key.p8"
+          rm -f \
+            "$RUNNER_TEMP/signing-cert.p12" \
+            "$RUNNER_TEMP/installer-cert.p12" \
+            "$RUNNER_TEMP/notary-key.p8" \
+            "$RUNNER_TEMP/anyray-keychain-password" \
+            "$RUNNER_TEMP/anyray-device-proof-team-id-probe" \
+            "$RUNNER_TEMP/device-proof-entitlements.plist" \
+            "$RUNNER_TEMP/device-proof-embedded-entitlements.plist" \
+            "$RUNNER_TEMP/anyray-connect-unsigned.pkg"
           if [ -f "$RUNNER_TEMP/anyray-signing.keychain-db" ]; then
             security delete-keychain "$RUNNER_TEMP/anyray-signing.keychain-db"
           fi
@@ -392,6 +780,16 @@ jobs:
         with:
           name: binaries-darwin
           path: out/anyray-connect-darwin-*
+          if-no-files-found: error
+
+      # Keep the package in its own artifact. upload-artifact applies
+      # if-no-files-found to the whole path set, not to each pattern, so mixing
+      # the package with always-present darwin binaries would let a missing pkg
+      # pass unnoticed.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binaries-macos-pkg
+          path: out/anyray-connect.pkg
           if-no-files-found: error
 
   # Always remove the RUNNER, even if signing failed — the webhook is the part a
@@ -904,8 +1302,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Assemble the release assets: unsigned set first, then the signed
-      # darwin/windows binaries overwrite their unsigned copies (a no-op when
-      # the signing steps were skipped), then the linux packages.
+      # darwin/windows binaries overwrite their unsigned copies, the signed and
+      # stapled macOS package arrives as its own required artifact, then the
+      # Linux packages are added.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: binaries-unsigned
@@ -916,12 +1315,53 @@ jobs:
           path: assets
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
+          name: binaries-macos-pkg
+          path: assets
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
           name: binaries-windows
           path: assets
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: linux-packages
           path: assets
+
+      - name: Check the complete release asset set
+        run: |
+          set -euo pipefail
+          darwin_count="$(find assets -maxdepth 1 -type f \
+            -name 'anyray-connect-darwin-*' | wc -l | tr -d ' ')"
+          linux_count="$(find assets -maxdepth 1 -type f \
+            -name 'anyray-connect-linux-*' ! -name '*.deb' ! -name '*.rpm' \
+            | wc -l | tr -d ' ')"
+          windows_count="$(find assets -maxdepth 1 -type f \
+            -name 'anyray-connect-windows-*' | wc -l | tr -d ' ')"
+          linux_pkg_count="$(find assets -maxdepth 1 -type f \
+            \( -name '*.deb' -o -name '*.rpm' \) \
+            | wc -l | tr -d ' ')"
+          macos_pkg_count="$(find assets -maxdepth 1 -type f \
+            -name 'anyray-connect.pkg' | wc -l | tr -d ' ')"
+
+          test "$darwin_count" -eq 2 || {
+            echo "::error::expected 2 signed darwin binaries, found $darwin_count"
+            exit 1
+          }
+          test "$linux_count" -eq 2 || {
+            echo "::error::expected 2 Linux binaries, found $linux_count"
+            exit 1
+          }
+          test "$windows_count" -eq 1 || {
+            echo "::error::expected 1 signed Windows binary, found $windows_count"
+            exit 1
+          }
+          test "$linux_pkg_count" -eq 4 || {
+            echo "::error::expected 4 Linux package assets, found $linux_pkg_count"
+            exit 1
+          }
+          test "$macos_pkg_count" -eq 1 || {
+            echo "::error::expected exactly one anyray-connect.pkg, found $macos_pkg_count"
+            exit 1
+          }
 
       - name: Generate SHA256SUMS (after signing — signing rewrites the binaries)
         run: |
@@ -1013,6 +1453,7 @@ jobs:
           subject-path: |
             assets/anyray-connect-darwin-arm64
             assets/anyray-connect-darwin-x64
+            assets/anyray-connect.pkg
             assets/anyray-connect-linux-arm64
             assets/anyray-connect-linux-x64
             assets/anyray-connect-windows-x64.exe
@@ -1079,7 +1520,7 @@ jobs:
           # keeps backticks out of the shell entirely.
           NOTES="$RUNNER_TEMP/release-notes.md"
           {
-            printf '%s\n\n' "Standalone \`anyray-connect\` ${VERSION} executables for the zero-install \`connect.sh\` / \`connect.ps1\` installers. No Node required. Built from the public npm package."
+            printf '%s\n\n' "Standalone \`anyray-connect\` ${VERSION} executables for the zero-install \`connect.sh\` / \`connect.ps1\` installers, plus the signed and notarized \`anyray-connect.pkg\` for macOS MDM deployment. No Node required. Built from the public npm package."
             cat <<'NOTESHEAD'
           ## Verifying what you downloaded
           NOTESHEAD
@@ -1106,11 +1547,46 @@ jobs:
             printf '    gh attestation verify anyray-connect-linux-x64 --repo %s\n' "$REPO"
           } > "$NOTES"
           cat "$NOTES"
+
+          MAKE_LATEST=false
+          LATEST_TAG_BEFORE=""
+          if [ "$STAGING" != "true" ]; then
+            # Production releases must use stable package versions. Staging is
+            # the supported lane for prerelease versions.
+            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::production release version must be stable x.y.z; use staging for prereleases"
+              exit 1
+            fi
+
+            # Decide whether this version may become latest BEFORE deleting or
+            # publishing anything. --latest=true changes the URL followed by
+            # connect.sh, connect.ps1 and managed self-update. Re-cutting an
+            # older version must preserve the current latest release.
+            # Fail closed if GitHub cannot tell us the current latest release.
+            # Treating an API/auth failure as "no release" would make an older
+            # re-cut latest again.
+            LATEST_TAG_BEFORE="$(gh api \
+              "repos/${REPO}/releases/latest" --jq .tag_name)"
+            MAKE_LATEST=true
+            if [[ ! "$LATEST_TAG_BEFORE" =~ ^connect-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              echo "::error::cannot safely compare current latest tag: $LATEST_TAG_BEFORE"
+              exit 1
+            fi
+            latest_version_before="${BASH_REMATCH[1]}"
+            highest_version="$(printf '%s\n%s\n' \
+              "$latest_version_before" "$VERSION" | sort -V | tail -n 1)"
+            if [ "$highest_version" != "$VERSION" ]; then
+              MAKE_LATEST=false
+            fi
+            echo "current latest tag: $LATEST_TAG_BEFORE"
+            echo "publish $TAG as latest: $MAKE_LATEST"
+          fi
+
           # Idempotent: replace an existing release for this version.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           if [ "$STAGING" = "true" ]; then
             gh release create "$TAG" \
-              --title "anyray-connect ${VERSION} (staging binaries)" \
+              --title "anyray-connect ${VERSION} (staging assets)" \
               --notes "Staging build of anyray-connect ${VERSION}, for testing before a customer-facing release. Same signing and checksums as a real release; deliberately NOT \`latest\`, so \`connect.sh\`, \`connect.ps1\` and the self-updater are unaffected and no customer receives this build. Fetch a binary by its explicit tag URL, never through \`releases/latest/download\`." \
               --latest=false \
               --prerelease \
@@ -1146,9 +1622,30 @@ jobs:
             fi
           else
             gh release create "$TAG" \
-              --title "anyray-connect ${VERSION} (binaries)" \
+              --title "anyray-connect ${VERSION} (binaries and macOS package)" \
               --notes-file "$NOTES" \
+              "--latest=$MAKE_LATEST" \
               assets/*
+
+            actual_latest="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+            if [ "$MAKE_LATEST" = true ]; then
+              if [ "$actual_latest" != "$TAG" ]; then
+                echo "::error::expected releases/latest to resolve to $TAG, got $actual_latest"
+                exit 1
+              fi
+            elif [ "$actual_latest" != "$LATEST_TAG_BEFORE" ]; then
+              echo "::error::older re-cut $TAG changed releases/latest from $LATEST_TAG_BEFORE to $actual_latest"
+              exit 1
+            fi
+
+            pkg_count="$(
+              gh api "repos/${REPO}/releases/tags/${TAG}" \
+                --jq '[.assets[] | select(.name == "anyray-connect.pkg")] | length'
+            )"
+            if [ "$pkg_count" != "1" ]; then
+              echo "::error::expected release $TAG to contain exactly one anyray-connect.pkg asset"
+              exit 1
+            fi
           fi
 
       # dry_run: prove the whole build->sign->notarize->fleet path without a

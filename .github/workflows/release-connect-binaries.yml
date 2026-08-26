@@ -475,9 +475,11 @@ jobs:
           # the always() step below destroys it even when signing fails.
           KEYCHAIN="$RUNNER_TEMP/anyray-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
-          umask 077
-          printf '%s' "$KEYCHAIN_PASSWORD" \
-            > "$RUNNER_TEMP/anyray-keychain-password"
+          # umask is scoped to the password file: a 0600 keychain-db is
+          # unreadable to trustd, so codesign can't build the cert chain
+          # ("unable to build chain to self-signed root" / errSecInternalComponent).
+          ( umask 077; printf '%s' "$KEYCHAIN_PASSWORD" \
+            > "$RUNNER_TEMP/anyray-keychain-password" )
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           # No inactivity auto-lock — a long notarization wait must not lock the
           # key out mid-build.

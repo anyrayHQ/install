@@ -1,28 +1,25 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- /*
-Restrict who may reach the optimizer's :8088 (ANY-198).
+Restrict who may reach the optimizer's :8088.
 
-WHY. The optimizer is a ClusterIP Service, correctly absent from the Ingress and
-the HTTPRoute, so it is not reachable from outside the cluster. Inside the
-namespace it is wide open: any pod can dial `optimizer.<ns>.svc.<clusterDomain>:8088`
-with the bearer token read straight out of the `anyray-secrets` Secret, and get
-the whole savings engine. A customer pointed their own LiteLLM at it and took
-optimization whose savings never reached a spend row — the gateway is what
-writes those, and it was not in the path.
+WHY. The optimizer is a ClusterIP Service and is deliberately not on the Ingress
+or the HTTPRoute, so nothing outside the cluster can reach it. Inside the
+namespace it is unrestricted: any pod that can read the deployment's Secret can
+call it directly. The gateway is the only component that belongs on that path —
+it is what applies your policy and records usage — so this policy makes that
+explicit.
 
-WHAT THIS IS NOT. Defence in depth, not the fix. The optimizer also verifies
-the signed entitlement lease itself, so a suspended or lapsed deployment is
-refused wherever the call comes from; that gate travels with the image and
-covers Compose, Railway, and ECS too, while this policy only narrows who can
-reach a deployment that is currently paid up.
+Defence in depth rather than the only control: the optimizer independently
+verifies the deployment's signed entitlement lease, which travels with the image
+and so applies on Compose, Railway, and ECS as well. This policy narrows the
+in-cluster path on top of that.
 
-Do NOT name a release number here. The lease gate ships in a monorepo release
-whose number is not known when this chart change is written, and an earlier
-draft of this comment asserted a version that was already cut WITHOUT it —
-telling an operator a control was live on their install when it was not. The
-same trap is recorded at _helpers.tpl's probe floor ("verify against `git tag`
-before changing it"). Read it as: present in the appVersion this chart pins, or
-newer.
+Do NOT name a release number in this comment. The chart is written before the
+release carrying a given server-side change is cut, and an earlier draft
+asserted a version that turned out not to contain it — telling an operator a
+control was live on their install when it was not. The same trap is recorded at
+_helpers.tpl's probe floor ("verify against `git tag` before changing it"). Read
+capability statements as: present in the appVersion this chart pins, or newer.
 
 WHY IT IS OFF BY DEFAULT. Two reasons, both about not breaking working installs:
 

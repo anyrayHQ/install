@@ -360,15 +360,14 @@ Two consequences worth knowing before you install:
 
 ## Signing gateway → optimizer requests
 
-The optimizer's bearer token proves a caller is inside the deployment, not that it is
-the gateway — and both services read that token from the same Secret, so reading the
-optimizer's environment is enough to impersonate the gateway to it. Request signing
-splits that: the gateway holds an Ed25519 private key, the optimizer only the public
-half.
+The optimizer's shared token proves a caller is inside the deployment, not that it is
+the gateway, and both services read that token from the same Secret. Request signing
+separates the two: the gateway holds an Ed25519 private key and the optimizer only the
+public half, so a workload that can read the optimizer's environment still cannot
+produce a valid request.
 
-Scope it honestly before enabling. This does **not** stop someone who administers the
-deployment — they can read both halves. It closes a third party inside the network: a
-compromised sidecar, a co-tenant workload, a token leaked into a log.
+Worth enabling where other workloads share the namespace — it limits what a compromised
+sidecar, a co-tenant, or a leaked token can do.
 
 ### Generate the keypair
 
@@ -430,9 +429,9 @@ kubectl -n "$ANYRAY_NAMESPACE" exec deploy/anyray-optimizer -- \
 
 The optimizer is a ClusterIP Service on `:8088` and is deliberately never on the
 Ingress, so it is unreachable from outside the cluster. Inside the namespace it
-is open: any pod can dial it with the bearer token from `anyray-secrets` and get
-the full optimization pipeline, bypassing the gateway — which is the component
-that records spend. `networkPolicy.enabled` restricts `:8088` to the gateway
+is unrestricted: any pod that can read the deployment's Secret can call it. The
+gateway is the only component that belongs on that path — it applies your policy
+and records usage — so `networkPolicy.enabled` restricts `:8088` to the gateway
 pods.
 
 ```yaml

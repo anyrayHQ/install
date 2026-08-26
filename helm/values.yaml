@@ -521,7 +521,7 @@ postgres:
     # name: anyray-external-postgres
     # key: DATABASE_URL
 
-# Gateway→optimizer request signing (ANY-202).
+# Gateway→optimizer request signing.
 #
 # The optimizer's shared token proves a caller is inside the deployment, not
 # that it is the gateway, and both services read that token from the same
@@ -529,9 +529,8 @@ postgres:
 # and the optimizer only the public half, so a workload that can read the
 # optimizer's environment still cannot produce a valid request.
 #
-# Scope honestly: this does NOT stop a deployment OWNER, who can read both
-# halves. It closes a third party inside the network — a compromised sidecar, a
-# co-tenant workload, a token leaked into a log.
+# Worth enabling where other workloads share the namespace — it limits what a
+# compromised sidecar, a co-tenant, or a leaked token can do.
 #
 # ─── If you do NOT use setup.sh (most Kubernetes installs) ───
 # Generate the pair yourself and add both halves to your Secret:
@@ -558,7 +557,7 @@ optimizerRequestSigning:
   # Optimizer requires a valid signature. Only after `enabled` has rolled out.
   enforce: false
 
-# In-cluster network policy for the optimizer (ANY-198).
+# In-cluster network policy for the optimizer.
 #
 # The optimizer is a ClusterIP on 8088 and is deliberately NOT on the Ingress,
 # so it is unreachable from outside the cluster. Inside the namespace it is

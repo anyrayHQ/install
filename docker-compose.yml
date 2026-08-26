@@ -115,6 +115,16 @@ services:
       # Dev/staging ONLY — override the pinned key + host for an internal build.
       ANYRAY_DEV_UNSAFE_CONTROL_PLANE: ${ANYRAY_DEV_UNSAFE_CONTROL_PLANE:-}
       ANYRAY_LICENSE_PUBLIC_KEY: ${ANYRAY_LICENSE_PUBLIC_KEY:-}
+      # Gateway→optimizer request signing (ANY-202) — the PRIVATE half, which
+      # must never appear on the optimizer service below. setup.sh generates the
+      # pair; signing starts the moment this is set, which is harmless on its own
+      # (an optimizer with no verify key ignores the header).
+      #
+      # ORDER MATTERS when switching this on: set the gateway's key FIRST and let
+      # it roll, THEN the optimizer's. The reverse refuses every optimize call,
+      # and while the gateway fails open on a 401 rather than erroring, that
+      # silently costs ALL savings and busts the prompt cache on warm sessions.
+      ANYRAY_OPTIMIZER_SIGNING_KEY: ${ANYRAY_OPTIMIZER_SIGNING_KEY:-}
       # In-stack address of the endpoint-control service (RFC 0014). Optional on
       # the gateway: images that predate the end-point lane ignore it, and the
       # whole plane stays dormant until a gateway that reads it ships — so this
@@ -188,6 +198,15 @@ services:
       # the right one and these must never be set.
       ANYRAY_DEV_UNSAFE_CONTROL_PLANE: ${ANYRAY_DEV_UNSAFE_CONTROL_PLANE:-}
       ANYRAY_LICENSE_PUBLIC_KEY: ${ANYRAY_LICENSE_PUBLIC_KEY:-}
+      # The PUBLIC half only (ANY-202). Verify-only, exactly like the vendor
+      # licence key: holding it does not let this service — or anything that can
+      # read its environment — mint a signature. That asymmetry is the entire
+      # security property, so never point this at ANYRAY_OPTIMIZER_SIGNING_KEY.
+      #
+      # UNSET BY DEFAULT, and setting it is a deliberate step: unset means
+      # signatures are not checked (today's behaviour, every existing install);
+      # set means they are REQUIRED. Turn the gateway's key on first.
+      ANYRAY_OPTIMIZER_VERIFY_KEY: ${ANYRAY_OPTIMIZER_VERIFY_KEY_ENABLED:-}
     volumes:
       - anyray_optimizer_data:/data
     healthcheck:

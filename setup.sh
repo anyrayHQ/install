@@ -286,6 +286,28 @@ if [ "$K8S" -eq 0 ]; then
 
   # Reconcile: add only missing vars (existing values untouched).
   add_if_missing ANYRAY_OPTIMIZER_TOKEN          "$(hex 32)"
+  # Gateway→optimizer request signing (ANY-202). The keypair is GENERATED for
+  # every install so turning it on later is one edit rather than a key ceremony,
+  # but it is deliberately NOT wired into the services here — see the compose
+  # comment. The split is the whole point: the private half is the gateway's
+  # alone, and the optimizer must only ever see the public half.
+  #
+  # add_if_missing is what makes this safe to backfill onto an existing install:
+  # an .env that already has these keeps its own, and nothing starts being
+  # enforced just because setup.sh was re-run.
+  if ! grep -q '^ANYRAY_OPTIMIZER_SIGNING_KEY=' .env 2>/dev/null; then
+    _sign_tmp="$(mktemp -d)"
+    if openssl genpkey -algorithm ed25519 -out "$_sign_tmp/k.pem" 2>/dev/null \
+       && openssl pkey -in "$_sign_tmp/k.pem" -pubout -out "$_sign_tmp/k.pub" 2>/dev/null; then
+      # Stored \n-escaped: .env is line-oriented and a PEM is multi-line. Both
+      # services de-escape on read (parseVerifyKey / signingKey).
+      add_if_missing ANYRAY_OPTIMIZER_SIGNING_KEY "$(awk '{printf "%s\\n", $0}' "$_sign_tmp/k.pem")"
+      add_if_missing ANYRAY_OPTIMIZER_VERIFY_KEY  "$(awk '{printf "%s\\n", $0}' "$_sign_tmp/k.pub")"
+    else
+      echo "⚠ could not generate an Ed25519 signing keypair (old openssl?); gateway→optimizer request signing will stay unavailable"
+    fi
+    rm -rf "$_sign_tmp"
+  fi
   add_if_missing ANYRAY_CONTENT_KEY              "$(hex 32)"
   # Feeds the OPTIMIZER only — the gateway's content mode is set in the console
   # and stored in the shared database. This still governs BYO /v1/record writes

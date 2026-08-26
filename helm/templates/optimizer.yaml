@@ -61,6 +61,21 @@ spec:
             - name: ANYRAY_OPTIMIZER_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}
+            {{- if .Values.optimizerRequestSigning.enforce }}
+            # The PUBLIC half only (ANY-202) — verify-only, like the vendor
+            # licence key. Holding it does not let this service, or anything
+            # that can read its environment, mint a signature.
+            #
+            # SEPARATE value from `.enabled` on purpose: the optimizer REQUIRES
+            # a signature the moment it has this key, so enforcing before the
+            # gateway is signing refuses every optimize call. The gateway fails
+            # open on that 401 rather than erroring, but it silently costs ALL
+            # savings and busts the prompt cache — so this is a second,
+            # deliberate step, never the same flag.
+            - name: ANYRAY_OPTIMIZER_VERIFY_KEY
+              valueFrom:
+                {{- include "anyray.optionalSecretRef" (dict "key" "ANYRAY_OPTIMIZER_VERIFY_KEY" "context" .) | nindent 16 }}
+            {{- end }}
             - name: ANYRAY_ADMIN_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_ADMIN_TOKEN" "context" .) | nindent 16 }}

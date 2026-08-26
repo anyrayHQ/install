@@ -87,6 +87,19 @@ spec:
             - name: ANYRAY_OPTIMIZER_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}
+            {{- if .Values.optimizerRequestSigning.enabled }}
+            # Gateway→optimizer request signing (ANY-202) — the PRIVATE half.
+            # Never place this on the optimizer: it holds the public half only,
+            # and that asymmetry is the entire security property.
+            #
+            # `optional: true` so an install that has enabled signing before
+            # adding the key to its Secret degrades to unsigned (which the
+            # optimizer, also unconfigured, accepts) instead of crashlooping the
+            # gateway. Turn the gateway on FIRST, then the optimizer.
+            - name: ANYRAY_OPTIMIZER_SIGNING_KEY
+              valueFrom:
+                {{- include "anyray.optionalSecretRef" (dict "key" "ANYRAY_OPTIMIZER_SIGNING_KEY" "context" .) | nindent 16 }}
+            {{- end }}
             - name: ANYRAY_OPTIMIZER_TIMEOUT_MS
               value: {{ .Values.gateway.optimizerTimeoutMs | quote }}
             - name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS

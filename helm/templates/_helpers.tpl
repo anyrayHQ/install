@@ -48,6 +48,24 @@ secretKeyRef:
 {{- end }}
 
 {{/*
+Optional Secret key reference — same shape, but the pod still starts when the
+key is absent from the Secret.
+
+This exists because `anyray.secretRef` is REQUIRED-by-omission: kubelet refuses
+to start a container whose secretKeyRef names a missing key, so wiring an
+opt-in credential through it would crashloop every install that has not opted
+in. Use this for anything a deployment may legitimately not have.
+
+Usage: include "anyray.optionalSecretRef" (dict "key" "X" "context" .)
+*/}}
+{{- define "anyray.optionalSecretRef" -}}
+secretKeyRef:
+  name: {{ .context.Values.secretName }}
+  key: {{ .key }}
+  optional: true
+{{- end }}
+
+{{/*
 External Secret key reference helper.
 Usage: include "anyray.externalSecretRef" .Values.postgres.external.databaseUrlSecretKeyRef
 */}}

@@ -19,7 +19,8 @@ name: Trigger chart publish
 # Chart.yaml bump landing and the monorepo publish running") from up to a day
 # down to the length of one publish run. The drift monitor stays as the backstop
 # for whatever still slips: a failed publish, a hand-edited shelf, a bump pushed
-# while the credential below is missing.
+# while the credential below is missing — but it reports the NEXT morning, so
+# it is a backstop and not the signal. This job failing is the signal.
 #
 # AUTH: a short-lived anyray-pr-agent App installation token, scoped to the
 # monorepo alone, never a long-lived PAT. `repository_dispatch` needs
@@ -51,9 +52,22 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # Degrade to a warning rather than a red wall when the App credential
-      # isn't on this repo yet: a missing secret would otherwise fail every
-      # chart bump, and the drift monitor already covers the resulting gap.
+      # A missing App credential FAILS this job, on purpose.
+      #
+      # It used to emit `::warning::` and exit 0, reasoning that a missing
+      # secret would otherwise fail every chart bump and the drift monitor
+      # covers the gap. That traded a loud failure for a silent one, and
+      # silence won: on 2026-08-26 chart 0.5.57 (the optimizer NetworkPolicy)
+      # merged, this job went GREEN, and nothing was published — the credential
+      # has never been on this repo. It lives on the MONOREPO, where the
+      # publish workflow runs. Every chart bump since this trigger shipped has
+      # reported success and published nothing.
+      #
+      # Failing costs nothing: this workflow is `on: push` to main, i.e.
+      # POST-merge, so a red run blocks no PR, no merge, and no other job. It
+      # only puts a visible X on main, which is the signal that was missing.
+      # The original "red wall" worry applies to a required check; this is not
+      # one.
       # The secret is read into env and tested in `run:` — never referenced from
       # a step `if:`, which is a parse error that 422s the whole workflow.
       - name: Check the App credential is present
@@ -63,11 +77,17 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${APP_ID:-}" ]; then
-            echo '::warning::ANYRAY_PR_AGENT_APP_ID / ANYRAY_PR_AGENT_APP_PRIVATE_KEY are not set on this repo, so the chart publish was NOT triggered. Add them (GitHub App: anyray-pr-agent), or run "Publish Helm chart (standalone)" in anyrayHQ/monorepo by hand. helm-chart-drift.yml will flag the gap within a day.'
-            echo 'ready=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'ready=true' >> "$GITHUB_OUTPUT"
+            echo '::error::The chart publish was NOT triggered: ANYRAY_PR_AGENT_APP_ID / ANYRAY_PR_AGENT_APP_PRIVATE_KEY are not set on THIS repo (they are on anyrayHQ/monorepo). Chart.yaml was bumped, so the new chart version is NOT installable by anyone until this is resolved.'
+            echo '::error::Fix now: run the "Publish Helm chart (standalone)" workflow in anyrayHQ/monorepo by hand.'
+            echo '::error::Fix permanently: add both secrets to anyrayHQ/install (GitHub App: anyray-pr-agent).'
+            exit 1
           fi
+          # Still emitted so the two `if: steps.cred.outputs.ready` guards below
+          # keep working. They are now belt-and-braces — the step above exits
+          # non-zero rather than setting ready=false — and are left in place
+          # deliberately: they cost nothing and keep the job correct if the
+          # check is ever softened again.
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
 
       - name: Mint the App installation token
         id: appauth

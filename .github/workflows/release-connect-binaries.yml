@@ -480,6 +480,7 @@ jobs:
           # ("unable to build chain to self-signed root" / errSecInternalComponent).
           ( umask 077; printf '%s' "$KEYCHAIN_PASSWORD" \
             > "$RUNNER_TEMP/anyray-keychain-password" )
+          umask 022
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           # No inactivity auto-lock — a long notarization wait must not lock the
           # key out mid-build.

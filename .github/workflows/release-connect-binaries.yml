@@ -598,23 +598,16 @@ jobs:
           fi
           rm -f "$team_probe"
 
-          # The helper does no JIT. It gets only the identity entitlements that
-          # let its permanent, non-exportable private key live in the user's
-          # Data Protection Keychain. The Bun/main entitlement file above stays
-          # unchanged and continues to contain allow-jit only.
-          helper_application_id="${TEAM_ID}.ai.anyray.connect.device-proof"
+          # App group only: keychain-access-groups gets a Developer ID CLI AMFI-killed.
+          helper_app_group="${TEAM_ID}.ai.anyray.connect"
           cat > "$RUNNER_TEMP/device-proof-entitlements.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>com.apple.application-identifier</key>
-            <string>${helper_application_id}</string>
-            <key>com.apple.developer.team-identifier</key>
-            <string>${TEAM_ID}</string>
-            <key>keychain-access-groups</key>
+            <key>com.apple.security.application-groups</key>
             <array>
-              <string>${helper_application_id}</string>
+              <string>${helper_app_group}</string>
             </array>
           </dict>
           </plist>
@@ -627,23 +620,15 @@ jobs:
           codesign --verify --strict --verbose=2 "$universal_connect"
           codesign --verify --strict --verbose=2 "$helper"
 
-          # Verify the signature contains exactly the helper's three intended
-          # entitlements. This catches an omitted entitlement file, a wrong Team
-          # Identifier, or accidental inheritance of Bun's allow-jit permission.
+          # Exactly the app group: no restricted entitlement, no inherited allow-jit.
           embedded_entitlements="$RUNNER_TEMP/device-proof-embedded-entitlements.plist"
           codesign -d --entitlements :- "$helper" > "$embedded_entitlements"
           plutil -lint "$embedded_entitlements"
           plutil -convert json -o - "$embedded_entitlements" \
-            | jq -e --arg app_id "$helper_application_id" --arg team_id "$TEAM_ID" '
+            | jq -e --arg app_group "$helper_app_group" '
                 type == "object"
-                and ((keys | sort) == ([
-                  "com.apple.application-identifier",
-                  "com.apple.developer.team-identifier",
-                  "keychain-access-groups"
-                ] | sort))
-                and .["com.apple.application-identifier"] == $app_id
-                and .["com.apple.developer.team-identifier"] == $team_id
-                and .["keychain-access-groups"] == [$app_id]
+                and (keys == ["com.apple.security.application-groups"])
+                and .["com.apple.security.application-groups"] == [$app_group]
               ' > /dev/null
 
           # Exercise the exact operation Connect uses with a fresh, canonical

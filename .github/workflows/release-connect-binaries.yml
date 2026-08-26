@@ -739,6 +739,8 @@ jobs:
           rm -f "$RUNNER_TEMP/installer-cert.p12"
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          SYSTEM_ROOT_KEYCHAIN='/System/Library/Keychains/SystemRootCertificates.keychain'
+          test -r "$SYSTEM_ROOT_KEYCHAIN"
           security list-keychains -s "$KEYCHAIN" "$SYSTEM_ROOT_KEYCHAIN"
           echo '--- installer identities in the throwaway keychain ---'
           security find-identity -v "$KEYCHAIN" || true

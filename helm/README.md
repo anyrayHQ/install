@@ -358,6 +358,74 @@ Two consequences worth knowing before you install:
   or if you pin `image.tag` below `v1.10.246` — the first release that published
   this image, so older pins have nothing to pull.
 
+## Signing gateway → optimizer requests
+
+The optimizer's bearer token proves a caller is inside the deployment, not that it is
+the gateway — and both services read that token from the same Secret, so reading the
+optimizer's environment is enough to impersonate the gateway to it. Request signing
+splits that: the gateway holds an Ed25519 private key, the optimizer only the public
+half.
+
+Scope it honestly before enabling. This does **not** stop someone who administers the
+deployment — they can read both halves. It closes a third party inside the network: a
+compromised sidecar, a co-tenant workload, a token leaked into a log.
+
+### Generate the keypair
+
+`setup.sh` mints the pair for you, but most Kubernetes installs never run it. Generate
+it yourself and add both halves to the Secret the chart already reads:
+
+```bash
+openssl genpkey -algorithm ed25519 -out signing.pem
+openssl pkey -in signing.pem -pubout -out verify.pub
+
+kubectl -n "$ANYRAY_NAMESPACE" patch secret anyray-secrets --type merge -p "$(cat <<JSON
+{"stringData": {
+  "ANYRAY_OPTIMIZER_SIGNING_KEY": $(jq -Rs . < signing.pem),
+  "ANYRAY_OPTIMIZER_VERIFY_KEY":  $(jq -Rs . < verify.pub)
+}}
+JSON
+)"
+
+shred -u signing.pem verify.pub   # the Secret is the only copy you need
+```
+
+Managing the Secret through External Secrets, Sealed Secrets, or SOPS instead? Put the
+same two keys in whatever backs `secretName`. The chart only ever references them by
+name, and both references are `optional: true`, so a key that is not there yet degrades
+to unsigned rather than crashlooping a pod.
+
+### Roll it out in two steps, in this order
+
+```yaml
+# Step 1 — the gateway starts signing. Harmless on its own: an optimizer with no
+# verify key ignores the header. Let this roll out fully.
+optimizerRequestSigning:
+  enabled: true
+  enforce: false
+```
+
+```yaml
+# Step 2 — only once step 1 is live everywhere. The optimizer now REQUIRES a signature.
+optimizerRequestSigning:
+  enabled: true
+  enforce: true
+```
+
+**Do not do both at once, and never `enforce` first.** The optimizer requires a
+signature the moment it has a verify key, so enforcing ahead of the gateway refuses
+every optimize call. Nothing appears to break — the gateway fails open on the 401 and
+keeps serving traffic — you just silently lose *all* optimization and bust the provider
+prompt cache on every warm session. Confirm with:
+
+```bash
+kubectl -n "$ANYRAY_NAMESPACE" exec deploy/anyray-optimizer -- \
+  wget -qO- localhost:8088/health | grep requestSignatures
+```
+
+`enforced` means step 2 took. If optimization drops off after step 2, set
+`enforce: false` and re-check that the gateway rolled with its key.
+
 ## Restricting the optimizer to the gateway
 
 The optimizer is a ClusterIP Service on `:8088` and is deliberately never on the

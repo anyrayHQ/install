@@ -521,6 +521,43 @@ postgres:
     # name: anyray-external-postgres
     # key: DATABASE_URL
 
+# Gateway→optimizer request signing (ANY-202).
+#
+# The optimizer's bearer token proves a caller is inside the deployment, not
+# that it is the gateway — and both services read that token from the SAME
+# Secret. Signing splits that: the gateway holds an Ed25519 private key, the
+# optimizer only the public half, so reading the optimizer's environment is no
+# longer enough to impersonate the gateway to it.
+#
+# Scope honestly: this does NOT stop a deployment OWNER, who can read both
+# halves. It closes a third party inside the network — a compromised sidecar, a
+# co-tenant workload, a token leaked into a log.
+#
+# ─── If you do NOT use setup.sh (most Kubernetes installs) ───
+# Generate the pair yourself and add both halves to your Secret:
+#
+#   openssl genpkey -algorithm ed25519 -out signing.pem
+#   openssl pkey -in signing.pem -pubout -out verify.pub
+#   kubectl -n "$ANYRAY_NAMESPACE" patch secret anyray-secrets --type merge -p \
+#     "{\"stringData\":{\"ANYRAY_OPTIMIZER_SIGNING_KEY\":\"$(cat signing.pem)\",\
+#       \"ANYRAY_OPTIMIZER_VERIFY_KEY\":\"$(cat verify.pub)\"}}"
+#
+# Then roll out in TWO steps, in this order:
+#   1. enabled: true   → the gateway starts signing. Harmless on its own; an
+#                        optimizer with no verify key ignores the header.
+#   2. enforce: true   → the optimizer starts REQUIRING a signature.
+#
+# Doing it in one step, or enforce-first, refuses every optimize call until the
+# gateway catches up. The gateway fails open on that 401 rather than erroring,
+# so nothing breaks visibly — you just silently lose all optimization and bust
+# the provider prompt cache. Both keys are wired `optional: true`, so a missing
+# key degrades to unsigned rather than crashlooping a pod.
+optimizerRequestSigning:
+  # Gateway signs its optimizer requests.
+  enabled: false
+  # Optimizer requires a valid signature. Only after `enabled` has rolled out.
+  enforce: false
+
 # In-cluster network policy for the optimizer (ANY-198).
 #
 # The optimizer is a ClusterIP on 8088 and is deliberately NOT on the Ingress,

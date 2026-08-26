@@ -24,6 +24,13 @@
 #
 # Add a var here when the monorepo optimizer grows a new secret / durable-store
 # / required-DB-URL var, and wire it into every template in the same PR.
+#
+# DELIBERATELY EXCLUDED: ANYRAY_DEV_UNSAFE_CONTROL_PLANE and
+# ANYRAY_LICENSE_PUBLIC_KEY. Both are internal-build settings that no customer
+# deployment sets, and the gateway does not carry them in Helm, the AWS
+# template, or Railway either, so requiring them here would fail this check
+# against every one of those templates. An internal k8s build passes them
+# through optimizer.extraEnv. Reasoning: ENV-SURFACE.md in the monorepo.
 ANYRAY_SPEND_DB_URL
 ANYRAY_ADMIN_TOKEN
 ANYRAY_OPTIMIZER_TOKEN

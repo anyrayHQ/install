@@ -529,9 +529,9 @@ postgres:
 # Secret and get the full savings engine, bypassing the gateway — which is what
 # writes the spend rows. Enabling this restricts :8088 to the gateway pods.
 #
-# Defence in depth, not the fix: the optimizer verifies the signed entitlement
-# lease itself from appVersion v1.10.299, so a lapsed or suspended deployment
-# is refused whatever calls it. This narrows the in-cluster lane on top.
+# Defence in depth, not the fix: the optimizer also verifies the signed
+# entitlement lease itself, so a lapsed or suspended deployment is refused
+# whatever calls it. This narrows the in-cluster lane on top.
 #
 # OFF by default because whether kubelet probes are subject to NetworkPolicy is
 # CNI-dependent — on a CNI that filters them the optimizer pods crashloop, and a
@@ -539,6 +539,9 @@ postgres:
 # bust the provider prompt cache (expensive). On a cluster with no policy
 # controller the rule is silently inert instead. So: enable it, then confirm
 # the optimizer pods stay Ready.
+#
+# It also cuts any Prometheus/OTel scrape of the optimizer, with the same silent
+# symptom — add your scraper under optimizerExtraIngress below if you have one.
 networkPolicy:
   enabled: false
   # Extra `ingress:` entries appended verbatim, for a caller of your own that

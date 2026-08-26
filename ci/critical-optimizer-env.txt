@@ -24,6 +24,19 @@
 #
 # Add a var here when the monorepo optimizer grows a new secret / durable-store
 # / required-DB-URL var, and wire it into every template in the same PR.
+#
+# DELIBERATELY EXCLUDED: ANYRAY_DEV_UNSAFE_CONTROL_PLANE and
+# ANYRAY_LICENSE_PUBLIC_KEY. The optimizer does read both (it verifies the
+# entitlement lease against the pinned key, and honours the dev override the
+# same way the gateway does), so they look like a gap this gate should catch.
+# They are not one. The pair is the "must NEVER be set in a customer
+# deployment" escape hatch for an internal build whose control plane signs with
+# a non-vendor keypair, and the GATEWAY does not carry it in Helm, the AWS
+# template, or Railway either — setup.sh scopes the whole control-plane-override
+# block to the compose path. Adding them here would correctly fail the check
+# against those templates and pressure someone into advertising the bypass in
+# customer-facing artifacts. Compose + our own Terraform is the complete
+# surface; an internal k8s build uses optimizer.extraEnv.
 ANYRAY_SPEND_DB_URL
 ANYRAY_ADMIN_TOKEN
 ANYRAY_OPTIMIZER_TOKEN

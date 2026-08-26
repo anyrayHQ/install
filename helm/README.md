@@ -358,6 +358,55 @@ Two consequences worth knowing before you install:
   or if you pin `image.tag` below `v1.10.246` — the first release that published
   this image, so older pins have nothing to pull.
 
+## Restricting the optimizer to the gateway
+
+The optimizer is a ClusterIP Service on `:8088` and is deliberately never on the
+Ingress, so it is unreachable from outside the cluster. Inside the namespace it
+is open: any pod can dial it with the bearer token from `anyray-secrets` and get
+the full optimization pipeline, bypassing the gateway — which is the component
+that records spend. `networkPolicy.enabled` restricts `:8088` to the gateway
+pods.
+
+```yaml
+networkPolicy:
+  enabled: true
+  # Append rules for a caller of your own — a metrics scraper, a second gateway.
+  optimizerExtraIngress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 8088
+```
+
+**It is off by default, and enabling it needs one verification step.** Whether
+kubelet's liveness/readiness probes are subject to NetworkPolicy depends on your
+CNI, and there is no portable way to express "the node this pod runs on" in a
+policy. Cilium and Calico allow host-to-local-pod by default; some others do
+not, and on those every optimizer pod fails its liveness probe and crashloops. A
+down optimizer is not a safe failure — the gateway fails open and forwards the
+original request, busting the provider prompt cache on every warm session, which
+costs more than the optimization it lost.
+
+So after enabling it:
+
+```bash
+kubectl -n "$ANYRAY_NAMESPACE" rollout status deploy/anyray-optimizer
+kubectl -n "$ANYRAY_NAMESPACE" get pods -l app.kubernetes.io/component=optimizer
+```
+
+If the pods do not stay Ready, your CNI filters probes: set
+`networkPolicy.enabled: false`. On a cluster with no policy controller at all
+the rule is silently inert rather than harmful. Note that enabling it also cuts
+any Prometheus/OTel scrape of the optimizer unless you add the scraper under
+`optimizerExtraIngress`.
+
+This is defence in depth rather than the whole control: the optimizer also
+verifies the deployment's signed entitlement lease itself, so a lapsed or
+suspended subscription is refused whatever calls it.
+
 ## Cluster policy knobs
 
 Set these values when your cluster requires a specific service account, private

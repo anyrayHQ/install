@@ -7,6 +7,12 @@ monorepo's `publish-connect.yml` dispatches it after every npm publish; it can
 also be run by hand (Actions → *Release anyray-connect binaries* → `version` =
 the npm version, or `latest`).
 
+Production releases compare their version with the current `connect-v*` latest
+release before publishing. A newer version, or a re-cut of the current version,
+becomes latest. A re-cut of an older version is published with
+`--latest=false`, so `connect.sh`, `connect.ps1`, and managed self-update do not
+downgrade clients. Prerelease package versions belong in the staging lane.
+
 ## Signing (RFC 0010 §6)
 
 Signing is **mandatory on every platform**, and the `signing-preflight` job
@@ -103,12 +109,16 @@ LaunchAgent that handles either MDM ordering safely:
 - **Package before profile:** the first run exits cleanly while the managed
   preference is absent. `WatchPaths` starts it when MDM creates
   `/Library/Managed Preferences/ai.anyray.connect.plist`.
-- A later temporary enrollment failure exits nonzero, so `KeepAlive` retries it
-  with a 300-second throttle. A new login also gets `RunAtLoad` automatically
-  from `/Library/LaunchAgents`; that login run rechecks cached state so an
-  expired certificate, lost Keychain key, or rotated profile can recover. A
-  full local `anyray-connect --revert` records an opt-out and stays reverted
-  until the user explicitly applies Connect again.
+- A failed enrollment gets four bounded attempts: immediately, then after 1,
+  5, and 15 minutes. After that it stops until the profile changes or the user
+  logs in again. This handles temporary network failures without retrying an
+  invalid profile forever. Output is kept in the signed-in user's
+  `~/Library/Logs/Anyray Connect/managed-enroll.log`, rotated at 1 MiB, instead
+  of being discarded to `/dev/null`. A new login gets `RunAtLoad`
+  automatically from `/Library/LaunchAgents`; that login run rechecks cached
+  state so an expired certificate, lost Keychain key, or rotated profile can
+  recover. A full local `anyray-connect --revert` records an opt-out and stays
+  reverted until the user explicitly applies Connect again.
 
 ### Windows — Authenticode (Azure Artifact Signing + jsign)
 

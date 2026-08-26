@@ -1,0 +1,78 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+Restrict who may reach the optimizer's :8088 (ANY-198).
+
+WHY. The optimizer is a ClusterIP Service, correctly absent from the Ingress and
+the HTTPRoute, so it is not reachable from outside the cluster. Inside the
+namespace it is wide open: any pod can dial `optimizer.<ns>.svc.<clusterDomain>:8088`
+with the bearer token read straight out of the `anyray-secrets` Secret, and get
+the whole savings engine. A customer pointed their own LiteLLM at it and took
+optimization whose savings never reached a spend row — the gateway is what
+writes those, and it was not in the path.
+
+WHAT THIS IS NOT. Defence in depth, not the fix. The optimizer also verifies
+the signed entitlement lease itself, so a suspended or lapsed deployment is
+refused wherever the call comes from; that gate travels with the image and
+covers Compose, Railway, and ECS too, while this policy only narrows who can
+reach a deployment that is currently paid up.
+
+Do NOT name a release number here. The lease gate ships in a monorepo release
+whose number is not known when this chart change is written, and an earlier
+draft of this comment asserted a version that was already cut WITHOUT it —
+telling an operator a control was live on their install when it was not. The
+same trap is recorded at _helpers.tpl's probe floor ("verify against `git tag`
+before changing it"). Read it as: present in the appVersion this chart pins, or
+newer.
+
+WHY IT IS OFF BY DEFAULT. Two reasons, both about not breaking working installs:
+
+  1. Whether kubelet's liveness/readiness probes are subject to NetworkPolicy is
+     CNI-dependent. Cilium and Calico allow host→local-pod by default; others do
+     not, and there is no portable way to express "the node this pod runs on" in
+     a NetworkPolicy. On a CNI that filters probes, every optimizer pod fails
+     its liveness probe and crashloops — and an optimizer that is down is not a
+     safe failure here: the gateway fails open, forwards the ORIGINAL request,
+     and busts the provider prompt cache on every warm session. That costs
+     considerably more than the trims it lost.
+  2. On a cluster with no policy controller at all a NetworkPolicy is silently
+     inert. Defaulting it on would put a rule in the manifest that reads like
+     enforcement and enforces nothing.
+
+So: enable it deliberately, then confirm the optimizer pods stay Ready. If they
+do not, your CNI filters probes — set `networkPolicy.enabled: false`; the
+optimizer's own lease gate still applies.
+
+WHO IS ALLOWED. The gateway only. The console proxy does NOT dial the optimizer
+(the console image dropped that upstream — /admin/optimizer/* rides the gateway
+passthrough so the gateway's RBAC applies), and nothing else in the chart calls
+it. Add your own callers via `networkPolicy.optimizerExtraIngress`.
+
+EGRESS IS NOT RESTRICTED. The optimizer must reach Postgres and, with vision
+strategies, nothing else outbound; an egress rule here would be a second way to
+break a working install for no gain, since the concern is inbound.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "anyray.fullname" . }}-optimizer
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: optimizer
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8088
+    {{- with .Values.networkPolicy.optimizerExtraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

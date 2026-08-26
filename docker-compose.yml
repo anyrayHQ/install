@@ -178,6 +178,16 @@ services:
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
       # Must match the gateway's value or the optimizer's trace sweep reverts to the 90-day default.
       ANYRAY_SPEND_RETENTION_DAYS: ${ANYRAY_SPEND_RETENTION_DAYS:-}
+      # Entitlement (ANY-198): the optimizer verifies the gateway-written lease
+      # itself, against the key pinned in its image, so the dev-override is now
+      # an optimizer concern too — same two vars, same reason as the gateway
+      # above. An internal build whose control plane signs with a non-vendor
+      # keypair MUST inject the matching verify key here, or the optimizer
+      # rejects every lease that control plane signed and refuses to optimize.
+      # Unset on a customer deployment, where the image-pinned vendor key is
+      # the right one and these must never be set.
+      ANYRAY_DEV_UNSAFE_CONTROL_PLANE: ${ANYRAY_DEV_UNSAFE_CONTROL_PLANE:-}
+      ANYRAY_LICENSE_PUBLIC_KEY: ${ANYRAY_LICENSE_PUBLIC_KEY:-}
     volumes:
       - anyray_optimizer_data:/data
     healthcheck:

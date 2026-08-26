@@ -47,20 +47,26 @@ spec:
               value: "0"
             - name: ANYRAY_UPDATER_TOKEN
               value: ""
-            # Point nginx at the gateway/optimizer Services by FQDN. The proxy
-            # resolves upstreams at request time via nginx's `resolver`, which —
-            # unlike libc/Node — does NOT apply the cluster's DNS search domains.
-            # So the image defaults (bare `gateway`/`optimizer`, fine on Docker
-            # Compose) resolve to NXDOMAIN here, and every gated route (/console/,
-            # /admin/*) 500s when the /__auth subrequest can't reach the gateway
-            # ("gateway could not be resolved (3: Host not found)"). The Services
-            # are named `gateway`/`optimizer` (see gateway.yaml / optimizer.yaml).
+            # Point nginx at the gateway Service by FQDN. The proxy resolves
+            # upstreams at request time via nginx's `resolver`, which — unlike
+            # libc/Node — does NOT apply the cluster's DNS search domains. So the
+            # image default (bare `gateway`, fine on Docker Compose) resolves to
+            # NXDOMAIN here, and every gated route (/console/, /admin/*) 500s
+            # when the /__auth subrequest can't reach the gateway ("gateway could
+            # not be resolved (3: Host not found)"). The Service is named
+            # `gateway` (see gateway.yaml).
+            #
+            # ANYRAY_OPTIMIZER_HOST used to sit here too and was dead: the console
+            # image has no optimizer upstream any more. /admin/optimizer/* rides
+            # the gateway passthrough on purpose, so the gateway's capability
+            # checks apply — proxying straight to the optimizer let any
+            # authenticated session, down to `viewer`, rewrite optimizer config.
+            # Removed so the manifest cannot be read as a second caller of :8088
+            # (see networkPolicy.yaml, which allows the gateway alone).
             # Listed before extraEnv so an operator override still wins (last
             # duplicate env entry is the one kubelet keeps).
             - name: ANYRAY_GATEWAY_HOST
               value: "gateway.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}"
-            - name: ANYRAY_OPTIMIZER_HOST
-              value: "optimizer.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}"
             {{- with .Values.proxy.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -75,7 +75,11 @@ jobs:
           mkdir -p "$deb_root" "$rpm_root"
           dpkg-deb -x "$RUNNER_TEMP/anyray-connect.deb" "$deb_root"
           rpm2cpio "$RUNNER_TEMP/anyray-connect.rpm" \
-            > "$RUNNER_TEMP/anyray-connect.cpio"
+            > "$RUNNER_TEMP/anyray-connect.cpio" || true
+          if [ ! -s "$RUNNER_TEMP/anyray-connect.cpio" ]; then
+            echo "::error::rpm2cpio produced no package payload"
+            exit 1
+          fi
           (
             cd "$rpm_root"
             cpio -idm --quiet --no-absolute-filenames \

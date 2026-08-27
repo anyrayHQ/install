@@ -86,19 +86,46 @@ jobs:
           set -e
           test "$cpio_status" -le 1
 
+          check_mode() {
+            path="$1"
+            expected="$2"
+            if [ ! -e "$path" ]; then
+              echo "::error::missing package payload: $path"
+              return 1
+            fi
+            actual="$(stat -c '%a' "$path")"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::package mode $actual, expected $expected: $path"
+              return 1
+            fi
+          }
+
+          check_copy() {
+            source="$1"
+            packaged="$2"
+            if ! cmp "$source" "$packaged"; then
+              echo "::error::packaged file differs from $source: $packaged"
+              return 1
+            fi
+          }
+
           check_payload() {
             root="$1"
-            test -x "$root/usr/bin/anyray-connect"
-            test "$(stat -c '%a' "$root/usr/bin/anyray-connect")" = 755
-            test "$(stat -c '%a' "$root/usr/lib/systemd/user/anyray-connect-managed-enroll.service")" = 644
-            test "$(stat -c '%a' "$root/etc/xdg/autostart/anyray-connect-managed-enroll.desktop")" = 644
-            cmp ci/anyray-connect-managed-enroll.service \
+            check_mode "$root/usr/bin/anyray-connect" 755
+            check_mode \
+              "$root/usr/lib/systemd/user/anyray-connect-managed-enroll.service" 644
+            check_mode \
+              "$root/etc/xdg/autostart/anyray-connect-managed-enroll.desktop" 644
+            check_copy ci/anyray-connect-managed-enroll.service \
               "$root/usr/lib/systemd/user/anyray-connect-managed-enroll.service"
-            cmp ci/anyray-connect-managed-enroll.desktop \
+            check_copy ci/anyray-connect-managed-enroll.desktop \
               "$root/etc/xdg/autostart/anyray-connect-managed-enroll.desktop"
-            grep -Fqx \
+            if ! grep -Fqx \
               'Exec=/usr/bin/systemctl --user start --no-block anyray-connect-managed-enroll.service' \
-              "$root/etc/xdg/autostart/anyray-connect-managed-enroll.desktop"
+              "$root/etc/xdg/autostart/anyray-connect-managed-enroll.desktop"; then
+              echo "::error::packaged XDG trigger does not start the user service"
+              return 1
+            fi
           }
 
           check_payload "$deb_root"

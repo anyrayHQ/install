@@ -170,10 +170,6 @@ jobs:
           VERSION="$(node -p "require('./package/package.json').version")"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           test -f package/dist/index.js
-          if [ ! -f package/native/macos/Package.swift ]; then
-            echo "::error::anyray-connect@${VERSION} does not include the native macOS helper source. Publish a Connect package containing native/macos before running this release."
-            exit 1
-          fi
 
       - name: Install runtime dependencies for bundling
         working-directory: package
@@ -232,12 +228,6 @@ jobs:
           path: out/
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: macos-helper-source
-          path: package/native/macos/
-          if-no-files-found: error
-
   # Developer ID-signs + notarizes the two darwin binaries. The per-step gates
   # below still check the Apple secrets, but `signing-preflight` has already
   # failed the run if any is missing, so on a real release they cannot be false
@@ -291,29 +281,9 @@ jobs:
           name: binaries-unsigned
           path: out
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: macos-helper-source
-          path: native/macos
-
       - name: Build the universal macOS package payload
         run: |
           set -euo pipefail
-          arm_scratch="$RUNNER_TEMP/anyray-helper-arm64"
-          x64_scratch="$RUNNER_TEMP/anyray-helper-x64"
-          swift build --package-path native/macos --configuration release \
-            --product anyray-device-proof --arch arm64 --scratch-path "$arm_scratch"
-          swift build --package-path native/macos --configuration release \
-            --product anyray-device-proof --arch x86_64 --scratch-path "$x64_scratch"
-          arm_bin_dir="$(swift build --package-path native/macos --configuration release \
-            --product anyray-device-proof --arch arm64 --scratch-path "$arm_scratch" \
-            --show-bin-path)"
-          x64_bin_dir="$(swift build --package-path native/macos --configuration release \
-            --product anyray-device-proof --arch x86_64 --scratch-path "$x64_scratch" \
-            --show-bin-path)"
-          test -x "$arm_bin_dir/anyray-device-proof"
-          test -x "$x64_bin_dir/anyray-device-proof"
-
           root="$RUNNER_TEMP/anyray-connect-pkgroot"
           scripts="$RUNNER_TEMP/anyray-connect-pkgscripts"
           mkdir -p \
@@ -325,13 +295,7 @@ jobs:
             out/anyray-connect-darwin-arm64 \
             out/anyray-connect-darwin-x64 \
             -output "$root/usr/local/bin/anyray-connect"
-          lipo -create \
-            "$arm_bin_dir/anyray-device-proof" \
-            "$x64_bin_dir/anyray-device-proof" \
-            -output "$root/usr/local/lib/anyray-connect/anyray-device-proof"
-          chmod 0755 \
-            "$root/usr/local/bin/anyray-connect" \
-            "$root/usr/local/lib/anyray-connect/anyray-device-proof"
+          chmod 0755 "$root/usr/local/bin/anyray-connect"
 
           cat > "$root/usr/local/lib/anyray-connect/managed-enroll-runner" <<'RUNNER'
           #!/bin/sh
@@ -355,11 +319,10 @@ jobs:
           chmod 0600 "$log_file"
           exec >> "$log_file" 2>&1
 
-          # Connect currently returns the same failure code for temporary and
-          # permanent enrollment errors. Retry a few times for network/service
-          # recovery, then stop until the profile changes or the user logs in
-          # again. This prevents a bad profile from retrying every five minutes
-          # forever.
+          # Exit 3 from connect is a permanent failure (revoked or expired link,
+          # email outside the allowed domains): stop until the profile changes
+          # or the user logs in again. Anything else is retried a few times for
+          # network/service recovery.
           max_attempts=4
           attempt=1
           delay_seconds=0
@@ -379,6 +342,11 @@ jobs:
               exit 0
             else
               status=$?
+            fi
+            if [ "$status" -eq 3 ]; then
+              printf '%s managed enrollment failed permanently (status 3); it will run again after a profile change or the next login\n' \
+                "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+              exit 0
             fi
 
             case "$attempt" in
@@ -464,8 +432,6 @@ jobs:
 
           lipo -archs "$root/usr/local/bin/anyray-connect" | grep -q 'arm64'
           lipo -archs "$root/usr/local/bin/anyray-connect" | grep -q 'x86_64'
-          lipo -archs "$root/usr/local/lib/anyray-connect/anyray-device-proof" | grep -q 'arm64'
-          lipo -archs "$root/usr/local/lib/anyray-connect/anyray-device-proof" | grep -q 'x86_64'
 
       - name: Sign the darwin binaries and package payload (Developer ID Application)
         if: env.APPLE_SIGNING_CERT_P12 != ''
@@ -576,64 +542,12 @@ jobs:
 
           root="$RUNNER_TEMP/anyray-connect-pkgroot"
           universal_connect="$root/usr/local/bin/anyray-connect"
-          helper="$root/usr/local/lib/anyray-connect/anyray-device-proof"
           codesign --force --options runtime --timestamp \
             --entitlements "$RUNNER_TEMP/entitlements.plist" \
             --identifier ai.anyray.connect --sign "$IDENTITY" "$universal_connect"
-
-          # Derive the Apple Team Identifier from the identity that actually
-          # signed a probe copy. Do not duplicate it in a repo variable: the
-          # certificate is the authority, and validating the fixed shape before
-          # writing XML prevents a malformed value from becoming an entitlement.
-          team_probe="$RUNNER_TEMP/anyray-device-proof-team-id-probe"
-          cp "$helper" "$team_probe"
-          codesign --force --sign "$IDENTITY" "$team_probe"
-          codesign --verify --strict --verbose=2 "$team_probe"
-          signature_metadata="$(codesign -d --verbose=4 "$team_probe" 2>&1)"
-          TEAM_ID="$(printf '%s\n' "$signature_metadata" \
-            | awk -F= '$1 == "TeamIdentifier" {print $2}')"
-          if ! printf '%s\n' "$TEAM_ID" | grep -Eq '^[A-Z0-9]{10}$'; then
-            echo "::error::could not derive a valid 10-character Apple Team Identifier from the Developer ID Application identity"
-            exit 1
-          fi
-          rm -f "$team_probe"
-
-          # App group only: keychain-access-groups gets a Developer ID CLI AMFI-killed.
-          helper_app_group="${TEAM_ID}.ai.anyray.connect"
-          cat > "$RUNNER_TEMP/device-proof-entitlements.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>com.apple.security.application-groups</key>
-            <array>
-              <string>${helper_app_group}</string>
-            </array>
-          </dict>
-          </plist>
-          PLIST
-          plutil -lint "$RUNNER_TEMP/device-proof-entitlements.plist"
-          codesign --force --options runtime --timestamp \
-            --entitlements "$RUNNER_TEMP/device-proof-entitlements.plist" \
-            --identifier ai.anyray.connect.device-proof \
-            --sign "$IDENTITY" "$helper"
           codesign --verify --strict --verbose=2 "$universal_connect"
-          codesign --verify --strict --verbose=2 "$helper"
-
-          # Exactly the app group: no restricted entitlement, no inherited allow-jit.
-          embedded_entitlements="$RUNNER_TEMP/device-proof-embedded-entitlements.plist"
-          codesign -d --entitlements :- "$helper" > "$embedded_entitlements"
-          plutil -lint "$embedded_entitlements"
-          plutil -convert json -o - "$embedded_entitlements" \
-            | jq -e --arg app_group "$helper_app_group" '
-                type == "object"
-                and (keys == ["com.apple.security.application-groups"])
-                and .["com.apple.security.application-groups"] == [$app_group]
-              ' > /dev/null
-
-          # No keychain smoke test here: the helper needs an unlocked login
-          # session for the Data Protection Keychain, and this runner has none.
-          "$universal_connect" --help > /dev/null
+          # The signed universal binary must still run on this arm64 runner.
+          "$universal_connect" --version > /dev/null
 
       - name: Prepare the App Store Connect API key
         # Both notarization steps consume this file. Gate its creation on the
@@ -726,8 +640,6 @@ jobs:
           printf '%s\n' "$payload_files"
           printf '%s\n' "$payload_files" | grep -Eq '^\.?/?usr/local/bin/anyray-connect$'
           printf '%s\n' "$payload_files" \
-            | grep -Eq '^\.?/?usr/local/lib/anyray-connect/anyray-device-proof$'
-          printf '%s\n' "$payload_files" \
             | grep -Eq '^\.?/?usr/local/lib/anyray-connect/managed-enroll-runner$'
           printf '%s\n' "$payload_files" \
             | grep -Eq '^\.?/?Library/LaunchAgents/ai\.anyray\.connect\.managed-enroll\.plist$'
@@ -758,9 +670,6 @@ jobs:
             "$RUNNER_TEMP/installer-cert.p12" \
             "$RUNNER_TEMP/notary-key.p8" \
             "$RUNNER_TEMP/anyray-keychain-password" \
-            "$RUNNER_TEMP/anyray-device-proof-team-id-probe" \
-            "$RUNNER_TEMP/device-proof-entitlements.plist" \
-            "$RUNNER_TEMP/device-proof-embedded-entitlements.plist" \
             "$RUNNER_TEMP/anyray-connect-component.pkg" \
             "$RUNNER_TEMP/anyray-connect-unsigned.pkg"
           if [ -f "$RUNNER_TEMP/anyray-signing.keychain-db" ]; then

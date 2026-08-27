@@ -631,33 +631,8 @@ jobs:
                 and .["com.apple.security.application-groups"] == [$app_group]
               ' > /dev/null
 
-          # Exercise the exact operation Connect uses with a fresh, canonical
-          # gateway-verification challenge. Creating and using the permanent key
-          # here proves the signed helper can access the Data Protection Keychain.
-          issued_at="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
-          nonce="$(openssl rand -hex 16)"
-          challenge="$(jq -cnS \
-            --arg deployment_id 'dep_release_smoke' \
-            --arg issued_at "$issued_at" \
-            --arg nonce "$nonce" \
-            '{deploymentId: $deployment_id, issuedAt: $issued_at, nonce: $nonce}')"
-          encoded_challenge="$(printf '%s' "$challenge" \
-            | openssl base64 -A \
-            | tr '+/' '-_' \
-            | tr -d '=')"
-          sign_request="$(jq -cn --arg data "$encoded_challenge" \
-            '{v: 1, operation: "sign", data: $data}')"
-          sign_response="$(printf '%s' "$sign_request" | "$helper")"
-          printf '%s\n' "$sign_response" | jq -e '
-            type == "object"
-            and ((keys | sort) == (["devPublicKey", "operation", "signature", "v"] | sort))
-            and .v == 1
-            and .operation == "sign"
-            and (.devPublicKey | type == "string"
-              and startswith("-----BEGIN PUBLIC KEY-----\n")
-              and contains("\n-----END PUBLIC KEY-----"))
-            and (.signature | type == "string" and test("^[A-Za-z0-9_-]+$"))
-          ' > /dev/null
+          # No keychain smoke test here: the helper needs an unlocked login
+          # session for the Data Protection Keychain, and this runner has none.
           "$universal_connect" --help > /dev/null
 
       - name: Prepare the App Store Connect API key

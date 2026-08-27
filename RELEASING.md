@@ -83,25 +83,14 @@ Three invariants the workflow encodes — keep them if you touch it:
 | `APPLE_NOTARY_KEY` | Base64 of the `.p8` private key (`base64 -i AuthKey_XXXX.p8`) | Downloadable **once** at key creation — store the original safely |
 
 The two Apple certificates are different types and are both required. The
-Developer ID Application identity signs the universal `anyray-connect` and
-`anyray-device-proof` Mach-O files inside the package. `pkgbuild --ownership
-recommended` creates the component package, and the Developer ID Installer
-identity signs that outer package with `productsign`. The workflow then submits
-the final `.pkg` to Apple, staples the ticket, and checks it with both
-`pkgutil --check-signature` and `spctl -t install`.
+Developer ID Application identity signs the universal `anyray-connect` Mach-O
+file inside the package. `pkgbuild --ownership recommended` creates the
+component package, and the Developer ID Installer identity signs that outer
+package with `productsign`. The workflow then submits the final `.pkg` to
+Apple, staples the ticket, and checks it with both `pkgutil --check-signature`
+and `spctl -t install`.
 
-`anyray-device-proof` keeps each Mac's private device key non-exportable in the
-user's Data Protection Keychain. Apple permits that access only when the helper
-is signed with its application identifier, Team Identifier, and Keychain access
-group. The workflow derives the Team Identifier from the imported Developer ID
-Application identity and uses the group
-`TEAMID.ai.anyray.connect.device-proof`; there is no separate Team ID setting to
-maintain. It verifies the embedded entitlements and runs a real signing request
-before building the package. These identity entitlements belong only to the
-helper. The Bun-based `anyray-connect` binary keeps its existing `allow-jit`
-entitlement and does not receive Keychain access.
-
-The package carries no enrollment token or customer certificate. It installs a
+The package carries no enrollment token. It installs a
 LaunchAgent that handles either MDM ordering safely:
 
 - **Profile before package:** `postinstall` bootstraps and kickstarts the agent
@@ -109,15 +98,14 @@ LaunchAgent that handles either MDM ordering safely:
 - **Package before profile:** the first run exits cleanly while the managed
   preference is absent. `WatchPaths` starts it when MDM creates
   `/Library/Managed Preferences/ai.anyray.connect.plist`.
-- A failed enrollment gets four bounded attempts: immediately, then after 1,
-  5, and 15 minutes. After that it stops until the profile changes or the user
-  logs in again. This handles temporary network failures without retrying an
-  invalid profile forever. Output is kept in the signed-in user's
+- A temporary enrollment failure gets four bounded attempts: immediately, then
+  after 1, 5, and 15 minutes. A permanent failure (connect exit 3: revoked or
+  expired link, email outside the allowed domains) stops at once. Either way it
+  stays stopped until the profile changes or the user logs in again. Output is kept in the signed-in user's
   `~/Library/Logs/Anyray Connect/managed-enroll.log`, rotated at 1 MiB, instead
   of being discarded to `/dev/null`. A new login gets `RunAtLoad`
   automatically from `/Library/LaunchAgents`; that login run rechecks cached
-  state so an expired certificate, lost Keychain key, or rotated profile can
-  recover. A full local `anyray-connect --revert` records an opt-out and stays
+  state so an expired certificate or rotated profile can recover. A full local `anyray-connect --revert` records an opt-out and stays
   reverted until the user explicitly applies Connect again.
 
 ### Windows — Authenticode (Azure Artifact Signing + jsign)

@@ -113,30 +113,45 @@ jobs:
       - name: autoUpdate rolls only a tag that can actually move
         run: |
           set -euo pipefail
-          base=(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi)
+          render() {
+            helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi "$@"
+          }
+          # NOTE: render once into a variable and match with grep on a here-string.
+          # `helm ... | grep -q` is a trap under pipefail: grep -q exits at the
+          # first match, the upstream helm/grep takes SIGPIPE, and pipefail turns
+          # that into a step failure — intermittently, depending on buffering.
+          default="$(render)"
+          pinned="$(render --set-string image.tag="$APP_VERSION")"
+          off="$(render --set autoUpdate.enabled=false)"
+
           # Default: the channel moves, so the roll is scheduled.
-          test "$("${base[@]}" | grep -c 'kind: CronJob')" -eq 1
+          test "$(grep -c 'kind: CronJob' <<<"$default")" -eq 1
 
           # Pinned tag with autoUpdate left at its default true. This MUST render
           # and MUST omit the CronJob rather than fail: every install predating
           # 0.6.0 pins its tag, so failing here would turn their first upgrade
           # into a render error and a red sync for every ArgoCD/Flux user. A
-          # nightly restart onto an identical build is pure churn.
-          # Must be >= the chart's HA floor, or an unrelated guard rejects the
-          # render first and this proves nothing about the CronJob.
-          pinned="$("${base[@]}" --set-string image.tag="$APP_VERSION")"
-          test "$(printf '%s\n' "$pinned" | grep -c 'kind: CronJob')" -eq 0
+          # nightly restart onto an identical build is pure churn. The fixture
+          # uses the chart's own appVersion because a made-up low version trips
+          # the unrelated HA-floor guard first and proves nothing.
+          test "$(grep -c 'kind: CronJob' <<<"$pinned")" -eq 0
 
           # Explicit opt-out on a moving tag.
-          test "$("${base[@]}" --set autoUpdate.enabled=false | grep -c 'kind: CronJob')" -eq 0
+          test "$(grep -c 'kind: CronJob' <<<"$off")" -eq 0
 
-          # The roll must never be able to touch the Postgres StatefulSet, and
-          # must stay inside this release: Deployments + the instance selector.
-          "${base[@]}" | grep -A12 'kind: CronJob' | grep -q -- '- deployment'
-          "${base[@]}" | grep -A16 'kind: CronJob' | grep -q -- '--selector'
+          # The roll must never reach the Postgres StatefulSet, and must stay
+          # inside this release: Deployments plus the instance selector.
+          cronjob="$(awk '/^kind: CronJob$/,0' <<<"$default")"
+          grep -q -- '- deployment' <<<"$cronjob"
+          grep -q -- "--selector" <<<"$cronjob"
+          grep -q -- 'app.kubernetes.io/instance=' <<<"$cronjob"
+          if grep -q -- 'statefulset' <<<"$cronjob"; then
+            echo "::error::the autoUpdate roll references a StatefulSet — it must only restart Deployments"
+            exit 1
+          fi
 
           # Namespaced Role only. A ClusterRole here would be a privilege bug.
-          test "$("${base[@]}" | grep -c '^kind: ClusterRole')" -eq 0
+          test "$(grep -c '^kind: ClusterRole' <<<"$default")" -eq 0
 
       - name: policy-stable is the only supported moving channel
         run: |

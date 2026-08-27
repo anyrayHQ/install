@@ -86,13 +86,25 @@ Secret plus a starter values file, and it never runs inside your cluster. The tw
 keys that must be present are `ANYRAY_DEPLOYMENT_TOKEN` (your `adt_…` connect
 token) and an `ANYRAY_PSEUDONYM_SALT` you generate once and keep in-cluster.
 
-> **Image tags are pinned by default.** Each chart version ships a fixed
-> `appVersion`, and images default to it — so a given `targetRevision` always
-> deploys the same, auditable build, exactly what you want under GitOps. To
-> follow compatible production builds instead, set `image.tag: policy-stable` in
-> your values; the chart forces `imagePullPolicy: Always` for that channel.
-> Kubernetes still needs an explicit rollout restart to resolve a new digest.
-> Leave the tag unset for reproducible production deployments.
+> **Images update themselves by default (chart 0.6.0+).** `image.tag` defaults to
+> the `policy-stable` channel, which every release promotes, and the chart also
+> schedules a nightly `kubectl rollout restart` so the moving tag actually
+> resolves to a new digest (`autoUpdate`, below). Before 0.6.0 the default was the
+> chart's pinned `appVersion` and nothing rolled.
+>
+> **Under GitOps you usually want the opposite.** A moving tag means a given
+> `targetRevision` no longer deploys the same build every sync. Pin it back:
+>
+> ```yaml
+> image:
+>   tag: ""              # the chart's appVersion, a fixed auditable build
+> autoUpdate:
+>   enabled: false
+> ```
+>
+> A pinned tag on its own is enough: the chart skips the roll for any tag that
+> cannot move, rather than restarting pods nightly onto the same build. Setting
+> `autoUpdate.enabled: false` too just silences the note about it in `NOTES.txt`.
 
 ## Install from source (setup.sh)
 
@@ -139,8 +151,8 @@ helm upgrade anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 Apply the updated Secret before upgrading. The gateway pod will not start
 without `ANYRAY_DEPLOYMENT_TOKEN` and `ANYRAY_PSEUDONYM_SALT`.
 
-When following `policy-stable`, restart the app Deployments after each channel
-promotion so Kubernetes resolves the new digest:
+On the default `policy-stable` channel the bundled `autoUpdate` CronJob does this
+for you nightly. To roll immediately instead of waiting for the schedule:
 
 ```bash
 kubectl rollout restart deployment -n "$ANYRAY_NAMESPACE" \
@@ -148,6 +160,38 @@ kubectl rollout restart deployment -n "$ANYRAY_NAMESPACE" \
 kubectl rollout status deployment -n "$ANYRAY_NAMESPACE" \
   -l app.kubernetes.io/instance=anyray --timeout=10m
 ```
+
+### Automatic image updates (`autoUpdate`)
+
+On by default from chart 0.6.0. A CronJob runs `kubectl rollout restart` against
+this release's Deployments, so the moving `image.tag` resolves to a new digest.
+The Postgres StatefulSet is never restarted, and the selector is scoped to this
+release's instance label, so a second release in the same namespace is untouched.
+
+| Value | Default | What it does |
+| --- | --- | --- |
+| `autoUpdate.enabled` | `true` | Schedules the roll. Skipped automatically for any `image.tag` that cannot move, so a pinned install is never restarted onto the same build. |
+| `autoUpdate.schedule` | `"30 3 * * *"` | Standard cron. Daily, outside working hours. |
+| `autoUpdate.timeZone` | `""` | IANA name (`Europe/Berlin`). Empty uses the cluster's zone. Needs Kubernetes 1.27+. |
+| `autoUpdate.image.repository` / `.tag` | `registry.k8s.io/kubectl` / `v1.33.0` | Any kubectl within one minor of your cluster. Mirrored by `global.imageRegistry` like every other image. The upstream image has no `latest` tag, so this is always explicit. |
+| `autoUpdate.resources` | 10m/32Mi → 100m/128Mi | The job runs one API call. |
+| `autoUpdate.nodeSelector` / `.tolerations` | `{}` / `[]` | Falls back to the global scheduling values. |
+
+It needs a `Role` (never a `ClusterRole`) granting `get`, `list` and `patch` on
+`apps/deployments` in this namespace: `get`/`list` resolve the label selector,
+`patch` stamps the restart annotation. Nothing else.
+
+**A build that will not start stalls the roll, it does not drop the deployment.**
+The gateway and proxy roll with `maxUnavailable: 0`, so a replacement must pass
+its readiness probe before an old pod is retired. The optimizer is the exception
+while `optimizer.persistence.enabled` is `true`: its `ReadWriteOnce` volume forces
+`strategy: Recreate` and a real gap. The gateway fails open across that gap, so it
+costs prompt-cache efficiency rather than availability.
+
+**A roll is unconditional.** It cannot tell a release that only needs new bytes
+from one that needs a new setting from you first, which is the check the gateway
+makes for itself where an applier exists. Such a release will not start and the
+roll stalls; the console's **Updates** panel names what to set.
 
 ### Rollout behaviour and downtime
 

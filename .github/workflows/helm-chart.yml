@@ -1,10 +1,19 @@
 name: Helm chart
 
-# Validates the Helm chart and enforces the production pinning invariant: each
-# chart version ships a fixed appVersion (helm/Chart.yaml) and images default to
-# it (helm/values.yaml image.tag is empty), so a given chart version always
-# deploys the same, auditable build — never the moving :latest tag. Also guards
-# the CI-generated appVersion bump PR opened by the monorepo prod promotion.
+# Validates the Helm chart and enforces the image-channel invariants.
+#
+# From chart 0.6.0 images DEFAULT to the moving `policy-stable` channel, paired
+# with the autoUpdate CronJob, so a Kubernetes install keeps itself current the
+# way Compose and the AWS stack already do. Two things this job still guards,
+# because they are what made the old pinned default safe:
+#   * `policy-stable` is the ONLY moving channel we ship by default. `:latest`
+#     must never become the default: it is a legacy alias with no promotion
+#     contract behind it.
+#   * PINNING STILL WORKS. With image.tag="" every app image must resolve to the
+#     chart's fixed appVersion, so a GitOps repo that pins gets exactly the
+#     reproducible, auditable build it did before.
+# Also guards the CI-generated appVersion bump PR opened by the monorepo prod
+# promotion.
 on:
   push:
     branches: [main]
@@ -58,23 +67,91 @@ jobs:
           fi
           echo "APP_VERSION=$app" >> "$GITHUB_ENV"
 
-      - name: Default render pins every app image to appVersion
+      - name: Default render follows policy-stable, never :latest
         run: |
           set -euo pipefail
           render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi)"
           fail=0
           for c in gateway optimizer proxy endpoint-control; do
-            if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:${APP_VERSION}"; then
-              echo "::error::default render does not pin ${c} to appVersion ${APP_VERSION}:"
+            if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:policy-stable"; then
+              echo "::error::default render does not put ${c} on the policy-stable channel:"
               printf '%s\n' "$render" | grep -E "image:.*/${c}:" || true
               fail=1
             fi
           done
+          # :latest is a legacy alias with no promotion contract behind it, so it
+          # must never become the default even though the default is now moving.
           if printf '%s\n' "$render" | grep -Eq 'anyray/(gateway|optimizer|proxy|endpoint-control):latest'; then
-            echo "::error::default render uses a moving :latest tag — production images must be pinned"
+            echo "::error::default render uses the legacy :latest alias — the supported moving channel is policy-stable"
+            fail=1
+          fi
+          # A moving tag whose pods never re-pull is the failure mode that makes
+          # the whole scheme decorative. Assert the pairing, not just the tag.
+          if [ "$(printf '%s\n' "$render" | grep -c 'imagePullPolicy: Always')" -lt 4 ]; then
+            echo "::error::default render follows a moving channel without imagePullPolicy: Always"
             fail=1
           fi
           [ "$fail" = 0 ]
+
+      - name: Pinning still works — image.tag="" resolves every app image to appVersion
+        run: |
+          set -euo pipefail
+          # The guarantee a GitOps repo depends on, and the old default. It has to
+          # keep working now that it is opt-in rather than automatic.
+          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
+            --set-string image.tag="")"
+          fail=0
+          for c in gateway optimizer proxy endpoint-control; do
+            if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:${APP_VERSION}"; then
+              echo "::error::pinned render does not resolve ${c} to appVersion ${APP_VERSION}:"
+              printf '%s\n' "$render" | grep -E "image:.*/${c}:" || true
+              fail=1
+            fi
+          done
+          [ "$fail" = 0 ]
+
+      - name: autoUpdate rolls only a tag that can actually move
+        run: |
+          set -euo pipefail
+          render() {
+            helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi "$@"
+          }
+          # NOTE: render once into a variable and match with grep on a here-string.
+          # `helm ... | grep -q` is a trap under pipefail: grep -q exits at the
+          # first match, the upstream helm/grep takes SIGPIPE, and pipefail turns
+          # that into a step failure — intermittently, depending on buffering.
+          default="$(render)"
+          pinned="$(render --set-string image.tag="$APP_VERSION")"
+          off="$(render --set autoUpdate.enabled=false)"
+
+          # Default: the channel moves, so the roll is scheduled.
+          test "$(grep -c 'kind: CronJob' <<<"$default")" -eq 1
+
+          # Pinned tag with autoUpdate left at its default true. This MUST render
+          # and MUST omit the CronJob rather than fail: every install predating
+          # 0.6.0 pins its tag, so failing here would turn their first upgrade
+          # into a render error and a red sync for every ArgoCD/Flux user. A
+          # nightly restart onto an identical build is pure churn. The fixture
+          # uses the chart's own appVersion because a made-up low version trips
+          # the unrelated HA-floor guard first and proves nothing.
+          test "$(grep -c 'kind: CronJob' <<<"$pinned")" -eq 0
+
+          # Explicit opt-out on a moving tag.
+          test "$(grep -c 'kind: CronJob' <<<"$off")" -eq 0
+
+          # The roll must never reach the Postgres StatefulSet, and must stay
+          # inside this release: Deployments plus the instance selector.
+          cronjob="$(awk '/^kind: CronJob$/,0' <<<"$default")"
+          grep -q -- '- deployment' <<<"$cronjob"
+          grep -q -- "--selector" <<<"$cronjob"
+          grep -q -- 'app.kubernetes.io/instance=' <<<"$cronjob"
+          if grep -q -- 'statefulset' <<<"$cronjob"; then
+            echo "::error::the autoUpdate roll references a StatefulSet — it must only restart Deployments"
+            exit 1
+          fi
+
+          # Namespaced Role only. A ClusterRole here would be a privilege bug.
+          test "$(grep -c '^kind: ClusterRole' <<<"$default")" -eq 0
 
       - name: policy-stable is the only supported moving channel
         run: |

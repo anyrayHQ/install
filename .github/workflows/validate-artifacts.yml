@@ -74,11 +74,17 @@ jobs:
           rpm_root="$RUNNER_TEMP/rpm-root"
           mkdir -p "$deb_root" "$rpm_root"
           dpkg-deb -x "$RUNNER_TEMP/anyray-connect.deb" "$deb_root"
+          rpm2cpio "$RUNNER_TEMP/anyray-connect.rpm" \
+            > "$RUNNER_TEMP/anyray-connect.cpio"
+          set +e
           (
             cd "$rpm_root"
-            rpm2cpio "$RUNNER_TEMP/anyray-connect.rpm" \
-              | cpio -idm --quiet --no-absolute-filenames
+            cpio -idm --quiet --no-absolute-filenames \
+              < "$RUNNER_TEMP/anyray-connect.cpio"
           )
+          cpio_status=$?
+          set -e
+          test "$cpio_status" -le 1
 
           check_payload() {
             root="$1"

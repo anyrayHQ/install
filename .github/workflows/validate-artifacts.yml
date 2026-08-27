@@ -206,12 +206,21 @@ jobs:
             fi
           done
 
-          # Render-only tooling emits the chart's independently pinned appVersion.
+          # The BOM reflects whatever the chart actually deploys. By default that
+          # is now the policy-stable channel; a mirror operator who wants
+          # immutable refs passes --set image.tag or uses the crane path below.
           tool_bin="$(mktemp -d)"
           ln -s "$(command -v helm)" "$tool_bin/helm"
           image_bom="$(PATH="$tool_bin:/usr/bin:/bin" scripts/gen-image-bom.sh)"
+          grep -q "public.ecr.aws/anyray/gateway:policy-stable" <<<"$image_bom"
+          # The kubectl the autoUpdate CronJob runs is part of what a private
+          # registry must mirror, or the nightly roll fails on an air-gapped
+          # network with no way to see why from the BOM.
+          grep -q "registry.k8s.io/kubectl:" <<<"$image_bom"
+          # Pinning still produces a fully appVersion-pinned BOM.
           app="$(sed -nE 's/^appVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' helm/Chart.yaml | head -1)"
-          grep -q "public.ecr.aws/anyray/gateway:$app" <<<"$image_bom"
+          pinned_bom="$(PATH="$tool_bin:/usr/bin:/bin" scripts/gen-image-bom.sh --set-string image.tag="")"
+          grep -q "public.ecr.aws/anyray/gateway:$app" <<<"$pinned_bom"
 
           # An image the chart ALREADY digest-pins must pass through verbatim.
           # This only matters on the crane path, which the render above cannot

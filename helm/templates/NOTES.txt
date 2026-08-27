@@ -22,12 +22,13 @@ Image updates:
              release on schedule "{{ .Values.autoUpdate.schedule }}"{{ with .Values.autoUpdate.timeZone }} ({{ . }}){{ end }}.
              Turn it off with autoUpdate.enabled=false.
 {{- else if .Values.autoUpdate.enabled }}
-  OFF        autoUpdate.enabled is true, but images are pinned to "{{ $tag }}",
-             which never moves, so no roll was scheduled (it could only restart
-             pods onto the same build). Set image.tag=policy-stable to follow the
-             moving channel, or autoUpdate.enabled=false to silence this note.
+  manual     images are pinned to "{{ $tag }}", a fixed and auditable build.
+             Advance them with `helm upgrade` to a newer chart, or set
+             image.tag=policy-stable to follow the moving channel and have the
+             bundled CronJob roll this release nightly.
 {{- else }}
-  manual     images pinned to "{{ $tag }}"; advance them with `helm upgrade`.
+  manual     images pinned to "{{ $tag }}", nightly roll disabled;
+             advance them with `helm upgrade`.
 {{- end }}
 
 Availability of this release:

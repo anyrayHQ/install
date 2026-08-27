@@ -86,25 +86,27 @@ Secret plus a starter values file, and it never runs inside your cluster. The tw
 keys that must be present are `ANYRAY_DEPLOYMENT_TOKEN` (your `adt_…` connect
 token) and an `ANYRAY_PSEUDONYM_SALT` you generate once and keep in-cluster.
 
-> **Images update themselves by default (chart 0.6.0+).** `image.tag` defaults to
-> the `policy-stable` channel, which every release promotes, and the chart also
-> schedules a nightly `kubectl rollout restart` so the moving tag actually
-> resolves to a new digest (`autoUpdate`, below). Before 0.6.0 the default was the
-> chart's pinned `appVersion` and nothing rolled.
+> **Image tags are pinned by default.** Each chart version ships a fixed
+> `appVersion`, and images default to it, so a given `targetRevision` always
+> deploys the same, auditable build. That is what you want under GitOps, and it
+> is unchanged from earlier charts: upgrading the chart never moves a running
+> deployment off its pinned build.
 >
-> **Under GitOps you usually want the opposite.** A moving tag means a given
-> `targetRevision` no longer deploys the same build every sync. Pin it back:
+> **Auto-update is one value** (chart 0.6.0+). Set `image.tag: policy-stable` and
+> the deployment keeps itself current: the channel is promoted on every release,
+> the chart forces `imagePullPolicy: Always`, and the bundled `autoUpdate`
+> CronJob rolls the Deployments nightly so the moving tag actually resolves to a
+> new digest. `setup.sh --k8s` writes that line into the values file it
+> generates, so a new install is self-updating out of the box.
 >
 > ```yaml
 > image:
->   tag: ""              # the chart's appVersion, a fixed auditable build
-> autoUpdate:
->   enabled: false
+>   tag: policy-stable     # the whole opt-in; autoUpdate follows automatically
 > ```
 >
-> A pinned tag on its own is enough: the chart skips the roll for any tag that
-> cannot move, rather than restarting pods nightly onto the same build. Setting
-> `autoUpdate.enabled: false` too just silences the note about it in `NOTES.txt`.
+> Leave the tag unset and the nightly roll is skipped on its own, because a
+> restart onto an identical build is pure churn. See
+> [Automatic image updates](#automatic-image-updates-autoupdate).
 
 ## Install from source (setup.sh)
 
@@ -151,8 +153,8 @@ helm upgrade anyray ./helm -f my-values.yaml --namespace "$ANYRAY_NAMESPACE"
 Apply the updated Secret before upgrading. The gateway pod will not start
 without `ANYRAY_DEPLOYMENT_TOKEN` and `ANYRAY_PSEUDONYM_SALT`.
 
-On the default `policy-stable` channel the bundled `autoUpdate` CronJob does this
-for you nightly. To roll immediately instead of waiting for the schedule:
+When following `policy-stable` the bundled `autoUpdate` CronJob does this for you
+nightly. To roll immediately instead of waiting for the schedule:
 
 ```bash
 kubectl rollout restart deployment -n "$ANYRAY_NAMESPACE" \
@@ -163,14 +165,22 @@ kubectl rollout status deployment -n "$ANYRAY_NAMESPACE" \
 
 ### Automatic image updates (`autoUpdate`)
 
-On by default from chart 0.6.0. A CronJob runs `kubectl rollout restart` against
-this release's Deployments, so the moving `image.tag` resolves to a new digest.
+Added in chart 0.6.0, and armed by a single value. `autoUpdate.enabled` is `true`
+out of the box but renders **nothing** while `image.tag` is pinned, because a
+nightly restart onto an identical build is pure churn: setting
+`image.tag: policy-stable` is what turns the feature on. A CronJob then runs
+`kubectl rollout restart` against this release's Deployments, so the moving tag
+resolves to a new digest.
+
+That pairing is deliberate rather than a quirk. It means upgrading the chart
+never changes what a running deployment does: an install that never set a tag
+renders exactly the workloads it did before, with no CronJob.
 The Postgres StatefulSet is never restarted, and the selector is scoped to this
 release's instance label, so a second release in the same namespace is untouched.
 
 | Value | Default | What it does |
 | --- | --- | --- |
-| `autoUpdate.enabled` | `true` | Schedules the roll. Skipped automatically for any `image.tag` that cannot move, so a pinned install is never restarted onto the same build. |
+| `autoUpdate.enabled` | `true` | Arms the roll. Renders nothing unless `image.tag` can actually move, so a pinned install is never restarted onto the same build. Set `false` to keep a moving tag without a scheduled roll. |
 | `autoUpdate.schedule` | `"30 3 * * *"` | Standard cron. Daily, outside working hours. |
 | `autoUpdate.timeZone` | `""` | IANA name (`Europe/Berlin`). Empty uses the cluster's zone. Needs Kubernetes 1.27+. |
 | `autoUpdate.image.repository` / `.tag` | `registry.k8s.io/kubectl` / `v1.33.0` | Any kubectl within one minor of your cluster. Mirrored by `global.imageRegistry` like every other image. The upstream image has no `latest` tag, so this is always explicit. |

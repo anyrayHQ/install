@@ -28,13 +28,55 @@ global:
   imageRegistry: ""
 
 image:
-  # Empty → images pin to the chart's appVersion (the release this chart ships),
-  # so production deploys are reproducible and auditable. Set to "policy-stable"
-  # for the moving channel; it forces pullPolicy: Always.
-  tag: ""
-  # Pinned, immutable tags don't need re-pulling; a cached layer is the same build.
+  # The moving channel, promoted on every release, so a deployment picks up new
+  # builds instead of sitting on whatever it was installed with. Paired with the
+  # autoUpdate CronJob below, which supplies the rollout the moving tag needs;
+  # setting this channel alone forces pullPolicy: Always but rolls nothing.
+  #
+  # Set a concrete "vX.Y.Z" (or "" for the chart's appVersion) to pin a fixed,
+  # auditable build instead, which is what a deployment under change control or
+  # a GitOps repo generally wants. A pinned tag also requires
+  # autoUpdate.enabled: false — the chart refuses to render a nightly roll that
+  # can only land on the same build.
+  tag: policy-stable
+  # Overridden to Always whenever the effective tag is a moving channel: the
+  # digest behind it changes, so a cached layer is not the same build. A pinned
+  # tag is immutable and needs no re-pull.
   pullPolicy: IfNotPresent
   pullSecrets: []
+
+# Scheduled image roll. This is what makes a Kubernetes install self-updating,
+# the same way Compose bundles Watchtower and the AWS stack ships an updater
+# Lambda. It runs `kubectl rollout restart` against this release's Deployments so
+# the moving tag above actually resolves to a new digest; the Postgres
+# StatefulSet is never restarted.
+#
+# Safe by construction: the gateway and proxy roll with maxUnavailable: 0, so a
+# build that will not start stalls the rollout rather than dropping the
+# deployment. Watch the console's Updates panel for a release that needs a new
+# setting from you before it can start.
+autoUpdate:
+  enabled: true
+  # Daily, outside working hours. Standard cron, in timeZone below.
+  schedule: "30 3 * * *"
+  # IANA name, e.g. "Europe/Berlin". Empty uses the cluster's zone (UTC on most).
+  timeZone: ""
+  image:
+    # Any kubectl within one minor of your cluster. The upstream image publishes
+    # no `latest` tag, so this is always an explicit version.
+    repository: registry.k8s.io/kubectl
+    tag: v1.33.0
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "10m"
+      memory: "32Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+  # Defaults to the global scheduling values when unset.
+  nodeSelector: {}
+  tolerations: []
 
 # Per-component image repository overrides. Empty app tags inherit image.tag,
 # which in turn inherits the chart appVersion.

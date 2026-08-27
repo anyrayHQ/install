@@ -15,6 +15,21 @@ console with a port-forward:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "anyray.fullname" . }}-proxy 3000:3000
 {{- end }}
 
+Image updates:
+{{- $tag := include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .) }}
+{{- if and .Values.autoUpdate.enabled (include "anyray.isMovingTag" $tag) }}
+  automatic  images follow the "{{ $tag }}" channel and a CronJob rolls this
+             release on schedule "{{ .Values.autoUpdate.schedule }}"{{ with .Values.autoUpdate.timeZone }} ({{ . }}){{ end }}.
+             Turn it off with autoUpdate.enabled=false.
+{{- else if .Values.autoUpdate.enabled }}
+  OFF        autoUpdate.enabled is true, but images are pinned to "{{ $tag }}",
+             which never moves, so no roll was scheduled (it could only restart
+             pods onto the same build). Set image.tag=policy-stable to follow the
+             moving channel, or autoUpdate.enabled=false to silence this note.
+{{- else }}
+  manual     images pinned to "{{ $tag }}"; advance them with `helm upgrade`.
+{{- end }}
+
 Availability of this release:
 {{- if .Values.gateway.persistence.enabled }}
   gateway    replicas {{ .Values.gateway.replicas }}, Recreate rollout (the ReadWriteOnce data

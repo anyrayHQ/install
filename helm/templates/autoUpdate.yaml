@@ -1,0 +1,153 @@
+{{- /*
+Scheduled image roll — the Kubernetes equivalent of the applier the Compose and
+AWS installs bundle.
+
+WHY THIS EXISTS. Every other install path can apply an update unattended: Compose
+bundles Watchtower, the AWS quicklaunch stack ships an updater Lambda, and the
+gateway triggers one of those itself. Kubernetes had neither, so a cluster sat on
+whatever build it was installed with until an operator ran `helm upgrade` by hand,
+and fleets routinely drifted many releases behind.
+
+HOW IT WORKS. `image.tag` defaults to the `policy-stable` channel, which every
+release promotes, so the tag already resolves to the newest compatible build; the
+image helper forces `imagePullPolicy: Always` for it. What was missing is the
+trigger: Kubernetes caches the resolved digest in the running pod, so a moving tag
+is not by itself a rollout. This CronJob supplies that trigger with the same
+`kubectl rollout restart` an operator would run.
+
+WHY A SCHEDULED ROLL RATHER THAN THE TAG ALONE. Leaving a moving tag with nothing
+to roll it is worse than pinning: pods would pick up new builds only when they
+happened to restart (an eviction, a node drain, a scale event), at unpredictable
+times, and two replicas could sit on different builds indefinitely. A daily roll
+moves every pod together and re-converges the deployment.
+
+SAFETY. The gateway and proxy roll with maxUnavailable: 0, so a build that will
+not start leaves the running pods serving and stalls the rollout instead of taking
+the deployment down. The roll is scoped to Deployments, so the Postgres StatefulSet
+is never restarted, and to this release's instance label, so it cannot touch
+another release in the same namespace.
+
+The RBAC is the narrowest thing that can do the job: get/list to resolve the label
+selector, patch to stamp the restart annotation. Namespaced Role, never a
+ClusterRole.
+*/ -}}
+{{- /* A pinned tag has nothing newer to pull, so the roll would restart every pod
+onto the identical build: churn that reads as an outage risk and buys nothing. Skip
+rather than render a no-op, and say so in NOTES.txt so it is never silent.
+
+This SKIPS rather than fails deliberately. `autoUpdate.enabled` defaults to true, and
+every install that predates this chart pins its tag (that was the old default), so
+failing here would turn the first `helm upgrade` after adopting this chart into a
+render error for all of them, and a red sync for every ArgoCD and Flux user. A
+deploy pipeline broken by a chart bump is a worse outcome than an operator who has
+deliberately pinned not getting a nightly roll they never asked for. */ -}}
+{{- if and .Values.autoUpdate.enabled (include "anyray.isMovingTag" (include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .))) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "anyray.fullname" . }}-updater
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: updater
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "anyray.fullname" . }}-updater
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: updater
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "anyray.fullname" . }}-updater
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: updater
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "anyray.fullname" . }}-updater
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "anyray.fullname" . }}-updater
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "anyray.fullname" . }}-autoupdate
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: updater
+spec:
+  schedule: {{ .Values.autoUpdate.schedule | quote }}
+  {{- with .Values.autoUpdate.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  {{- /* A roll that is still in flight must never be joined by the next one. */}}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "anyray.labels" . | nindent 8 }}
+        app.kubernetes.io/component: updater
+    spec:
+      backoffLimit: 2
+      {{- /* Bound the Job itself: `rollout restart` returns as soon as the patch
+      lands, so this only ever trips if the API server is unreachable. */}}
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            {{- include "anyray.selectorLabels" (dict "component" "updater" "context" .) | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "anyray.fullname" . }}-updater
+          restartPolicy: OnFailure
+          {{- with .Values.autoUpdate.nodeSelector | default .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.autoUpdate.tolerations | default .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.image.pullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: kubectl
+              image: {{ include "anyray.updaterImage" . }}
+              imagePullPolicy: {{ .Values.autoUpdate.image.pullPolicy }}
+              {{- with .Values.containerSecurityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- /* The upstream kubectl image is distroless with kubectl as its
+              entrypoint, so this is `args` and not a shell command: there is no
+              shell in the image to run one. */}}
+              args:
+                - rollout
+                - restart
+                - deployment
+                - --namespace
+                - {{ .Release.Namespace }}
+                - --selector
+                - app.kubernetes.io/instance={{ .Release.Name }}
+              resources:
+                {{- toYaml .Values.autoUpdate.resources | nindent 16 }}
+{{- end }}

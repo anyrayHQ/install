@@ -678,6 +678,7 @@ jobs:
           set -euo pipefail
           root="$RUNNER_TEMP/anyray-connect-pkgroot"
           scripts="$RUNNER_TEMP/anyray-connect-pkgscripts"
+          component_pkg="$RUNNER_TEMP/anyray-connect-component.pkg"
           unsigned_pkg="$RUNNER_TEMP/anyray-connect-unsigned.pkg"
           pkgbuild \
             --root "$root" \
@@ -686,7 +687,10 @@ jobs:
             --version "$VERSION" \
             --install-location / \
             --ownership recommended \
-            "$unsigned_pkg"
+            "$component_pkg"
+          # MDM InstallApplication only installs distribution packages; a bare
+          # component package is acknowledged by Jamf and then silently dropped.
+          productbuild --package "$component_pkg" "$unsigned_pkg"
 
           KEYCHAIN="$RUNNER_TEMP/anyray-signing.keychain-db"
           KEYCHAIN_PASSWORD_FILE="$RUNNER_TEMP/anyray-keychain-password"
@@ -717,6 +721,7 @@ jobs:
           productsign --sign "$INSTALLER_IDENTITY" \
             "$unsigned_pkg" out/anyray-connect.pkg
           pkgutil --check-signature out/anyray-connect.pkg
+          xar -tf out/anyray-connect.pkg | grep -qx 'Distribution'
           payload_files="$(pkgutil --payload-files out/anyray-connect.pkg)"
           printf '%s\n' "$payload_files"
           printf '%s\n' "$payload_files" | grep -Eq '^\.?/?usr/local/bin/anyray-connect$'
@@ -756,6 +761,7 @@ jobs:
             "$RUNNER_TEMP/anyray-device-proof-team-id-probe" \
             "$RUNNER_TEMP/device-proof-entitlements.plist" \
             "$RUNNER_TEMP/device-proof-embedded-entitlements.plist" \
+            "$RUNNER_TEMP/anyray-connect-component.pkg" \
             "$RUNNER_TEMP/anyray-connect-unsigned.pkg"
           if [ -f "$RUNNER_TEMP/anyray-signing.keychain-db" ]; then
             security delete-keychain "$RUNNER_TEMP/anyray-signing.keychain-db"

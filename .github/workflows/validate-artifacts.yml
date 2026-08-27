@@ -23,8 +23,6 @@ permissions:
 jobs:
   connect-installers:
     runs-on: ubuntu-latest
-    env:
-      NFPM_TOOL_VERSION: '2.47.0'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - name: Validate installer sources
@@ -51,12 +49,13 @@ jobs:
           }
       - name: Install package inspection tools
         run: |
+          source ci/nfpm-tool.env
           sudo apt-get update
           sudo apt-get install -y cpio rpm2cpio
           archive="nfpm_${NFPM_TOOL_VERSION}_Linux_x86_64.tar.gz"
           curl -fsSLo "$RUNNER_TEMP/$archive" \
             "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_TOOL_VERSION/$archive"
-          echo "cfd152bb2e33847022647834ced55a8766b478e3613051773122aa8f50f43691  $RUNNER_TEMP/$archive" \
+          echo "$NFPM_LINUX_X64_SHA256  $RUNNER_TEMP/$archive" \
             | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" nfpm
       - name: Build Linux packages

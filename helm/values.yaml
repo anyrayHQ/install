@@ -28,28 +28,40 @@ global:
   imageRegistry: ""
 
 image:
-  # The moving channel, promoted on every release, so a deployment picks up new
-  # builds instead of sitting on whatever it was installed with. Paired with the
-  # autoUpdate CronJob below, which supplies the rollout the moving tag needs;
-  # setting this channel alone forces pullPolicy: Always but rolls nothing.
+  # Empty → images pin to the chart's appVersion (the release this chart ships),
+  # so a given chart version always deploys the same, auditable build.
   #
-  # Set a concrete "vX.Y.Z" (or "" for the chart's appVersion) to pin a fixed,
-  # auditable build instead, which is what a deployment under change control or
-  # a GitOps repo generally wants. A pinned tag also requires
-  # autoUpdate.enabled: false — the chart refuses to render a nightly roll that
-  # can only land on the same build.
-  tag: policy-stable
+  # BACKWARDS COMPATIBILITY: this default must not change. An existing release
+  # upgrades by re-reading this file, so moving the default here would silently
+  # switch every deployment that never set a tag from a pinned build onto a
+  # moving channel, and start restarting its pods nightly — from a routine
+  # `helm upgrade` nobody asked to change behaviour.
+  #
+  # Set "policy-stable" to follow the moving channel and have new builds land on
+  # their own. That single value is the whole opt-in: it forces
+  # pullPolicy: Always AND arms the autoUpdate roll below, which is inert while
+  # the tag cannot move. `setup.sh --k8s` writes it into the values file it
+  # generates, so a NEW install is self-updating out of the box while an upgrade
+  # of an existing one changes nothing.
+  tag: ""
   # Overridden to Always whenever the effective tag is a moving channel: the
   # digest behind it changes, so a cached layer is not the same build. A pinned
   # tag is immutable and needs no re-pull.
   pullPolicy: IfNotPresent
   pullSecrets: []
 
-# Scheduled image roll. This is what makes a Kubernetes install self-updating,
-# the same way Compose bundles Watchtower and the AWS stack ships an updater
-# Lambda. It runs `kubectl rollout restart` against this release's Deployments so
-# the moving tag above actually resolves to a new digest; the Postgres
-# StatefulSet is never restarted.
+# Scheduled image roll — what makes a Kubernetes install self-updating, the way
+# Compose bundles Watchtower and the AWS stack ships an updater Lambda. It runs
+# `kubectl rollout restart` against this release's Deployments so a moving
+# image.tag actually resolves to a new digest; the Postgres StatefulSet is never
+# restarted.
+#
+# Left ON here on purpose, and it is still backwards compatible: the roll is
+# rendered only when the effective image tag can actually MOVE. At the pinned
+# default above it is skipped entirely (a nightly restart onto an identical build
+# is pure churn), so an existing install sees no CronJob and no behaviour change.
+# Setting image.tag=policy-stable is then the only thing needed to turn the whole
+# feature on. Set this to false to keep a moving tag without a scheduled roll.
 #
 # Safe by construction: the gateway and proxy roll with maxUnavailable: 0, so a
 # build that will not start stalls the rollout rather than dropping the

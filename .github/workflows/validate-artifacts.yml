@@ -76,7 +76,8 @@ jobs:
           dpkg-deb -x "$RUNNER_TEMP/anyray-connect.deb" "$deb_root"
           (
             cd "$rpm_root"
-            rpm2cpio "$RUNNER_TEMP/anyray-connect.rpm" | cpio -idm --quiet
+            rpm2cpio "$RUNNER_TEMP/anyray-connect.rpm" \
+              | cpio -idm --quiet --no-absolute-filenames
           )
 
           check_payload() {

@@ -5,6 +5,3 @@ Description=Anyray managed enrollment
 Type=oneshot
 ExecStart=/usr/bin/anyray-connect __anyray-managed-enroll
 TimeoutStartSec=10min
-
-[Install]
-WantedBy=default.target

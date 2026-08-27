@@ -28,6 +28,7 @@ contents:
     dst: /usr/lib/systemd/user/anyray-connect-managed-enroll.service
     file_info:
       mode: 0644
-  - src: /usr/lib/systemd/user/anyray-connect-managed-enroll.service
-    dst: /etc/systemd/user/default.target.wants/anyray-connect-managed-enroll.service
-    type: symlink
+  - src: ci/anyray-connect-managed-enroll.desktop
+    dst: /etc/xdg/autostart/anyray-connect-managed-enroll.desktop
+    file_info:
+      mode: 0644

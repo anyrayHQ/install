@@ -24,3 +24,10 @@ contents:
       # Artifact transfer between CI jobs drops the exec bit; set it here so
       # the packaged binary installs executable regardless.
       mode: 0755
+  - src: ci/anyray-connect-managed-enroll.service
+    dst: /usr/lib/systemd/user/anyray-connect-managed-enroll.service
+    file_info:
+      mode: 0644
+  - src: /usr/lib/systemd/user/anyray-connect-managed-enroll.service
+    dst: /etc/systemd/user/default.target.wants/anyray-connect-managed-enroll.service
+    type: symlink

@@ -155,15 +155,23 @@ chmod +x "$bin"
 if [ "$MANAGED_INSTALL" -eq 1 ] && [ "$OS" = "linux" ]; then
   unit_dir="${HOME}/.config/systemd/user"
   unit_name="anyray-connect-managed-enroll.service"
-  mkdir -p "${unit_dir}/default.target.wants"
+  autostart_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/autostart"
+  autostart_file="${autostart_dir}/anyray-connect-managed-enroll.desktop"
+  mkdir -p "$unit_dir" "$autostart_dir"
   escaped_bin="$(printf '%s' "$bin" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g')"
   {
     printf '%s\n' '[Unit]' 'Description=Anyray managed enrollment'
     printf '%s\n' '[Service]' 'Type=oneshot' "ExecStart=\"${escaped_bin}\" __anyray-managed-enroll"
     printf '%s\n' 'TimeoutStartSec=10min'
-    printf '%s\n' '[Install]' 'WantedBy=default.target'
   } > "${unit_dir}/${unit_name}"
-  ln -sf "../${unit_name}" "${unit_dir}/default.target.wants/${unit_name}"
+  {
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=Anyray Managed Enrollment'
+    printf '%s\n' "Exec=/usr/bin/systemctl --user start --no-block ${unit_name}"
+    printf '%s\n' 'Terminal=false' 'NoDisplay=true'
+  } > "$autostart_file"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
 fi
 
 if [ "$MANAGED_INSTALL" -eq 1 ]; then

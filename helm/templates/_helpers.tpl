@@ -107,12 +107,47 @@ fallback.
 {{- end }}
 
 {{/*
+Whether an effective image tag is a MOVING channel — one whose digest changes
+under it — rather than an immutable pinned build.
+
+Single source of truth on purpose. Two places must agree about this and would
+otherwise drift: the pullPolicy helper (a moving tag has to re-pull or the digest
+is never re-resolved) and the autoUpdate guard (a nightly roll onto a pinned tag
+can only land on the same build). Splitting them once meant `latest` rendered a
+CronJob that restarted pods with pullPolicy: IfNotPresent, so the roll pulled
+nothing and the schedule was decorative.
+
+`stable` and `latest` are legacy channels kept for installs that already set them.
+Usage: include "anyray.isMovingTag" $tag
+*/}}
+{{- define "anyray.isMovingTag" -}}
+{{- if has (toString .) (list "policy-stable" "stable" "latest") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Updater image (the kubectl the autoUpdate CronJob runs). Mirrored by
+global.imageRegistry like every other image, so a private-registry install pulls
+it from the same place. The upstream image publishes no `latest` tag, so the
+default in values.yaml is an explicit version.
+*/}}
+{{- define "anyray.updaterImage" -}}
+{{- $repository := required "autoUpdate.image.repository is required" .Values.autoUpdate.image.repository -}}
+{{- $globalRegistry := (.Values.global | default dict).imageRegistry | default "" -}}
+{{- if $globalRegistry -}}
+{{- $repository = printf "%s/%s" $globalRegistry (regexReplaceAll "^[^/]+/" $repository "") -}}
+{{- end -}}
+{{- printf "%s:%s" $repository (required "autoUpdate.image.tag is required" .Values.autoUpdate.image.tag) -}}
+{{- end }}
+
+{{/*
 Per-component imagePullPolicy helper.
 */}}
 {{- define "anyray.imagePullPolicy" -}}
 {{- $image := index .context.Values.images .component | default dict -}}
 {{- $tag := include "anyray.effectiveImageTag" (dict "component" .component "context" .context) -}}
-{{- if eq $tag "policy-stable" -}}
+{{- if include "anyray.isMovingTag" $tag -}}
 Always
 {{- else -}}
 {{- default .context.Values.image.pullPolicy $image.pullPolicy -}}

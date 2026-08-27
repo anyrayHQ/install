@@ -2,6 +2,7 @@
 # Anyray zero-install developer connect (macOS / Linux).
 #
 #   curl -fsSL https://app.anyray.ai/connect.sh | sh -s -- <setup-link-or-gateway-url> [flags]
+#   curl -fsSL https://app.anyray.ai/connect.sh | sh -s -- --managed
 #
 # Downloads the standalone `anyray-connect` binary (no Node, nothing to install)
 # for your OS/arch from the public install repo's latest release, verifies its
@@ -11,6 +12,11 @@
 set -eu
 
 REPO="anyrayHQ/install"
+MANAGED_INSTALL=0
+if [ "${1:-}" = "--managed" ]; then
+  MANAGED_INSTALL=1
+  shift
+fi
 
 err() { echo "anyray-connect: $*" >&2; exit 1; }
 
@@ -90,6 +96,12 @@ case "$os" in
   Linux)  OS=linux ;;
   *) err "unsupported OS '$os' — use the npm fallback: npx anyray-connect <url>" ;;
 esac
+
+if [ "$MANAGED_INSTALL" -eq 1 ]; then
+  [ "$OS" = "linux" ] || err "--managed is supported on Linux; deploy anyray-connect.pkg on macOS"
+  [ "$(id -u)" -ne 0 ] || err "--managed must run in a signed-in user context"
+fi
+
 case "$arch" in
   arm64|aarch64) ARCH=arm64 ;;
   x86_64|amd64)  ARCH=x64 ;;
@@ -139,6 +151,25 @@ bin="${INSTALL_DIR}/anyray-connect"
 mkdir -p "$INSTALL_DIR" || err "could not create ${INSTALL_DIR}"
 mv -f "$dl" "$bin" || err "could not install anyray-connect to ${bin}"
 chmod +x "$bin"
+
+if [ "$MANAGED_INSTALL" -eq 1 ] && [ "$OS" = "linux" ]; then
+  unit_dir="${HOME}/.config/systemd/user"
+  unit_name="anyray-connect-managed-enroll.service"
+  mkdir -p "${unit_dir}/default.target.wants"
+  escaped_bin="$(printf '%s' "$bin" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g')"
+  {
+    printf '%s\n' '[Unit]' 'Description=Anyray managed enrollment'
+    printf '%s\n' '[Service]' 'Type=oneshot' "ExecStart=\"${escaped_bin}\" __anyray-managed-enroll"
+    printf '%s\n' 'TimeoutStartSec=10min'
+    printf '%s\n' '[Install]' 'WantedBy=default.target'
+  } > "${unit_dir}/${unit_name}"
+  ln -sf "../${unit_name}" "${unit_dir}/default.target.wants/${unit_name}"
+fi
+
+if [ "$MANAGED_INSTALL" -eq 1 ]; then
+  "$bin" __anyray-managed-enroll >/dev/null 2>&1 || exit $?
+  [ "$#" -eq 0 ] && exit 0
+fi
 
 # Reconnect stdin: this script arrived over a pipe (curl | sh), so the prompts
 # would otherwise see EOF. Not `< /dev/tty` — the compiled binary's readline

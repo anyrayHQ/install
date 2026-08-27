@@ -25,6 +25,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Validate Connect installers
+        run: |
+          bash -n connect.sh
+          shellcheck connect.sh
+          connect_path="$(awk '$1 == "dst:" && $2 ~ /\/anyray-connect$/ { print $2; exit }' ci/nfpm.yaml)"
+          test -n "$connect_path"
+          grep -Fqx "ExecStart=$connect_path __anyray-managed-enroll" \
+            ci/anyray-connect-managed-enroll.service
+      - name: Parse PowerShell installer
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/connect.ps1",
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -ne 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
       - name: setup.sh produces a complete .env (docker path)
         run: |
           ./setup.sh --host ci.example.com --connect adt_ci0000000000000000 \

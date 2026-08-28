@@ -21,6 +21,116 @@ permissions:
   contents: read
 
 jobs:
+  connect-installers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Validate installer sources
+        run: |
+          bash -n connect.sh
+          shellcheck connect.sh
+          connect_path="$(awk '$1 == "dst:" && $2 ~ /\/anyray-connect$/ { print $2; exit }' ci/nfpm.yaml)"
+          test -n "$connect_path"
+          grep -Fqx "ExecStart=$connect_path __anyray-managed-enroll" \
+            ci/anyray-connect-managed-enroll.service
+      - name: Parse PowerShell installer
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/connect.ps1",
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -ne 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+      - name: Install package inspection tools
+        run: |
+          source ci/nfpm-tool.env
+          sudo apt-get update
+          sudo apt-get install -y cpio rpm2cpio
+          archive="nfpm_${NFPM_TOOL_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$archive" \
+            "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_TOOL_VERSION/$archive"
+          echo "$NFPM_LINUX_X64_SHA256  $RUNNER_TEMP/$archive" \
+            | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" nfpm
+      - name: Build Linux packages
+        run: |
+          install -m 0755 /bin/true "$RUNNER_TEMP/anyray-connect"
+          NFPM_VERSION=0.0.0 NFPM_ARCH=amd64 NFPM_BIN="$RUNNER_TEMP/anyray-connect" \
+            "$RUNNER_TEMP/nfpm" package --config ci/nfpm.yaml --packager deb \
+            --target "$RUNNER_TEMP/anyray-connect.deb"
+          NFPM_VERSION=0.0.0 NFPM_ARCH=amd64 NFPM_BIN="$RUNNER_TEMP/anyray-connect" \
+            "$RUNNER_TEMP/nfpm" package --config ci/nfpm.yaml --packager rpm \
+            --target "$RUNNER_TEMP/anyray-connect.rpm"
+      - name: Inspect Linux package payloads
+        run: |
+          set -euo pipefail
+          deb_root="$RUNNER_TEMP/deb-root"
+          rpm_root="$RUNNER_TEMP/rpm-root"
+          mkdir -p "$deb_root" "$rpm_root"
+          dpkg-deb -x "$RUNNER_TEMP/anyray-connect.deb" "$deb_root"
+          rpm2cpio "$RUNNER_TEMP/anyray-connect.rpm" \
+            > "$RUNNER_TEMP/anyray-connect.cpio" || true
+          if [ ! -s "$RUNNER_TEMP/anyray-connect.cpio" ]; then
+            echo "::error::rpm2cpio produced no package payload"
+            exit 1
+          fi
+          (
+            cd "$rpm_root"
+            cpio -idm --quiet --no-absolute-filenames \
+              < "$RUNNER_TEMP/anyray-connect.cpio"
+          ) || true
+
+          check_mode() {
+            path="$1"
+            expected="$2"
+            if [ ! -e "$path" ]; then
+              echo "::error::missing package payload: $path"
+              return 1
+            fi
+            actual="$(stat -c '%a' "$path")"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::package mode $actual, expected $expected: $path"
+              return 1
+            fi
+          }
+
+          check_copy() {
+            source="$1"
+            packaged="$2"
+            if ! cmp "$source" "$packaged"; then
+              echo "::error::packaged file differs from $source: $packaged"
+              return 1
+            fi
+          }
+
+          check_payload() {
+            root="$1"
+            check_mode "$root/usr/bin/anyray-connect" 755
+            check_mode \
+              "$root/usr/lib/systemd/user/anyray-connect-managed-enroll.service" 644
+            check_mode \
+              "$root/etc/xdg/autostart/anyray-connect-managed-enroll.desktop" 644
+            check_copy ci/anyray-connect-managed-enroll.service \
+              "$root/usr/lib/systemd/user/anyray-connect-managed-enroll.service"
+            check_copy ci/anyray-connect-managed-enroll.desktop \
+              "$root/etc/xdg/autostart/anyray-connect-managed-enroll.desktop"
+            if ! grep -Fqx \
+              'Exec=/usr/bin/systemctl --user start --no-block anyray-connect-managed-enroll.service' \
+              "$root/etc/xdg/autostart/anyray-connect-managed-enroll.desktop"; then
+              echo "::error::packaged XDG trigger does not start the user service"
+              return 1
+            fi
+          }
+
+          check_payload "$deb_root"
+          check_payload "$rpm_root"
+
   compose:
     runs-on: ubuntu-latest
     steps:

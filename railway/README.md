@@ -95,10 +95,10 @@ ANYRAY_MAX_BODY_BYTES=10485760
 Railway's template JSON takes no comments, so the reasoning for the deploy-block
 values lives here.
 
-**Every service sets `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.** It is how long
-Railway lets the old container finish in-flight requests after a redeploy before
-it is killed, and the value has to outlive that container's own drain or the kill
-lands in the middle of one:
+**Every application service sets `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.** It is
+how long Railway lets the old container finish in-flight requests after a
+redeploy before it is killed, and the value has to outlive that container's own
+drain or the kill lands in the middle of one:
 
 | Service | Drain | Why |
 |---|---|---|
@@ -106,6 +106,11 @@ lands in the middle of one:
 | `optimizer` | `30` | Its own drain is 15s. Optimize calls are short and the gateway fails open on them, so this is a small budget by design. |
 | `endpoint-control` | `45` | Bounds a single request at 30s and force-exits its drain at 35s. |
 | `proxy` | `60` | nginx drains workers on SIGQUIT while still proxying console responses. |
+
+`Postgres` is deliberately not in that table: it is Railway's own managed
+template service, and its shutdown is Railway's to schedule rather than ours.
+If you move to an external managed database, that provider's failover settings
+replace this concern entirely.
 
 **`healthcheckTimeout: 1800` on the gateway** (Railway's default is 300s). The
 gateway applies its migration ledger at boot and opens no port until every

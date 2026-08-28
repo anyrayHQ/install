@@ -132,6 +132,7 @@
         "POSTGRES_PASSWORD": "${{secret()}}",
         "POSTGRES_DB": "postgres",
         "PGDATA": "/var/lib/postgresql/data/pgdata",
+        "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "120",
         "DATABASE_URL": "postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.POSTGRES_DB}}"
       }
     }

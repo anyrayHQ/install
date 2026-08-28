@@ -1952,6 +1952,13 @@ Resources:
         - Name: proxy
           Image: !Sub 'public.ecr.aws/anyray/proxy:${ImageTag}'
           Essential: true
+          # Stated rather than left implicit, so this is not the one task whose
+          # budget nobody chose. 30 (the ECS default) is deliberate here and not
+          # merely inherited: unlike Compose, the AWS proxy carries no /v1
+          # stream — the gateway has its own ALB listener on 8787 — so it serves
+          # only short console requests, and its target group deregisters in
+          # 15s. nginx drains its workers on SIGQUIT well inside that.
+          StopTimeout: 30
           PortMappings:
             - { Name: proxy, ContainerPort: 80, Protocol: tcp }
           Environment:

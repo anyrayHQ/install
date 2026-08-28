@@ -324,41 +324,58 @@ drain running past the remaining budget puts SIGKILL back in the middle of it,
 which is the very thing terminationGracePeriodSeconds was set to prevent.
 
 Seed each component's compiled-in default so the check covers the path nobody
-configures, then let an extraEnv override replace it, and check the SUM. The two
-services that drain are charged their own budget, and they differ by an order of
+configures, then let an extraEnv override replace it where the app reads one, and
+check the SUM. THREE services drain, and their budgets differ by an order of
 magnitude on purpose:
 
-  * gateway   90000ms — a streaming completion runs minutes.
-  * optimizer 15000ms — an optimize call is ~44ms p50 and the gateway's own
-                        ceiling on it is 10s (vision), so the drain only has to
-                        outlive one in-flight call.
+  * gateway          90000ms — a streaming completion runs minutes.
+                               ANYRAY_SHUTDOWN_DRAIN_MS.
+  * optimizer        15000ms — an optimize call is ~44ms p50 and the gateway's
+                               own ceiling on it is 10s (vision), so the drain
+                               only has to outlive one in-flight call.
+                               ANYRAY_SHUTDOWN_DRAIN_MS (same name, own default).
+  * endpoint-control 35000ms — HARDCODED, not env-driven: a literal force-exit
+                               timer in endpoint-control/src/index.ts. So the
+                               override loop below must not touch it, and the
+                               failure message must not name a variable this
+                               service does not read.
 
 The proxy stays at 0: it drains on nginx's own SIGQUIT, not on a budget of ours,
 so charging it a wait it never performs would fail renders for nothing.
 
-Both are CEILINGS, not delays — close() resolves as soon as the last in-flight
+All are CEILINGS, not delays — close() resolves as soon as the last in-flight
 request finishes — so a quiet pod still stops at once and the sum is only ever
 the worst case.
 
-CHANGE-BOTH-TOGETHER: these constants mirror SHUTDOWN_DRAIN_MS in the monorepo
-(gateway/src/start-server.ts and optimizer/src/index.ts). Lower one here and the
-guard stops protecting the real default; raise the app's without raising this
-and a stock install is SIGKILLed mid-drain again. */ -}}
+CHANGE-BOTH-TOGETHER: these constants mirror the monorepo
+(gateway/src/start-server.ts, optimizer/src/index.ts, and the 35_000 force-exit
+in endpoint-control/src/index.ts). Lower one here and the guard stops protecting
+the real default; raise the app's without raising this and a stock install is
+SIGKILLed mid-drain again. */ -}}
 {{- $drainMs := 0 -}}
+{{- $drainEnv := "" -}}
 {{- if eq $component "gateway" -}}
 {{- $drainMs = 90000 -}}
+{{- $drainEnv = "ANYRAY_SHUTDOWN_DRAIN_MS" -}}
 {{- else if eq $component "optimizer" -}}
 {{- $drainMs = 15000 -}}
+{{- $drainEnv = "ANYRAY_SHUTDOWN_DRAIN_MS" -}}
+{{- else if eq $component "endpoint-control" -}}
+{{- $drainMs = 35000 -}}
 {{- end -}}
+{{- /* Only for the components whose drain is actually env-tunable. */ -}}
+{{- if $drainEnv -}}
 {{- range $env := ($overrides.extraEnv | default list) -}}
-{{- if eq (toString $env.name) "ANYRAY_SHUTDOWN_DRAIN_MS" -}}
+{{- if eq (toString $env.name) $drainEnv -}}
 {{- $drainMs = int (toString $env.value) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- if and (gt $drainMs 0) (not (kindIs "invalid" $grace)) -}}
 {{- $needed := add (int $seconds) (div (add $drainMs 999) 1000) -}}
 {{- if ge $needed (int $grace) -}}
-{{- fail (printf "preStopDrainSeconds (%ds) plus ANYRAY_SHUTDOWN_DRAIN_MS (%dms) needs %ds, which leaves no headroom under terminationGracePeriodSeconds (%ds): the kubelet would SIGKILL as the drain ends, or during it, resetting in-flight streams. Raise terminationGracePeriodSeconds above %d" (int $seconds) $drainMs $needed (int $grace) $needed) -}}
+{{- $source := ternary (printf "%s (%dms)" $drainEnv $drainMs) (printf "the %s shutdown drain (%dms, compiled in)" $component $drainMs) (ne $drainEnv "") -}}
+{{- fail (printf "preStopDrainSeconds (%ds) plus %s needs %ds, which leaves no headroom under terminationGracePeriodSeconds (%ds): the kubelet would SIGKILL as the drain ends, or during it, resetting in-flight streams. Raise terminationGracePeriodSeconds above %d" (int $seconds) $source $needed (int $grace) $needed) -}}
 {{- end -}}
 {{- end -}}
 lifecycle:

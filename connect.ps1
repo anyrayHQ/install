@@ -4,6 +4,9 @@
   Recommended (passes the setup link as an argument):
     & ([scriptblock]::Create((irm https://app.anyray.ai/connect.ps1))) "<setup-link-or-gateway-url>" [flags]
 
+  Managed enrollment:
+    & ([scriptblock]::Create((irm https://app.anyray.ai/connect.ps1))) "--managed"
+
   Or with an env var (handy for `irm ... | iex`):
     $env:ANYRAY_CONNECT = "<setup-link-or-gateway-url>"
     irm https://app.anyray.ai/connect.ps1 | iex
@@ -41,6 +44,11 @@ $asset = 'anyray-connect-windows-x64.exe'  # Bun compiles a single x64 Windows t
 
 # Args: prefer real script args; fall back to $env:ANYRAY_CONNECT for the `| iex` form.
 $connectArgs = @($args)
+$managedInstall = $false
+if ($connectArgs.Count -gt 0 -and $connectArgs[0] -eq '--managed') {
+  $managedInstall = $true
+  $connectArgs = if ($connectArgs.Count -gt 1) { @($connectArgs[1..($connectArgs.Count - 1)]) } else { @() }
+}
 if ($connectArgs.Count -eq 0 -and $env:ANYRAY_CONNECT) {
   $connectArgs = $env:ANYRAY_CONNECT -split '\s+' | Where-Object { $_ -ne '' }
 }
@@ -86,6 +94,20 @@ try {
   New-Item -ItemType Directory -Path $installDir -Force | Out-Null
   $bin = Join-Path $installDir 'anyray-connect.exe'
   Move-Item -Force -Path $dl -Destination $bin
+
+  if ($managedInstall) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($identity.User.Value -in @('S-1-5-18', 'S-1-5-19', 'S-1-5-20')) {
+      throw '--managed must run in a signed-in user context'
+    }
+    $taskName = "Anyray Connect Managed Enrollment $($identity.User.Value)"
+    $action = New-ScheduledTaskAction -Execute $bin -Argument '__anyray-managed-enroll'
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
+    $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    & $bin '__anyray-managed-enroll'
+    if ($LASTEXITCODE -ne 0 -or $connectArgs.Count -eq 0) { exit $LASTEXITCODE }
+  }
 
   & $bin @connectArgs
   exit $LASTEXITCODE

@@ -164,7 +164,34 @@ jobs:
             latest|[0-9]*.[0-9]*.[0-9]*) : ;;
             *) echo "::error::invalid version input: $VERSION_INPUT"; exit 1 ;;
           esac
-          npm pack "anyray-connect@${VERSION_INPUT}"
+          # Retry the fetch: a publish on the monorepo side dispatches this
+          # workflow immediately, but npm propagates to the read CDN
+          # asynchronously, so a just-published version can still 404 here with
+          #   npm error code ETARGET
+          #   npm error notarget No matching version found for anyray-connect@X
+          # That is not a missing release, it is a race — and losing it strands
+          # npm holding a version this lane never builds assets for, leaving
+          # `releases/latest/download` (read by connect.sh, connect.ps1 and the
+          # self-updater) stale. 0.11.168 and 0.11.169 both failed this way.
+          #
+          # The publisher now waits for a read to resolve before dispatching;
+          # this is the belt to that braces, and it is the half that matters
+          # because it sits where the failure actually lands. --prefer-online so
+          # a cached 404 cannot be what we retry against.
+          for attempt in $(seq 1 20); do
+            # Clear any partial artifact first: the extract below globs, and two
+            # tarballs would make `tar xzf` fail on an argument it cannot take.
+            rm -f anyray-connect-*.tgz
+            if npm pack --prefer-online "anyray-connect@${VERSION_INPUT}"; then
+              break
+            fi
+            if [ "$attempt" = 20 ]; then
+              echo "::error::anyray-connect@${VERSION_INPUT} still unfetchable from npm after ~100s"
+              exit 1
+            fi
+            echo "npm does not serve ${VERSION_INPUT} yet — retrying ($attempt/20)"
+            sleep 5
+          done
           tar xzf anyray-connect-*.tgz
           # Resolve the concrete version even when 'latest' was requested.
           VERSION="$(node -p "require('./package/package.json').version")"

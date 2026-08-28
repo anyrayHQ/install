@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Anyray Managed Enrollment
+Exec=/usr/bin/systemctl --user start --no-block anyray-connect-managed-enroll.service
+Terminal=false
+NoDisplay=true

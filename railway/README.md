@@ -90,6 +90,43 @@ ANYRAY_MAX_CONCURRENT_REQUESTS=20
 ANYRAY_MAX_BODY_BYTES=10485760
 ```
 
+## Redeploys and availability
+
+Railway's template JSON takes no comments, so the reasoning for the deploy-block
+values lives here.
+
+**Every service sets `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.** It is how long
+Railway lets the old container finish in-flight requests after a redeploy before
+it is killed, and the value has to outlive that container's own drain or the kill
+lands in the middle of one:
+
+| Service | Drain | Why |
+|---|---|---|
+| `gateway` | `120` | The gateway finishes in-flight requests for `ANYRAY_SHUTDOWN_DRAIN_MS` (default 90s) on SIGTERM. A streaming completion routinely runs minutes; cut it and the developer's tool reports "Connection closed mid-response" against the gateway, not against the redeploy that caused it. |
+| `optimizer` | `30` | Its own drain is 15s. Optimize calls are short and the gateway fails open on them, so this is a small budget by design. |
+| `endpoint-control` | `45` | Bounds a single request at 30s and force-exits its drain at 35s. |
+| `proxy` | `60` | nginx drains workers on SIGQUIT while still proxying console responses. |
+
+**`healthcheckTimeout: 1800` on the gateway** (Railway's default is 300s). The
+gateway applies its migration ledger at boot and opens no port until every
+pending migration converges — the ledger allows a single statement 30 minutes,
+and several migrations build indexes concurrently over tables holding real rows.
+At the default, a deployment with months of spend data, or one jumping several
+releases at once, is killed mid-migration, restarts into the same migration, and
+never converges. The long timeout only ever delays a *failure verdict*; a
+genuinely misconfigured gateway exits on its own.
+
+**Redundancy is a dashboard setting, not a template one.** Railway's template
+schema has no `numReplicas`, so a one-click deploy lands one container per
+service and any redeploy or container loss is a brief outage. On a Railway plan
+that supports it, raise **Settings → Replicas** on the `gateway` and `proxy`
+services after deploying; both are stateless behind the shared Postgres. Leave
+`optimizer` at one unless you have also confirmed `ANYRAY_CONTENT_KEY` is set and
+the content mode is not `off` — the durable stash is what lets a retrieval handle
+minted on one replica resolve on another. Postgres is a single container with one
+volume and cannot be made redundant here; point the stack at an external managed
+database if it must survive that.
+
 ## Manual verification (required after template is first published)
 
 The template can only be verified by deploying it. After composing it in the

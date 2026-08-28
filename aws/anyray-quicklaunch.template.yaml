@@ -1543,6 +1543,34 @@ Resources:
       Scheme: !Ref LoadBalancerScheme
       Subnets: [!GetAtt Net.SubnetA, !GetAtt Net.SubnetB]
       SecurityGroups: [!Ref AlbSg]
+      LoadBalancerAttributes:
+        # How long the ALB holds a connection with NO bytes moving on it before
+        # closing. AWS defaults this to 60s, which is wrong for this workload in
+        # two separate ways, and left unset it silently undid both of the
+        # gateway's own timeout fixes on every AWS install:
+        #
+        #  * IN-FLIGHT. A completion is silent between the request and its first
+        #    token. On a large prompt with extended thinking that gap runs well
+        #    past a minute, so the ALB closed the connection while the gateway
+        #    was still waiting on the provider — a bare transport close the
+        #    developer's tool reports as a failed request.
+        #  * IDLE POOLED SOCKETS. Coding tools keep connections to the gateway
+        #    pooled across turns, and a real session's think-gap between turns
+        #    routinely exceeds a minute. The gateway holds those sockets for 10
+        #    minutes for exactly this reason (DEFAULT_KEEPALIVE_TIMEOUT_MS,
+        #    gateway/src/utils/serverTimeouts.ts) — but on AWS the ALB is the
+        #    peer the client actually pools against, so its 60s was the binding
+        #    limit and the reused socket RST'd (client ECONNRESET) regardless.
+        #
+        # It must stay BELOW the gateway's keep-alive (600s) rather than above
+        # it: whichever side closes an idle socket first should be the ALB, or
+        # it forwards a request onto a socket the target has just closed and
+        # answers 502. 300s clears both cases above with a wide margin and keeps
+        # that ordering intact.
+        #
+        # CHANGE-BOTH-TOGETHER: lower DEFAULT_KEEPALIVE_TIMEOUT_MS in the
+        # monorepo below this value and the 502 race comes back.
+        - { Key: idle_timeout.timeout_seconds, Value: '300' }
 
   GatewayTg:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -1553,6 +1581,28 @@ Resources:
       Protocol: HTTP
       HealthCheckPath: /
       Matcher: { HttpCode: 200-399 }
+      # Left unset, AWS applies 30s / 5 healthy / 2 unhealthy, and BOTH halves of
+      # that hurt here. Detection: a task that dies or wedges keeps receiving
+      # traffic for 2 x 30s = a full minute, which is most of the outage a second
+      # task exists to prevent. Rotation: a replacement needs 5 x 30s = 150s of
+      # passing checks before it may serve, so every rolling deploy holds the old
+      # tasks 2.5 minutes longer than it needs to and the surge capacity is paid
+      # for twice.
+      #
+      # `/` is the gateway's readiness route (503 while draining or awaiting the
+      # entitlement lease) and costs nothing to serve, so it takes a tight
+      # interval. UnhealthyThresholdCount stays at 3 rather than 2: at a 10s
+      # interval two consecutive misses is 20s, close enough to a GC pause or a
+      # slow moment to pull a healthy task, and pulling a good target is itself
+      # the outage. Three misses = 30s, still half the AWS default.
+      #
+      # This cannot restart anything — ECS container replacement is driven by the
+      # task definition's own HealthCheck, not by this. The worst case is a
+      # briefly slow gateway leaving rotation and rejoining 20s later.
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
       TargetGroupAttributes:
         # How long the ALB lets in-flight requests finish on a target it is
         # deregistering (every deploy). /v1 streams run for minutes, so the
@@ -1572,7 +1622,18 @@ Resources:
       Protocol: HTTP
       HealthCheckPath: /anyray-login
       Matcher: { HttpCode: 200-399 }
+      # Same reasoning as the gateway target group above: the AWS defaults leave
+      # a dead console task in rotation for a minute and hold a replacement out
+      # for 150s. /anyray-login is served by nginx itself with no gateway
+      # round-trip, so it reports the proxy's own health and is cheap to poll.
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
       TargetGroupAttributes:
+        # Console requests are short and, unlike Compose, this proxy carries no
+        # /v1 stream on AWS (the gateway has its own listener on 8787), so 15s is
+        # the right deregistration delay here rather than the gateway's 120s.
         - { Key: deregistration_delay.timeout_seconds, Value: '15' }
 
   EndpointControlTg:
@@ -1588,8 +1649,20 @@ Resources:
       # check on the task definition — the service's documented probe split.)
       HealthCheckPath: /readyz
       Matcher: { HttpCode: 200-399 }
+      # Same reasoning as the gateway target group above.
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
       TargetGroupAttributes:
-        - { Key: deregistration_delay.timeout_seconds, Value: '15' }
+        # 35s, not 15s: the service bounds a single request at 30s
+        # (server.requestTimeout, endpoint-control/src/index.ts) and its own
+        # shutdown drain force-exits at 35s. At 15s the ALB was the first to give
+        # up, closing an agent-plane call the container was still serving — the
+        # same class of bug the gateway's 120s fixed, one order of magnitude
+        # down. Matched to the drain so the container, not the load balancer,
+        # decides when a request has run out of time.
+        - { Key: deregistration_delay.timeout_seconds, Value: '35' }
 
   GatewayListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -1666,6 +1739,17 @@ Resources:
         - Name: optimizer
           Image: !Sub 'public.ecr.aws/anyray/optimizer:${ImageTag}'
           Essential: true
+          # Seconds ECS waits after SIGTERM before SIGKILL. The optimizer drains
+          # in-flight optimize calls for ANYRAY_SHUTDOWN_DRAIN_MS (default
+          # 15000) — far less than the gateway's 90s, because an optimize call
+          # is bounded by the gateway's own ceiling on it (800ms, 10s for
+          # vision) and not by how long a model takes to answer. Stated rather
+          # than left to the ECS default of 30s, which happens to be enough
+          # today and would silently stop being enough the moment anyone raised
+          # that drain. Nothing here is user-visible even when it is cut — the
+          # gateway fails open on an unreachable optimizer — but each cut call
+          # busts that session's prompt cache, which is money.
+          StopTimeout: 30
           PortMappings:
             - { Name: optimizer, ContainerPort: 8088, Protocol: tcp }
           MountPoints:
@@ -1811,6 +1895,13 @@ Resources:
         - Name: endpoint-control
           Image: !Sub 'public.ecr.aws/anyray/endpoint-control:${ImageTag}'
           Essential: true
+          # The service drains on SIGTERM and force-exits that drain at 35s
+          # (endpoint-control/src/index.ts), which is LONGER than the ECS
+          # default of 30s — so the default had the platform SIGKILL the
+          # container five seconds before its own shutdown path would have
+          # finished, cutting agent-plane calls and skipping the store close.
+          # 45 leaves the container, not the platform, deciding when it is done.
+          StopTimeout: 45
           PortMappings:
             - { Name: endpoint-control, ContainerPort: 8090, Protocol: tcp }
           Environment:

@@ -157,6 +157,15 @@ services:
     image: "${ANYRAY_OPTIMIZER_IMAGE:-public.ecr.aws/anyray/optimizer:${ANYRAY_IMAGE_TAG:-policy-stable}}"
     pull_policy: always
     restart: always
+    # Must exceed the optimizer's own drain (ANYRAY_SHUTDOWN_DRAIN_MS, default
+    # 15000): on SIGTERM it stops accepting connections and lets in-flight
+    # optimize calls finish. Far smaller than the gateway's 120s because an
+    # optimize call is bounded by the gateway's own ceiling on it (800ms, or
+    # 10s for vision) rather than by how long a model takes to answer. Docker's
+    # 10s default sat just under that vision ceiling, so an update could cut a
+    # call mid-flight; the gateway fails open on that, which costs the prompt
+    # cache rather than the request. A ceiling, not a delay.
+    stop_grace_period: 30s
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     # The optimizer's durable stash + /v1/record ride the same bundled Postgres
@@ -170,9 +179,11 @@ services:
       PORT: 8088
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
       ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
-      # Runtime-mutable strategy config + audit log under ANYRAY_DATA_DIR; the
-      # runtime config starts empty and is seeded from the image-baked
-      # optimizer.config.json until the first admin edit writes here.
+      # Runtime-mutable strategy config under ANYRAY_DATA_DIR; it starts empty
+      # and is seeded from the image-baked optimizer.config.json until the first
+      # admin edit writes here. The settings audit trail is NOT here any more —
+      # it goes to anyray_audit_log in the shared Postgres, with a file here only
+      # as the off-Postgres fallback.
       ANYRAY_DATA_DIR: /data
       # Durable CCR stash tier (same bundled Postgres as the gateway): stashed
       # originals are persisted as AES-256-GCM ciphertext, so retrieval handles
@@ -234,6 +245,11 @@ services:
     image: "${ANYRAY_ENDPOINT_CONTROL_IMAGE:-public.ecr.aws/anyray/endpoint-control:${ANYRAY_IMAGE_TAG:-policy-stable}}"
     pull_policy: always
     restart: always
+    # Must exceed the service's own drain, which force-exits at 35s and bounds a
+    # single request at 30s (endpoint-control/src/index.ts). Docker's 10s default
+    # SIGKILLed it mid-drain on every update, cutting agent-plane calls the
+    # container was still happily serving.
+    stop_grace_period: 45s
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     # Its endpoint_* tables ride the same bundled Postgres as the gateway's
@@ -329,6 +345,13 @@ services:
     image: "${ANYRAY_CADDY_IMAGE:-caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648}"
     profiles: ["public"]
     restart: always
+    # Caddy is the PUBLIC entry for every /v1 stream in this profile, so its stop
+    # budget is the one that actually bounds a client's request — the gateway
+    # behind it can drain for 90s and it buys nothing if the edge in front was
+    # SIGKILLed at Docker's 10s default first. Caddy stops gracefully on SIGTERM
+    # (it stops accepting and lets active handlers finish), so give that the same
+    # order of budget as the gateway and proxy it fronts. A ceiling, not a delay.
+    stop_grace_period: 120s
     # Caddy is the ONLY public entry in this profile, so it starting before the
     # gateway can answer is a public-facing 502 plus a wasted ACME attempt. The
     # bare list form waits only for the container to be created, not for it to be
@@ -377,6 +400,14 @@ services:
     #   docker buildx imagetools inspect docker.io/postgres:17
     image: "${ANYRAY_POSTGRES_IMAGE:-docker.io/postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317}"
     restart: always
+    # The postgres image declares STOPSIGNAL SIGINT, which is a FAST shutdown:
+    # disconnect clients, then write a final checkpoint. On a store with months
+    # of trace content that checkpoint can outrun Docker's 10s default, and the
+    # SIGKILL that follows turns the next start into crash recovery — the whole
+    # stack sits unavailable while it replays, because the gateway's client-key
+    # verify fails closed while the database is unreachable. The grace period
+    # costs nothing when there is nothing to flush.
+    stop_grace_period: 120s
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 3s

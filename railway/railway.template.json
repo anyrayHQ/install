@@ -17,6 +17,7 @@
       },
       "deploy": {
         "healthcheckPath": "/",
+        "healthcheckTimeout": 1800,
         "restartPolicyType": "ON_FAILURE"
       },
       "volumes": [
@@ -74,7 +75,8 @@
         "ANYRAY_CONTENT_KEY": "${{gateway.ANYRAY_CONTENT_KEY}}",
         "ANYRAY_CONTENT_MODE": "${{gateway.ANYRAY_CONTENT_MODE}}",
         "ANYRAY_ALLOW_PLAINTEXT": "${{gateway.ANYRAY_ALLOW_PLAINTEXT}}",
-        "ANYRAY_SPEND_RETENTION_DAYS": "${{gateway.ANYRAY_SPEND_RETENTION_DAYS}}"
+        "ANYRAY_SPEND_RETENTION_DAYS": "${{gateway.ANYRAY_SPEND_RETENTION_DAYS}}",
+        "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "30"
       }
     },
     {
@@ -89,7 +91,8 @@
       "variables": {
         "ANYRAY_CP_DATABASE_URL": "${{Postgres.DATABASE_URL}}",
         "ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN": "${{gateway.ANYRAY_ADMIN_TOKEN}}",
-        "ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}"
+        "ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
+        "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "45"
       }
     },
     {
@@ -107,7 +110,8 @@
         "ANYRAY_UPDATER_ENABLED": "false",
         "ANYRAY_UPDATER_PERIODIC_POLLS": "false",
         "ANYRAY_UPDATER_POLL_INTERVAL": "0",
-        "ANYRAY_UPDATER_TOKEN": "${{secret()}}"
+        "ANYRAY_UPDATER_TOKEN": "${{secret()}}",
+        "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "60"
       }
     },
     {
@@ -128,6 +132,7 @@
         "POSTGRES_PASSWORD": "${{secret()}}",
         "POSTGRES_DB": "postgres",
         "PGDATA": "/var/lib/postgresql/data/pgdata",
+        "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "120",
         "DATABASE_URL": "postgresql://${{Postgres.POSTGRES_USER}}:${{Postgres.POSTGRES_PASSWORD}}@${{Postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/${{Postgres.POSTGRES_DB}}"
       }
     }

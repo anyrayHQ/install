@@ -166,10 +166,14 @@ priorityClassName: ""
 #   pod starts until the old one is fully gone; set 0 to trade in-flight requests
 #   back for a shorter window.
 # terminationGracePeriodSeconds — total budget from "terminating" to SIGKILL,
-#   which has to cover preStopDrainSeconds PLUS the application's own drain. On
-#   SIGTERM the gateway stops accepting connections and lets in-flight requests
-#   (notably long streaming completions) finish for up to
-#   ANYRAY_SHUTDOWN_DRAIN_MS, default 90000; if this budget runs out first the
+#   which has to cover preStopDrainSeconds PLUS the application's own drain.
+#   THREE services drain, each on its own budget, and the chart charges each one
+#   its own: the gateway for ANYRAY_SHUTDOWN_DRAIN_MS (default 90000), the
+#   optimizer for the same variable with its own 15000 default (an optimize call
+#   is bounded by the gateway's ceiling on it, not by how long a model takes),
+#   and endpoint-control for a hardcoded 35000 force-exit. On SIGTERM each stops
+#   accepting connections and lets in-flight requests
+#   (notably long streaming completions) finish; if this budget runs out first the
 #   kubelet SIGKILLs mid-drain and resets every open stream — which a coding
 #   assistant reports as "Connection closed mid-response", blamed on the gateway
 #   rather than on the rollout that cut it. It is a ceiling and not a delay — a
@@ -418,7 +422,11 @@ optimizer:
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
-  # Persist /data (optimizer config + audit log) across pod restarts.
+  # Persist /data across pod restarts. What is actually left there is the
+  # runtime config's off-Postgres fallback: both the config (migration 0058) and
+  # the settings audit trail now live in the shared database, which is what makes
+  # `enabled: false` + replicas > 1 a supported posture rather than a lossy one.
+  # See the Kubernetes install guide for the two-step to get there.
   persistence:
     enabled: true
     size: 1Gi

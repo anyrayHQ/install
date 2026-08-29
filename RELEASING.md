@@ -419,3 +419,24 @@ Apple signing secrets (all required): `APPLE_SIGNING_CERT_P12` +
 package, and `APPLE_NOTARY_KEY` (base64 `.p8`) + `APPLE_NOTARY_KEY_ID` +
 `APPLE_NOTARY_ISSUER_ID` for notarization. (`APPLE_SIGNING_CERT_PEM` was set for
 the abandoned rcodesign path and is unused.)
+
+## Trusted-channel packages (winget · Homebrew)
+
+Alongside the raw binaries and the MDM `.pkg`/`.deb`/`.rpm`, each production
+release renders package-manager manifests that install the **already signed**
+asset through a channel endpoint security allowlists — so a Windows user runs
+`winget install Anyray.Connect` and a macOS user `brew install --cask
+anyray-connect` instead of piping `connect.ps1`/`connect.sh` into an
+interpreter. The `Regenerate the trusted-channel package manifests` step pins
+each manifest to the exact SHA-256 in `SHA256SUMS`, so a manifest can never
+point at bytes a release does not contain.
+
+Rendering is automatic; **delivery is a manual external step** each carries its
+own README for, because neither channel is self-hosted:
+- **winget** (`winget/README.md`): the manifests under
+  `winget/manifests/a/Anyray/Connect/<version>/` are submitted as a PR to
+  `microsoft/winget-pkgs`; the first submission's `Publisher` (`Othentic Labs
+  LTD`) must match the `.exe`'s Authenticode identity.
+- **Homebrew** (`Casks/README.md`): `Casks/anyray-connect.rb` is pushed to the
+  tap repo `anyrayHQ/homebrew-tap` (a one-time org-admin creation), or landed
+  with `brew bump-cask-pr`.

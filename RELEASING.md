@@ -437,6 +437,11 @@ own README for, because neither channel is self-hosted:
   `winget/manifests/a/Anyray/Connect/<version>/` are submitted as a PR to
   `microsoft/winget-pkgs`; the first submission's `Publisher` (`Othentic Labs
   LTD`) must match the `.exe`'s Authenticode identity.
-- **Homebrew** (`Casks/README.md`): `Casks/anyray-connect.rb` is pushed to the
-  tap repo `anyrayHQ/homebrew-tap` (a one-time org-admin creation), or landed
-  with `brew bump-cask-pr`.
+- **Homebrew** (`Casks/README.md`): the tap repo `anyrayHQ/homebrew-tap`
+  already exists. When the `HOMEBREW_TAP_TOKEN` secret is set — a fine-grained
+  PAT (or GitHub App token) with `contents: write` on that tap repo ONLY — the
+  `Publish the Homebrew cask to the tap` step pushes the rendered cask there
+  automatically on every release that becomes `latest` (an older re-cut never
+  rolls the tap back). Until the token is set the step skips silently, and the
+  cask can be updated by hand: run `scripts/gen-homebrew-cask.sh` and push
+  `Casks/anyray-connect.rb`, or `brew bump-cask-pr`.

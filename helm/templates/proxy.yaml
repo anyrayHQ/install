@@ -79,6 +79,24 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 10
+          {{- /* The proxy was the last workload here with readiness and nothing
+                 else, which is the gap that cost a customer a fleet-dark window
+                 on the gateway (see anyray.livenessProbe): readiness removes a
+                 wedged pod from the Service and then NOTHING restarts it, so the
+                 deployment quietly runs at reduced capacity — and at replicas: 1
+                 that is a permanent outage of the console and every /admin route.
+                 nginx is exactly the process this happens to: it does not exit
+                 when its workers wedge, it sits there serving 502s.
+
+                 `/anyray-login` rather than /livez, hence `unguarded`: the proxy
+                 image serves no /livez, and this route is nginx's own (no gateway
+                 round-trip), present in every released image. Reusing the
+                 readiness route is safe HERE and would not be on the gateway —
+                 the distinction is that this one is a static nginx response that
+                 never flips to 503 while draining, so a liveness probe cannot cut
+                 a drain short. */}}
+          {{- include "anyray.startupProbe" (dict "component" "proxy" "port" 80 "path" "/anyray-login" "unguarded" true "context" .) | nindent 10 }}
+          {{- include "anyray.livenessProbe" (dict "component" "proxy" "port" 80 "path" "/anyray-login" "unguarded" true "context" .) | nindent 10 }}
           # nginx proxies the streaming response bodies, so it needs the same
           # endpoint-drain pause as the gateway behind it. The image re-declares
           # STOPSIGNAL SIGQUIT (its `FROM scratch` final stage inherits no config

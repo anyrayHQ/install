@@ -61,6 +61,13 @@ export default defineRailway(() => {
       ANYRAY_ENDPOINT_CONTROL_URL: "http://endpoint-control.railway.internal:8090",
       ANYRAY_HSTS: "true",
       ANYRAY_TRUST_PROXY: "true",
+      // How long Railway lets the outgoing container finish in-flight requests
+      // on a redeploy. Must outlive the gateway's own SIGTERM drain
+      // (ANYRAY_SHUTDOWN_DRAIN_MS, default 90s) or the kill lands mid-stream and
+      // the developer's tool reports "Connection closed mid-response" against
+      // the gateway rather than against the redeploy that caused it. Mirrors
+      // railway/railway.template.json — keep the two in step.
+      RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "120",
     },
   });
 
@@ -77,6 +84,9 @@ export default defineRailway(() => {
       ANYRAY_ALLOW_PLAINTEXT: "false",
       ANYRAY_SPEND_DB_URL: db.env.DATABASE_URL,
       ANYRAY_DATA_DIR: "/data",
+      // Its own drain is 15s — an optimize call is bounded by the gateway's
+      // ceiling on it, not by how long a model takes to answer.
+      RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "30",
     },
   });
 
@@ -94,6 +104,8 @@ export default defineRailway(() => {
       ANYRAY_CP_DATABASE_URL: db.env.DATABASE_URL,
       ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN: gateway.env.ANYRAY_ADMIN_TOKEN,
       ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL: preserve(), // bootstrap sets after domain generation
+      // Bounds a single request at 30s and force-exits its drain at 35s.
+      RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "45",
     },
   });
 
@@ -107,6 +119,9 @@ export default defineRailway(() => {
       ANYRAY_UPDATER_PERIODIC_POLLS: "false",
       ANYRAY_UPDATER_POLL_INTERVAL: "0",
       ANYRAY_UPDATER_TOKEN: preserve(),
+      // nginx drains its workers on SIGQUIT while still proxying console
+      // responses; Railway's default would cut that short.
+      RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "60",
     },
   });
 

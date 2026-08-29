@@ -1301,6 +1301,26 @@ jobs:
           ( cd assets && sha256sum -- * > SHA256SUMS )
           cat assets/SHA256SUMS
 
+      - name: Regenerate the trusted-channel package manifests
+        # winget (Windows) and the Homebrew cask (macOS) both pin the exact
+        # SHA-256 of the signed asset they install, so they are regenerated from
+        # the SAME SHA256SUMS just produced above — never from a self-fetch of a
+        # release that is not published yet. This only RENDERS the manifests
+        # into the tree; getting them to users is an external step (a
+        # microsoft/winget-pkgs PR; a push to anyrayHQ/homebrew-tap) documented
+        # in winget/README.md and Casks/README.md. Staging never touches these:
+        # a staging build is not `latest`, and these manifests describe the
+        # channel real users install from. Both generators fail loudly if the
+        # asset's checksum line is missing, so a partial asset set can never
+        # ship a manifest pointing at bytes that are not there.
+        if: ${{ !inputs.dry_run && !inputs.staging }}
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/gen-winget-manifests.sh --version "$VERSION" --sha256sums assets/SHA256SUMS
+          scripts/gen-homebrew-cask.sh --version "$VERSION" --sha256sums assets/SHA256SUMS
+
       - name: GPG-sign SHA256SUMS
         # Closes the loop the checksums alone leave open. connect.sh /
         # connect.ps1 verify a downloaded binary against SHA256SUMS, but an

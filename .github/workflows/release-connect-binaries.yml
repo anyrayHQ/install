@@ -1595,6 +1595,51 @@ jobs:
             fi
           fi
 
+      - name: Publish the Homebrew cask to the tap
+        # `brew install --cask anyray-connect` must bootstrap a real, current
+        # signed .pkg, so the rendered cask (from the step above) is pushed to
+        # the anyrayHQ/homebrew-tap repo whenever a release becomes `latest`.
+        # anyray-connect self-updates after install, but the FIRST install still
+        # has to land a good build.
+        #
+        # Gated on `latest`, re-derived from the API the way the Publish step
+        # does: an older re-cut publishes with --latest=false and must NEVER
+        # roll the tap backward to an older version.
+        #
+        # Secret-gated exactly like every signing step: an absent
+        # HOMEBREW_TAP_TOKEN skips this silently, so a release cut before the
+        # token is provisioned behaves as it does today. The token is a
+        # fine-grained PAT (or GitHub App token) with `contents: write` on
+        # anyrayHQ/homebrew-tap ONLY — it never needs access to this repo.
+        # Pushed with the token in an Authorization header, not the remote URL,
+        # so it stays out of `ps` and the remote config; Actions also masks it.
+        if: ${{ !inputs.dry_run && !inputs.staging && env.HOMEBREW_TAP_TOKEN != '' }}
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          latest_tag="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+          if [ "$latest_tag" != "connect-v${VERSION}" ]; then
+            echo "Release ${VERSION} is not latest (${latest_tag}); leaving the tap unchanged."
+            exit 0
+          fi
+          tapdir="$RUNNER_TEMP/homebrew-tap"
+          # Public repo: clone needs no auth. Only the push carries the token,
+          # via http.extraheader, so it never lands in the remote URL.
+          git clone --depth 1 https://github.com/anyrayHQ/homebrew-tap.git "$tapdir"
+          mkdir -p "$tapdir/Casks"
+          cp Casks/anyray-connect.rb "$tapdir/Casks/anyray-connect.rb"
+          if git -C "$tapdir" diff --quiet -- Casks/anyray-connect.rb; then
+            echo "Tap cask already at ${VERSION}; nothing to push."
+            exit 0
+          fi
+          git -C "$tapdir"             -c user.name="anyray-release-bot"             -c user.email="release@anyray.ai"             commit -aqm "anyray-connect ${VERSION}"
+          git -C "$tapdir"             -c http.extraheader="AUTHORIZATION: bearer ${HOMEBREW_TAP_TOKEN}"             push -q origin HEAD:main
+          echo "Pushed anyray-connect ${VERSION} to anyrayHQ/homebrew-tap."
+
       # dry_run: prove the whole build->sign->notarize->fleet path without a
       # customer-facing release. The signed, checksummed asset set is inspectable.
       - name: Upload assembled assets (dry run — not published)

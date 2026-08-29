@@ -7,7 +7,7 @@ version: 0.6.6
 # tag (see values.yaml image.tag), so a given chart version always deploys the
 # same, auditable build. Bumped in lockstep with each release by the monorepo
 # prod promotion; override image.tag to test a different/moving tag.
-appVersion: "v1.10.313"
+appVersion: "v1.10.314"
 keywords:
   - anyray
   - ai-gateway

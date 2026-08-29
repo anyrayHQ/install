@@ -1,0 +1,13 @@
+# @@TEMPLATE-ONLY@@ TEMPLATE — do not submit this file. This block is stripped by
+# @@TEMPLATE-ONLY@@ scripts/gen-winget-manifests.sh, which substitutes __VERSION__
+# @@TEMPLATE-ONLY@@ and writes the result under
+# @@TEMPLATE-ONLY@@ winget/manifests/a/Anyray/Connect/<version>/.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+#
+# The version manifest ties the installer and locale manifests together; all
+# three must agree on PackageIdentifier and PackageVersion.
+PackageIdentifier: Anyray.Connect
+PackageVersion: __VERSION__
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

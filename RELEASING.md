@@ -90,8 +90,13 @@ package with `productsign`. The workflow then submits the final `.pkg` to
 Apple, staples the ticket, and checks it with both `pkgutil --check-signature`
 and `spctl -t install`.
 
-The package carries no enrollment token. It installs a
-LaunchAgent that handles either MDM ordering safely:
+The package carries no enrollment token. Besides the binary it installs the
+two Claude Desktop / Codex fleet helpers, `/usr/local/bin/anyray-credential-helper`
+and `/usr/local/bin/anyray-bootstrap-headers-helper` (the same wrappers
+`anyray-connect desktop helper --write` produces, owner-marked so a later
+`--write` still replaces them), so a console-generated Claude Desktop
+`.mobileconfig` works on a Mac that only ever received the package. It also
+installs a LaunchAgent that handles either MDM ordering safely:
 
 - **Profile before package:** `postinstall` bootstraps and kickstarts the agent
   for the current desktop user; `RunAtLoad` performs enrollment immediately.

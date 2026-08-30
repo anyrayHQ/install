@@ -391,6 +391,7 @@ blocks GitHub-hosted runners). One persistent Linux runner project plus an
 | Job | Runner | CodeBuild project (eu-central-1) |
 | --- | --- | --- |
 | build, provision-mac, sign-windows, package-linux, release, teardown-mac | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`) | `anyray-install-runner` |
+| mac-fleet-reap (daily) | `ubuntu-latest` (GitHub-hosted; aws-cli only, no repo build) | — |
 | sign-macos | **on-demand** macOS (MAC_ARM, `mac2-m2.metal`) | `anyray-install-runner-mac` (ephemeral) |
 
 **`sign-windows` no longer needs Windows.** jsign is a pure-Java Authenticode
@@ -408,10 +409,21 @@ by E2E: the signature verifies but the binary won't launch). Apple's codesign ne
 CodeBuild only offers macOS via a reserved-capacity EC2 Mac fleet that cannot scale below one
 instance (24-hour-minimum dedicated-host billing, ~$450/mo if left standing). So the release
 allocates a Mac **only for the signing run**: `provision-mac` creates the MAC_ARM fleet + an
-ephemeral runner project, `sign-macos` runs on it, and `teardown-mac` (always) deletes both.
-Net cost is one 24-hour-minimum Mac charge per release (~$15-16), never a standing bill. The
-lifecycle lives in `scripts/mac-fleet.sh` (`up`/`down`); the release workflow drives it via a
-scoped GitHub-OIDC role (`AWS_MAC_FLEET_ROLE_ARN` repo variable → `anyray-install-mac-fleet-ci`).
+ephemeral runner project, `sign-macos` runs on it, and `teardown-mac` (always) deletes the
+runner project.
+
+**The billing unit is the DAY, so the fleet outlives the release on purpose.** A dedicated host
+bills a 24-hour minimum that deleting does not refund, so `teardown-mac` keeps the fleet and
+every release within that window reuses the same already-paid Mac; deleting per release only
+re-bought the minimum (~$720/mo for 2.7h of use — install#351). CodeBuild does **not** reclaim
+an ACTIVE fleet afterwards, though, so a daily **`mac-fleet-reap.yml`** deletes it once the
+window has closed and no runner project exists. Without that the fleet simply billed forever:
+2026-08-18..29 was twelve consecutive days at $34.56/day, four of them with no signing run.
+Net cost is one 24-hour minimum per **active day**, and nothing on an idle one.
+
+The lifecycle lives in `scripts/mac-fleet.sh` (`up`/`down`/`reap`); both the release workflow
+and the reaper drive it via a scoped GitHub-OIDC role (`AWS_MAC_FLEET_ROLE_ARN` repo variable →
+`anyray-install-mac-fleet-ci`).
 
 Both persistent projects and the ephemeral mac project are webhook-driven
 (`WORKFLOW_JOB_QUEUED`) and **gated to the maintainer actor** (`ACTOR_ACCOUNT_ID` = 16443050) —

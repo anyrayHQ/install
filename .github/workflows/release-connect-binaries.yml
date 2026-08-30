@@ -324,6 +324,35 @@ jobs:
             -output "$root/usr/local/bin/anyray-connect"
           chmod 0755 "$root/usr/local/bin/anyray-connect"
 
+          # Claude Desktop / Codex fleet policies name these two fixed helper
+          # paths; shipping them here makes "pkg + profile" a complete MDM
+          # deploy with no per-machine `desktop helper --write` step. Only the
+          # arm64 slice can execute on this runner; `--print` is pure
+          # (no filesystem), so the wrapper bytes are identical from any slice.
+          # Throwaway ad-hoc-signed copy: artifact transfer strips the mode bit
+          # and the slice is not yet Developer-ID signed. Published bytes untouched.
+          printer="$RUNNER_TEMP/anyray-connect-printer"
+          cp out/anyray-connect-darwin-arm64 "$printer"
+          chmod +x "$printer"
+          codesign --force --sign - "$printer"
+          for wrapper in credential bootstrap-headers; do
+            case "$wrapper" in
+              credential) helper="$root/usr/local/bin/anyray-credential-helper" ;;
+              bootstrap-headers) helper="$root/usr/local/bin/anyray-bootstrap-headers-helper" ;;
+            esac
+            if ! "$printer" desktop helper --print \
+              --platform posix --wrapper "$wrapper" \
+              --bin /usr/local/bin/anyray-connect > "$helper"; then
+              echo "::error::anyray-connect ${VERSION} cannot emit the ${wrapper} helper; the package needs 0.11.43 or newer (desktop helper --print --wrapper)"
+              exit 1
+            fi
+            chmod 0755 "$helper"
+            /bin/sh -n "$helper"
+            head -1 "$helper" | grep -qx '#!/bin/sh'
+            grep -q 'Managed by anyray-connect desktop helper' "$helper"
+            grep -q '/usr/local/bin/anyray-connect' "$helper"
+          done
+
           cat > "$root/usr/local/lib/anyray-connect/managed-enroll-runner" <<'RUNNER'
           #!/bin/sh
           set -eu
@@ -671,6 +700,10 @@ jobs:
           printf '%s\n' "$payload_files" | grep -Eq '^\.?/?usr/local/bin/anyray-connect$'
           printf '%s\n' "$payload_files" \
             | grep -Eq '^\.?/?usr/local/lib/anyray-connect/managed-enroll-runner$'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/bin/anyray-credential-helper$'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/bin/anyray-bootstrap-headers-helper$'
           printf '%s\n' "$payload_files" \
             | grep -Eq '^\.?/?Library/LaunchAgents/ai\.anyray\.connect\.managed-enroll\.plist$'
 

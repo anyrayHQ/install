@@ -192,6 +192,45 @@ jobs:
             fi
           fi
 
+      - name: The autoUpdate kubectl image is a real upstream tag
+        run: |
+          set -euo pipefail
+          # THE REGRESSION THIS EXISTS FOR. autoUpdate.image.tag is a KUBERNETES
+          # version that happens to look like an Anyray release, and it sits on
+          # the first `tag:` line in values.yaml. The monorepo's per-release
+          # install bump used to derive "the tag install currently pins" from
+          # that line and rewrote it, so charts 0.6.2-0.6.11 shipped
+          # `registry.k8s.io/kubectl:v1.10.3xx` — a tag that has never existed.
+          # Nothing caught it: check-chart-images.sh only audits the ECR Public
+          # images (gateway/optimizer/proxy), helm lint does not resolve images,
+          # and the CronJob is inert on the pinned default render, so the break
+          # was invisible until an install on the policy-stable channel tried its
+          # first nightly roll and got ImagePullBackOff. Resolve it for real.
+          repo="$(sed -nE 's#^[[:space:]]*repository:[[:space:]]*(registry\.k8s\.io/kubectl).*#\1#p' helm/values.yaml | head -1)"
+          tag="$(sed -nE '/registry\.k8s\.io\/kubectl/,+2 s/^[[:space:]]*tag:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' helm/values.yaml | head -1)"
+          if [ -z "$repo" ] || [ -z "$tag" ]; then
+            echo "::error file=helm/values.yaml::could not read autoUpdate.image {repository,tag} — the guard cannot judge a pin it cannot find"
+            exit 1
+          fi
+          echo "autoUpdate image: ${repo}:${tag}"
+          # An Anyray release tag here is always the bug above, and says so
+          # plainly rather than as a generic 404.
+          app="$(sed -nE 's/^appVersion:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' helm/Chart.yaml | head -1)"
+          if [ "$tag" = "$app" ]; then
+            echo "::error file=helm/values.yaml::autoUpdate.image.tag is the Anyray appVersion (${app}). It is a kubectl version — something rewrote it. See the comment above the pin."
+            exit 1
+          fi
+          # registry.k8s.io answers the manifest API unauthenticated (it 307s to
+          # a regional Artifact Registry mirror, hence -L). 200 = the tag exists.
+          code="$(curl -sL -o /dev/null -w '%{http_code}' \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://registry.k8s.io/v2/kubectl/manifests/${tag}")"
+          if [ "$code" != "200" ]; then
+            echo "::error file=helm/values.yaml::${repo}:${tag} does not resolve (HTTP ${code}) — the nightly autoUpdate roll would ImagePullBackOff on every policy-stable install"
+            exit 1
+          fi
+          echo "ok: ${repo}:${tag} resolves"
+
       - name: policy-stable is the only supported moving channel
         run: |
           set -euo pipefail

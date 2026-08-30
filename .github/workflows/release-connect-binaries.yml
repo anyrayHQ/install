@@ -302,6 +302,8 @@ jobs:
           # deploy with no per-machine `desktop helper --write` step. Only the
           # arm64 slice can execute on this runner; `--print` is pure
           # (no filesystem), so the wrapper bytes are identical from any slice.
+          # download-artifact drops the executable bit.
+          chmod +x out/anyray-connect-darwin-arm64
           for wrapper in credential bootstrap-headers; do
             case "$wrapper" in
               credential) helper="$root/usr/local/bin/anyray-credential-helper" ;;
@@ -664,6 +666,10 @@ jobs:
           printf '%s\n' "$payload_files" | grep -Eq '^\.?/?usr/local/bin/anyray-connect$'
           printf '%s\n' "$payload_files" \
             | grep -Eq '^\.?/?usr/local/lib/anyray-connect/managed-enroll-runner$'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/bin/anyray-credential-helper$'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/bin/anyray-bootstrap-headers-helper$'
           printf '%s\n' "$payload_files" \
             | grep -Eq '^\.?/?Library/LaunchAgents/ai\.anyray\.connect\.managed-enroll\.plist$'
 

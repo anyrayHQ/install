@@ -76,8 +76,19 @@ autoUpdate:
   image:
     # Any kubectl within one minor of your cluster. The upstream image publishes
     # no `latest` tag, so this is always an explicit version.
+    #
+    # THIS IS A KUBERNETES VERSION, NOT AN ANYRAY RELEASE. It looks like one,
+    # and that is exactly how it broke: the monorepo's release bump derived "the
+    # tag install currently pins" from the FIRST `tag:` line in this file, which
+    # is this one, and rewrote it to the Anyray release on every promotion from
+    # 2026-08-27 (#390) on. Charts 0.6.2-0.6.11 all shipped
+    # `registry.k8s.io/kubectl:v1.10.3xx`, which does not exist, so the roll
+    # below could only ImagePullBackOff — auto-update was dead for every install
+    # on the policy-stable channel, which is what `setup.sh --k8s` writes. The
+    # bump now reads the Railway template instead, and helm-chart.yml asserts
+    # this tag resolves upstream so a rewrite cannot land silently again.
     repository: registry.k8s.io/kubectl
-    tag: v1.10.322
+    tag: v1.33.0
     pullPolicy: IfNotPresent
   resources:
     requests:

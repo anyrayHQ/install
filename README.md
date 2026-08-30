@@ -93,6 +93,12 @@ docker compose up -d
 > Inside Docker, `localhost` is the gateway container — use `host.docker.internal`
 > (or the host LAN IP) for an upstream on the host. Re-run `./setup.sh --upstream <url>`
 > to change it later. `--upstream` also clears the proxy allowlist for that host.
+>
+> If the upstream resolves to a **private** address, setup also adds it to
+> `TRUSTED_CUSTOM_HOSTS` so it clears the SSRF guard. When the host can't be
+> resolved from the install machine (split-horizon DNS, VPN not up), setup says so
+> and leaves it out — add it to `TRUSTED_CUSTOM_HOSTS` in `.env` yourself, keeping
+> the listed localhost defaults, or requests fail `502 custom_host_blocked`.
 
 **Public exposure** (remote devs / Cursor / Copilot BYOK) — terminate TLS with the
 bundled Caddy. In `.env` set `ANYRAY_PUBLIC_DOMAIN` (DNS A record → host),

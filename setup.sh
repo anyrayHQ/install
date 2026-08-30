@@ -522,6 +522,7 @@ EOF
     UP_HOST="${up_rest%%:*}"      # strip :port
     [ -n "$UP_HOST" ] || { echo "✗ could not parse a hostname from --upstream ${UPSTREAM_URL}" >&2; exit 1; }
 
+    # Name-shape fallback, used ONLY when the host cannot be resolved from here.
     is_internal_host() {
       case "$1" in
         localhost|127.*|::1|host.docker.internal|10.*|192.168.* \
@@ -529,6 +530,74 @@ EOF
         *) return 1 ;;
       esac
     }
+
+    # Mirrors the gateway's private/reserved ranges (utils/ssrfGuard.ts).
+    is_private_addr() {
+      case "$1" in
+        0.*|10.*|127.*|169.254.*|192.168.*) return 0 ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 0 ;;
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 0 ;;
+        ::1|::) return 0 ;;
+        [fF][cCdD]??:*|[fF][cCdD]?:*|[fF][cCdD]:*) return 0 ;;   # fc00::/7 ULA
+        [fF][eE][89abAB]*:*) return 0 ;;                         # fe80::/10 link-local
+        [fF][eE][cC]?:*) return 0 ;;                             # fec0::/10 site-local
+        *) return 1 ;;
+      esac
+    }
+
+    # Addresses for a host, one per line; empty when nothing here can resolve it.
+    resolve_host_addrs() {
+      case "$1" in
+        *:*) printf '%s\n' "$1"; return 0 ;;                  # literal IPv6
+        *[!0-9.]*) : ;;                                       # a name — resolve
+        *) printf '%s\n' "$1"; return 0 ;;                    # literal IPv4
+      esac
+      if command -v getent >/dev/null 2>&1; then
+        getent ahosts "$1" 2>/dev/null | awk '{print $1}' | sort -u || true
+      elif command -v dig >/dev/null 2>&1; then
+        { dig +short +time=3 +tries=1 A "$1" 2>/dev/null || true; \
+          dig +short +time=3 +tries=1 AAAA "$1" 2>/dev/null || true; }
+      elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import socket,sys
+try:
+    print("\n".join(sorted({a[4][0] for a in socket.getaddrinfo(sys.argv[1], None)})))
+except OSError:
+    pass' "$1" 2>/dev/null || true
+      fi
+    }
+
+    # → private | public | unknown. The gateway's SSRF guard blocks on the
+    # RESOLVED address, never on the name, so this has to ask the resolver: a
+    # private upstream behind a public-looking FQDN (split-horizon DNS) needs
+    # TRUSTED_CUSTOM_HOSTS exactly as much as one called *.internal, and no name
+    # pattern can tell the two apart. Classifying by name shape shipped installs
+    # that looked clean and then 502'd `custom_host_blocked` on the first
+    # request, with the allowlist already correct and nothing naming the cause.
+    classify_upstream_host() {
+      local addrs a
+      addrs="$(resolve_host_addrs "$1")"
+      # ::ffff:10.0.0.5 is an IPv4 answer wearing an IPv6 hat — the gateway
+      # unwraps it before deciding, so we must too or it reads as public.
+      addrs="$(printf '%s\n' "$addrs" | sed -E 's/^::[fF]{4}:(([0-9]{1,3}\.){3}[0-9]{1,3})$/\1/' \
+        | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9a-fA-F:]*:[0-9a-fA-F:]+$' || true)"
+      [ -n "$addrs" ] || { echo unknown; return 0; }
+      for a in $addrs; do
+        if is_private_addr "$a"; then echo private; return 0; fi
+      done
+      echo public
+    }
+
+    UP_CLASS="$(classify_upstream_host "$UP_HOST")"
+    case "$UP_CLASS" in
+      private) UP_TRUSTED=yes; UP_WHY="resolves to a private address" ;;
+      unknown)
+        if is_internal_host "$UP_HOST"; then
+          UP_TRUSTED=yes; UP_WHY="internal-looking name (not resolvable from here)"
+        else
+          UP_TRUSTED=no; UP_WHY="not resolvable from here"
+        fi ;;
+      *) UP_TRUSTED=no; UP_WHY="resolves to a public address" ;;
+    esac
 
     for k in ANYRAY_UPSTREAM_URL ANYRAY_CUSTOM_HOST_ALLOWLIST TRUSTED_CUSTOM_HOSTS; do
       grep -v "^${k}=" .env > .env.tmp 2>/dev/null || true; mv .env.tmp .env
@@ -539,7 +608,7 @@ EOF
       echo "# Anyray upstream (--upstream) — re-run ./setup.sh --upstream <url> to change."
       echo "ANYRAY_UPSTREAM_URL=${UPSTREAM_URL}"
       echo "ANYRAY_CUSTOM_HOST_ALLOWLIST=${UP_HOST}"
-      if is_internal_host "$UP_HOST"; then
+      if [ "$UP_TRUSTED" = yes ]; then
         # Gateway defaults to these when TRUSTED_CUSTOM_HOSTS is unset; setting it
         # replaces that set, so re-list the defaults and add the upstream host.
         trusted="localhost,127.0.0.1,::1,host.docker.internal"
@@ -553,7 +622,14 @@ EOF
     chmod 600 .env
 
     echo "✓ Upstream set → ${UPSTREAM_URL}  (clients need no x-anyray-config header)"
-    is_internal_host "$UP_HOST" && echo "  Proxy guard cleared for internal host ${UP_HOST}"
+    if [ "$UP_TRUSTED" = yes ]; then
+      echo "  Proxy guard cleared for ${UP_HOST} (${UP_WHY})"
+    elif [ "$UP_CLASS" = unknown ]; then
+      echo "  ⚠ ${UP_HOST} is ${UP_WHY}, so it was treated as public."
+      echo "    If it is private/VPC-internal, add it to TRUSTED_CUSTOM_HOSTS in .env"
+      echo "    (that var REPLACES the localhost defaults — re-list them) and restart,"
+      echo "    or requests will fail 502 custom_host_blocked."
+    fi
     [ -n "$CONNECT_TOKEN" ] || { echo ""; echo "  Next:      docker compose up -d"; }
   fi
   exit 0

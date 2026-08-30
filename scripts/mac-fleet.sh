@@ -7,14 +7,22 @@
 # signing run needs one: `up` creates the fleet + an ephemeral CodeBuild runner
 # project (webhook-driven, gated to the maintainer actor); `down` deletes the
 # RUNNER but leaves the fleet, so every run inside the already-paid 24h window
-# reuses the same Mac and AWS reclaims it afterwards.
+# reuses the same Mac; `reap` deletes the fleet once that window has closed.
 #
 # **The billing unit is the DAY, not the release.** Deleting the fleet after each
 # run does not refund the 24h minimum — it only guarantees the next run re-buys
 # it. That cost ~$720/mo against 2.7h of real use; see the note on `down`.
 #
+# `reap` closes the loop. A fleet that is merely LEFT never goes away on its
+# own: CodeBuild keeps it ACTIVE and it bills the Mac every day, whether or not
+# a release runs. Measured 2026-08-18..29 — one CreateFleet, no DeleteFleet, and
+# a flat $34.56/day for twelve days including four with zero signing runs. So
+# `down` keeps the fleet for the rest of the paid window and a scheduled `reap`
+# removes it after the window closes with nothing running.
+#
 # Idempotent: `up` reuses an existing fleet/project (including one in
-# PENDING_DELETION, still buildable inside its window), `down` tolerates absence.
+# PENDING_DELETION, still buildable inside its window), `down` and `reap`
+# tolerate absence.
 set -euo pipefail
 
 REGION="${AWS_REGION:-eu-central-1}"
@@ -116,10 +124,10 @@ up() {
 # window. The teardown was racing itself.
 #
 # Leaving the fleet makes the 24h window do the job it is already paid for: the
-# first release of a day allocates, every release within 24h reuses, and AWS
-# reclaims the host on its own afterwards. Same worst case (one minimum per
-# active day), no churn. Expected: ~$720/mo -> the number of DAYS the lane runs,
-# roughly $130-190/mo at the current cadence.
+# first release of a day allocates and every release within 24h reuses. AWS does
+# NOT reclaim the host afterwards — an ACTIVE fleet bills until something deletes
+# it — so `reap` (below, scheduled daily) is what closes the window. Together the
+# worst case is one minimum per ACTIVE day and nothing on an idle one.
 #
 # Pass `--release-fleet` to force the old behaviour. It does not save money
 # inside an open window; it exists for the case where the fleet is wedged
@@ -139,13 +147,92 @@ down() {
     fi
   else
     echo "fleet left in place: the 24h minimum is already paid, so the next run"
-    echo "inside that window reuses this Mac for free (AWS reclaims it after)."
+    echo "inside that window reuses this Mac for free. The scheduled 'reap' job"
+    echo "deletes it once the window closes; AWS never reclaims it on its own."
+
   fi
   echo "mac runner torn down."
+}
+
+# Delete the fleet once its paid 24h window has closed and nothing is using it.
+#
+# `down` deliberately keeps the fleet so later releases the SAME day reuse the
+# already-paid Mac. Nothing then ever removed it: CodeBuild does not reclaim an
+# ACTIVE fleet, so the host kept billing $34.56/day indefinitely. Measured
+# 2026-08-18..29 in account 637423459445 — one CreateFleet, zero DeleteFleet,
+# twelve consecutive billed days, four of them with no signing run at all
+# ($138 for nothing). This is the other half of the fix in install#351: keep the
+# fleet for the WINDOW, not forever.
+#
+# Two gates, both required, so this can never take a Mac out from under a live
+# release:
+#   1. The fleet is older than the 24h minimum. A fleet allocated minutes ago is
+#      immune, which is what makes the `up` path safe — see the race note below.
+#   2. The ephemeral runner project is absent. `up` creates it and `down`
+#      removes it, so its presence means a signing lane is mid-flight.
+#
+# Residual race, and why it is acceptable: a release whose `up` reuses a fleet
+# ALREADY older than 24h could, in the seconds before it creates the project,
+# collide with a reap. `up` re-checks and recreates a vanished fleet, so the
+# outcome is a slower provision, not a failed release. Schedule this off-peak
+# regardless.
+#
+# `--dry-run` (or REAP_DRY_RUN=true) reports the decision and deletes nothing.
+reap() {
+  local dry=""
+  case "${2:-}" in --dry-run) dry=1 ;; esac
+  [ "${REAP_DRY_RUN:-}" = "true" ] && dry=1
+
+  local arn; arn="$(fleet_arn)"
+  if [ -z "$arn" ]; then
+    echo "no fleet — nothing to reap."
+    return 0
+  fi
+
+  if aws codebuild batch-get-projects --region "$REGION" --names "$PROJECT" \
+       --query 'projects[0].name' --output text 2>/dev/null | grep -q "$PROJECT"; then
+    echo "runner project $PROJECT still exists — a signing lane is in flight; not reaping."
+    return 0
+  fi
+
+  # `created` is the allocation instant, which is exactly when the 24h minimum
+  # started. Reusing a fleet does not reset it, so this measures the window and
+  # not the last release.
+  local created age_hours
+  created="$(aws codebuild batch-get-fleets --region "$REGION" --names "$FLEET" \
+    --query 'fleets[0].created' --output text 2>/dev/null || true)"
+  if [ -z "$created" ] || [ "$created" = "None" ]; then
+    echo "::warning::cannot read the fleet creation time — not reaping (absence of evidence is not an idle fleet)"
+    return 0
+  fi
+  # Both GNU and BSD date refuse the other's parse flags, and the runner is
+  # Amazon Linux while a maintainer may run this on macOS. python3 is on both.
+  age_hours="$(python3 -c '
+import datetime,sys
+created=datetime.datetime.fromisoformat(sys.argv[1])
+now=datetime.datetime.now(datetime.timezone.utc)
+print(int((now-created).total_seconds()//3600))
+' "$created" 2>/dev/null || true)"
+  case "$age_hours" in
+    ''|*[!0-9]*) echo "::warning::cannot compute the fleet age from '${created}' — not reaping"; return 0 ;;
+  esac
+
+  if [ "$age_hours" -lt 24 ]; then
+    echo "fleet is ${age_hours}h old — inside the paid 24h window, keeping it."
+    return 0
+  fi
+
+  if [ -n "$dry" ]; then
+    echo "DRY RUN: would delete fleet $FLEET (${age_hours}h old, no runner project)."
+    return 0
+  fi
+  aws codebuild delete-fleet --region "$REGION" --arn "$arn"
+  echo "deleted fleet $FLEET after ${age_hours}h — the next release allocates a fresh 24h window."
 }
 
 case "${1:-}" in
   up) up ;;
   down) down "$@" ;;
-  *) echo "usage: $0 up|down [--release-fleet]" >&2; exit 2 ;;
+  reap) reap "$@" ;;
+  *) echo "usage: $0 up|down [--release-fleet] | reap [--dry-run]" >&2; exit 2 ;;
 esac

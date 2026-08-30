@@ -1,0 +1,60 @@
+name: Mac fleet reap
+
+# Deletes the on-demand macOS signing fleet once its paid 24h window has closed.
+#
+# The fleet exists so `release-connect-binaries.yml` and
+# `release-fleetd-installer.yml` can sign on a real Mac. Its teardown
+# deliberately LEAVES the fleet, because an EC2 Mac dedicated host bills a 24h
+# minimum that deleting does not refund — so later releases the same day reuse
+# an already-paid host (install#351).
+#
+# What that fix did not add was anything to remove the fleet afterwards.
+# CodeBuild does not reclaim an ACTIVE fleet on its own, so it kept billing
+# $34.56/day forever. Measured 2026-08-18..29 in account 637423459445: one
+# CreateFleet, zero DeleteFleet, twelve consecutive billed days, four of them
+# with no signing run at all. That is this workflow's whole job — turn an idle
+# day into a free day while keeping the reuse-within-the-window behaviour.
+#
+# Safety is in `mac-fleet.sh reap`, not here: it deletes only a fleet that is
+# BOTH older than the 24h minimum AND has no ephemeral runner project (the
+# project exists only between `up` and `down`, i.e. while a lane is in flight).
+# Anything it cannot prove — unreadable creation time, unparseable age — leaves
+# the fleet alone, because absence of evidence is not an idle fleet.
+on:
+  schedule:
+    # 04:17 UTC daily. Off-peak for the release lanes (nightly cuts at 03:00 and
+    # signing follows), so a reap is unlikely to race a provision even before
+    # the two gates above apply.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report the decision and delete nothing'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never two reaps at once; a queued one is pointless once the first has run.
+concurrency:
+  group: mac-fleet-reap
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # assume the fleet-lifecycle role via OIDC
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          aws-region: eu-central-1
+      - name: Reap the macOS signing fleet if its window has closed
+        env:
+          REAP_DRY_RUN: ${{ inputs.dry_run }}
+        run: ./scripts/mac-fleet.sh reap

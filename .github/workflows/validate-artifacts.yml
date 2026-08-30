@@ -182,6 +182,53 @@ jobs:
           fi
           (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --k8s --connect adt_ci0000000000000000 --host anyray.internal >/dev/null 2>&1)
           (cd "$mixed" && "$GITHUB_WORKSPACE/setup.sh" --k8s --host anyray.internal >/dev/null 2>&1)
+      - name: --upstream trusts a private host by RESOLUTION, not by name shape
+        # The gateway's SSRF guard blocks on the address a name RESOLVES to, so a
+        # private upstream behind a public-looking FQDN (split-horizon DNS) needs
+        # TRUSTED_CUSTOM_HOSTS just as much as one called *.internal. Classifying
+        # by name shape wrote only the allowlist for such a host and the install
+        # then 502'd custom_host_blocked on its first request. Literal IPs and a
+        # reserved .invalid name keep this hermetic — no resolver required.
+        run: |
+          set -euo pipefail
+          up_env() {
+            d="$(mktemp -d)"
+            (cd "$d" && "$GITHUB_WORKSPACE/setup.sh" --connect adt_ci0000000000000000 \
+              --host ci.example.com --upstream "$1" >"$d/out" 2>&1)
+            printf '%s' "$d"
+          }
+
+          # Private literal → trusted, with the localhost defaults re-listed.
+          d="$(up_env http://10.0.0.5:4000)"
+          grep -q '^TRUSTED_CUSTOM_HOSTS=.*10\.0\.0\.5' "$d/.env" || {
+            echo "::error::private upstream did not reach TRUSTED_CUSTOM_HOSTS"; exit 1; }
+          for keep in localhost 127.0.0.1 host.docker.internal; do
+            grep -q "^TRUSTED_CUSTOM_HOSTS=.*${keep}" "$d/.env" || {
+              echo "::error::TRUSTED_CUSTOM_HOSTS dropped the built-in default ${keep}"; exit 1; }
+          done
+
+          # Public literal → allowlist only; trusting it would widen the guard.
+          d="$(up_env http://8.8.8.8:4000)"
+          if grep -q '^TRUSTED_CUSTOM_HOSTS=' "$d/.env"; then
+            echo "::error::public upstream was written into TRUSTED_CUSTOM_HOSTS"; exit 1
+          fi
+          grep -q '^ANYRAY_CUSTOM_HOST_ALLOWLIST=8.8.8.8$' "$d/.env" || {
+            echo "::error::public upstream missing from the allowlist"; exit 1; }
+
+          # Unresolvable + public-looking → not trusted, but SAY SO. Silence here
+          # is the failure mode this step exists to prevent.
+          d="$(up_env https://llm-gateway.example.invalid)"
+          if grep -q '^TRUSTED_CUSTOM_HOSTS=' "$d/.env"; then
+            echo "::error::unresolvable upstream was trusted without evidence"; exit 1
+          fi
+          grep -q 'TRUSTED_CUSTOM_HOSTS' "$d/out" || {
+            echo "::error::unresolvable upstream gave no TRUSTED_CUSTOM_HOSTS guidance"; exit 1; }
+
+          # Unresolvable but internal-NAMED → the pre-existing name fallback still
+          # applies, so an air-gapped *.internal install keeps working.
+          d="$(up_env http://litellm.acme.internal:4000)"
+          grep -q '^TRUSTED_CUSTOM_HOSTS=.*litellm\.acme\.internal' "$d/.env" || {
+            echo "::error::name-shape fallback regressed for an unresolvable *.internal host"; exit 1; }
       - name: Compose requires the Billing identity
         run: |
           set -euo pipefail

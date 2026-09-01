@@ -70,6 +70,21 @@ Three invariants the workflow encodes — keep them if you touch it:
 
 ## Secrets to provision (repo → Settings → Secrets and variables → Actions)
 
+### Monorepo read app (tray lane only)
+
+| Secret | What it is | Where to get it |
+| --- | --- | --- |
+| `MONOREPO_READ_APP_ID` | App ID of the **anyray-monorepo-read** GitHub App (4791950) | Org → Settings → Developer settings → GitHub Apps |
+| `MONOREPO_READ_APP_PRIVATE_KEY` | The app's PEM private key | Same page → "Generate a private key"; upload with `gh secret set … < key.pem`, then delete the local file |
+
+The `tray-linux` lane (opt-in `build_tray` input) builds the RFC 0010 desktop
+tray, whose Rust source lives in the **private monorepo** — the npm package
+carries only the CLI. The job mints a one-hour installation token from these
+secrets (`contents: read`, installation scoped to `anyrayHQ/monorepo` alone) and
+clones with it. Blast radius of a leaked token is a read-only clone for at most
+an hour; rotating the key is "Generate a private key" plus re-uploading the
+secret. Provisioned 2026-09-01.
+
 ### macOS — Developer ID signing + notarization
 
 | Secret | What it is | Where to get it |
@@ -392,6 +407,7 @@ blocks GitHub-hosted runners). One persistent Linux runner project plus an
 | --- | --- | --- |
 | build, provision-mac, sign-windows, package-linux, release, teardown-mac | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`) | `anyray-install-runner` |
 | sign-macos | **on-demand** macOS (MAC_ARM, `mac2-m2.metal`) | `anyray-install-runner-mac` (ephemeral) |
+| tray-linux (opt-in `build_tray`) | Ubuntu 22.04 (`aws/codebuild/standard:7.0`) | `anyray-install-runner-ubuntu` |
 
 **`sign-windows` no longer needs Windows.** jsign is a pure-Java Authenticode
 implementation, so signing moved to the Linux runner — no Windows SDK download,
@@ -412,6 +428,18 @@ ephemeral runner project, `sign-macos` runs on it, and `teardown-mac` (always) d
 Net cost is one 24-hour-minimum Mac charge per release (~$15-16), never a standing bill. The
 lifecycle lives in `scripts/mac-fleet.sh` (`up`/`down`); the release workflow drives it via a
 scoped GitHub-OIDC role (`AWS_MAC_FLEET_ROLE_ARN` repo variable → `anyray-install-mac-fleet-ci`).
+
+**`anyray-install-runner-ubuntu`** exists for the tray lane alone: Tauri links
+against `webkit2gtk-4.1`, which Amazon Linux 2 does not package, and the AL2
+runners have no Docker daemon to containerize around it. Ubuntu **22.04, not
+24.04**, on purpose — the build host's glibc (2.35) is the floor for every
+machine that runs the shipped binary; 24.04's 2.39 would drop Ubuntu 22.04 and
+Debian 12 users. A trap that cost the first build on each new project: the
+shared `anyray-gha-runner-codebuild` role enumerates its CloudWatch log groups
+by ARN with no wildcard, so a new runner project dies in `QUEUED` with
+`ACCESS_DENIED` on `logs:CreateLogStream` (a bare "Build failed" with no log —
+the failure IS the inability to write logs) until its group is granted in a
+per-addition inline policy.
 
 Both persistent projects and the ephemeral mac project are webhook-driven
 (`WORKFLOW_JOB_QUEUED`) and **gated to the maintainer actor** (`ACTOR_ACCOUNT_ID` = 16443050) —

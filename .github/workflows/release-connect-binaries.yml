@@ -6,9 +6,14 @@ name: Release anyray-connect binaries
 # installers download these so a developer can connect with a single curl/irm
 # line — nothing to install.
 #
-# Source of truth is the PUBLIC npm package (anyray-connect), so this workflow
-# never needs access to the private monorepo. Run it after publishing a new
-# anyray-connect version to npm.
+# Source of truth is the PUBLIC npm package (anyray-connect), so the CLI lanes
+# never need access to the private monorepo. Run it after publishing a new
+# anyray-connect version to npm. ONE exception, opt-in and off by default: the
+# `build_tray` input adds a lane that clones the private monorepo (the RFC 0010
+# desktop tray's Rust source lives there, unpublished) using a short-lived
+# GitHub App installation token — contents:read, scoped to that one repo,
+# expires in an hour. See the tray-linux job and RELEASING.md ("Monorepo read
+# app").
 #
 # Code signing (RFC 0010 §6, setting names in RELEASING.md): the darwin
 # binaries are Developer ID-signed + notarized on an on-demand Mac; the macOS
@@ -51,6 +56,11 @@ on:
         default: ''
       dry_run:
         description: 'Test run: build + sign + notarize + exercise the on-demand Mac fleet, but do NOT publish a GitHub release (no customer-facing change). Signed assets are uploaded as a workflow artifact for inspection.'
+        required: false
+        type: boolean
+        default: false
+      build_tray:
+        description: 'Also build the RFC 0010 desktop tray (Linux) from the private monorepo. SCAFFOLD lane: artifact-only, never a release asset — the tray sign/notarize/staple lane (RFC 0010 §6) does not exist yet, and unsigned does not ship.'
         required: false
         type: boolean
         default: false
@@ -125,6 +135,106 @@ jobs:
             exit 1
           fi
           echo 'all signing lanes configured: macOS (Developer ID + notarization), Windows (Azure Artifact Signing), Linux (GPG)'
+
+  # ---------------------------------------------------------------------------
+  # RFC 0010 desktop tray — Linux scaffold lane (opt-in via the build_tray
+  # input, default off; a normal CLI release never runs it).
+  #
+  # Deliberately NOT in signing-preflight's mandatory list and deliberately not
+  # a release asset: the tray's sign/notarize/staple lane (§6) does not exist
+  # yet, and unsigned does not ship — this uploads a short-retention workflow
+  # artifact only. When the signing lane lands, THAT change adds its secrets to
+  # signing-preflight and promotes the artifact to the release job.
+  #
+  # The tray's Rust source lives in the PRIVATE monorepo (unpublished — the npm
+  # package carries only the CLI), so this job clones it with a GitHub App
+  # installation token: app anyray-monorepo-read, contents:read, installation
+  # scoped to anyrayHQ/monorepo alone, token expires in one hour. Blast radius
+  # of a leak is a read-only clone for <=1h. This repository is public — the
+  # clone stays on the runner and nothing from it is echoed to logs.
+  #
+  # Runner: anyray-install-runner-ubuntu (aws/codebuild/standard:7.0), created
+  # for exactly this job — Tauri needs webkit2gtk-4.1, which Amazon Linux 2
+  # lacks, and the AL2 runners cannot containerize around it (no Docker daemon).
+  # The image ships NO Rust (its stale /root/.rustup/settings.toml just looks
+  # like it does), so rustup-init is fetched to a file from the versioned
+  # archive and verified against a pinned digest — never piped into a shell.
+  # Ubuntu 22.04 on purpose: the build host's glibc (2.35) is the floor for
+  # every machine that runs the binary; 24.04's 2.39 would drop Ubuntu 22.04
+  # and Debian 12 users.
+  tray-linux:
+    if: ${{ inputs.build_tray }}
+    runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      RUST_TOOLCHAIN: '1.98.0'
+      RUSTUP_VERSION: '1.29.0'
+      RUSTUP_INIT_SHA256: '4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10'
+    steps:
+      - name: Mint a monorepo read token (1h, contents:read, one repo)
+        id: monorepo-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.MONOREPO_READ_APP_ID }}
+          private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
+          owner: anyrayHQ
+          repositories: monorepo
+
+      - name: Check out the monorepo (tray source)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: anyrayHQ/monorepo
+          token: ${{ steps.monorepo-token.outputs.token }}
+          # The token dies in an hour anyway, but there is no reason for it to
+          # outlive the checkout step at all.
+          persist-credentials: false
+
+      - name: Install Linux webview and tray dependencies
+        run: |
+          set -euo pipefail
+          SUDO=""
+          [ "$(id -u)" -ne 0 ] && SUDO=sudo
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev build-essential libssl-dev libxdo-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Rust toolchain (pinned rustup-init, checksum-verified)
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
+            curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
+            echo "${RUSTUP_INIT_SHA256}  rustup-init" | sha256sum -c -
+            chmod +x rustup-init
+            ./rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
+            rm -f rustup-init
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --no-self-update
+          rustup default "${RUST_TOOLCHAIN}"
+          rustup run "${RUST_TOOLCHAIN}" rustc --version
+
+      - name: Build the tray (unsigned, no bundling)
+        working-directory: connect-tray/src-tauri
+        run: |
+          set -euo pipefail
+          rustup run "${RUST_TOOLCHAIN}" cargo build --release --locked
+          # Record what was built without echoing anything from the source tree.
+          printf 'monorepo_sha=%s\n' "$(git rev-parse HEAD)" > target/release/BUILD_INFO
+
+      - name: Upload tray artifact (workflow artifact ONLY — see job comment)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-tray-linux-unsigned
+          path: |
+            connect-tray/src-tauri/target/release/connect-tray
+            connect-tray/src-tauri/target/release/BUILD_INFO
+          if-no-files-found: error
+          retention-days: 7
 
   build:
     needs: signing-preflight

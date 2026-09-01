@@ -115,31 +115,33 @@ up() {
 # fleet, then every run's `down` deleted it and the next `up` re-bought the
 # window. The teardown was racing itself.
 #
-# Leaving the fleet makes the 24h window do the job it is already paid for: the
-# first release of a day allocates, every release within 24h reuses, and AWS
-# reclaims the host on its own afterwards. Same worst case (one minimum per
-# active day), no churn. Expected: ~$720/mo -> the number of DAYS the lane runs,
-# roughly $130-190/mo at the current cadence.
+# `down` now ALWAYS deletes the fleet, and that still gives the 24h window its
+# full value: a deleted fleet sits in PENDING_DELETION and, per AWS ("Fleets
+# are available to build projects while they are pending deletion"), keeps
+# serving builds for the remainder of the already-paid window — verified live
+# 2026-09-01, when a release created a same-name fleet while the previous one
+# was still pending deletion. So same-day releases still reuse the paid Mac,
+# there is still no re-buy churn, and reclamation no longer depends on anyone
+# remembering.
 #
-# Pass `--release-fleet` to force the old behaviour. It does not save money
-# inside an open window; it exists for the case where the fleet is wedged
-# (CREATE_FAILED / UPDATE_ROLLBACK_FAILED) and must be cleared so the next `up`
-# can build a healthy one.
+# The previous design left the fleet ACTIVE on the premise that "AWS reclaims
+# the host on its own afterwards". It does not — an ACTIVE fleet bills ~$67/day
+# until something deletes it. That premise cost $877 in Aug 2026 (fleet created
+# Aug 18, zero builds after its release, standing idle 13 days) and reproduced
+# the same day it was diagnosed: the very release that verified this fix left
+# another ACTIVE fleet behind. Billing caps at the 24h minimum ONLY via
+# delete-fleet.
 down() {
   if aws codebuild batch-get-projects --region "$REGION" --names "$PROJECT" \
        --query 'projects[0].name' --output text 2>/dev/null | grep -q "$PROJECT"; then
     aws codebuild delete-webhook --region "$REGION" --project-name "$PROJECT" 2>/dev/null || true
     aws codebuild delete-project --region "$REGION" --name "$PROJECT" && echo "deleted project $PROJECT"
   fi
-  if [ "${2:-}" = "--release-fleet" ] || [ "${RELEASE_MAC_FLEET:-}" = "true" ]; then
-    local arn; arn="$(fleet_arn)"
-    if [ -n "$arn" ]; then
-      aws codebuild delete-fleet --region "$REGION" --arn "$arn" \
-        && echo "deleted fleet (forced; the 24h minimum is already sunk and is NOT refunded)"
-    fi
-  else
-    echo "fleet left in place: the 24h minimum is already paid, so the next run"
-    echo "inside that window reuses this Mac for free (AWS reclaims it after)."
+  local arn; arn="$(fleet_arn)"
+  if [ -n "$arn" ]; then
+    aws codebuild delete-fleet --region "$REGION" --arn "$arn" \
+      && echo "fleet deletion requested: it keeps serving builds for the rest of the" \
+      && echo "paid 24h window (PENDING_DELETION), then AWS reclaims it."
   fi
   echo "mac runner torn down."
 }
@@ -147,5 +149,5 @@ down() {
 case "${1:-}" in
   up) up ;;
   down) down "$@" ;;
-  *) echo "usage: $0 up|down [--release-fleet]" >&2; exit 2 ;;
+  *) echo "usage: $0 up|down" >&2; exit 2 ;;
 esac

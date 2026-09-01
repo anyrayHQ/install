@@ -92,28 +92,49 @@ describe('desktop staging workflow safety contract', () => {
     );
   });
 
-  test('uses hosted macOS for compilation and smoke, and CodeBuild Mac only for signing', () => {
-    assert.match(job('build-macos-unsigned'), /runs-on: macos-15/);
-    assert.match(job('build-macos-unsigned'), /needs: preflight/);
-    assert.match(
-      job('provision-mac'),
-      /needs: \[preflight, build-macos-unsigned\]/
-    );
+  test('runs every job on CodeBuild, never on a GitHub-hosted runner', () => {
+    const runners = workflow.match(/runs-on: .+/g) ?? [];
+    assert.ok(runners.length > 0);
+    for (const runner of runners) {
+      assert.match(runner, /^runs-on: codebuild-anyray-install-runner(-mac|-win|-ubuntu)?-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/);
+    }
+    assert.doesNotMatch(workflow, /macos-15|ubuntu-24\.04|ubuntu-latest|windows-2025/);
+  });
+
+  test('builds Linux on the Ubuntu 22.04 project with a pinned rustup', () => {
+    for (const name of ['build-linux-unsigned', 'smoke-linux-installers']) {
+      assert.match(job(name), /runs-on: codebuild-anyray-install-runner-ubuntu-/);
+    }
+    const build = job('build-linux-unsigned');
+    assert.match(build, /rustup-init\.sha256|RUSTUP_INIT_SHA256_LINUX_X64/);
+    assert.match(build, /sha256sum -c -/);
+    assert.doesNotMatch(build, /curl[^\n]*\| *sh/);
+  });
+
+  test('provisions the Mac before the build and releases it after the signed smoke', () => {
+    assert.match(job('provision-mac'), /needs: preflight$/m);
+    assert.match(job('build-macos-unsigned'), /needs: \[preflight, provision-mac\]/);
+    for (const name of ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']) {
+      assert.match(job(name), /runs-on: codebuild-anyray-install-runner-mac-/);
+    }
     assert.match(
       job('sign-macos'),
       /needs: \[preflight, build-macos-unsigned, provision-mac\]/
     );
-    assert.match(
-      job('sign-macos'),
-      /runs-on: codebuild-anyray-install-runner-mac-/
-    );
-    assert.match(job('verify-macos-signed'), /runs-on: macos-15/);
-    assert.match(job('teardown-mac'), /needs: sign-macos/);
-    assert.equal(
-      (workflow.match(/runs-on: codebuild-anyray-install-runner-mac-/g) ?? [])
-        .length,
-      1
-    );
+    assert.match(job('teardown-mac'), /needs: \[sign-macos, verify-macos-signed\]/);
+    assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) \}\}/);
+  });
+
+  test('bootstraps pinned Rust and MSVC on both Windows compile jobs', () => {
+    for (const name of ['build-windows-unsigned', 'bundle-windows-unsigned']) {
+      const body = job(name);
+      assert.match(body, /Rust toolchain and MSVC build tools \(pinned\)/);
+      assert.match(body, /VS_BUILDTOOLS_SHA256/);
+      assert.match(body, /RUSTUP_INIT_SHA256_WINDOWS_X64/);
+      assert.match(body, /Microsoft\.VisualStudio\.Workload\.VCTools/);
+    }
+    assert.match(workflow, /VS_BUILDTOOLS_URL: 'https:\/\/download\.visualstudio\.microsoft\.com\//);
+    assert.doesNotMatch(workflow, /aka\.ms/);
   });
 
   test('pins the signed Apple team and bundle identifiers before notarization', () => {
@@ -153,12 +174,12 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(windows, /MSI uninstall failed/);
 
     const linux = job('smoke-linux-installers');
-    assert.match(linux, /sudo dpkg -i/);
+    assert.match(linux, /\$SUDO dpkg -i/);
     assert.match(linux, /smoke_installed_tray "\$deb_main"/);
-    assert.match(linux, /sudo dpkg -r/);
-    assert.match(linux, /sudo rpm -i/);
+    assert.match(linux, /\$SUDO dpkg -r/);
+    assert.match(linux, /\$SUDO rpm -i/);
     assert.match(linux, /smoke_installed_tray "\$rpm_main"/);
-    assert.match(linux, /sudo rpm -e/);
+    assert.match(linux, /\$SUDO rpm -e/);
     assert.match(linux, /ai\.anyray\.connect-tray\.desktop/);
     assert.match(linux, /setsid dbus-run-session -- xvfb-run -a "\$main"/);
     assert.match(linux, /kill -KILL -- "-\$tray_pid"/);

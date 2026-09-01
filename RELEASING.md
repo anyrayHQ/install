@@ -511,15 +511,17 @@ Compilation jobs receive the private-source credential but **no signing
 credentials**. Signing jobs download compiled artifacts and receive no private
 source or GitHub App credential:
 
-- **macOS:** build one unsigned universal `.app` on hosted `macos-15`. Only
-  after that succeeds does `provision-mac` allocate the ephemeral CodeBuild Mac.
-  The artifact-only `sign-macos` job signs the bundled Bun engine (hardened
+- **macOS:** `provision-mac` allocates the ephemeral CodeBuild Mac right after
+  preflight; `build-macos-unsigned` compiles one unsigned universal `.app` on
+  it. The artifact-only `sign-macos` job signs the bundled Bun engine (hardened
   runtime + minimal `allow-jit` entitlement), signs the outer app, requires
   Apple Team ID `V53XMA78UF` and bundle identifier
   `ai.anyray.connect-tray`, notarizes and staples it, then creates, signs,
-  notarizes, and staples one universal `.dmg`. A credential-free hosted
-  `macos-15` job mounts and exercises the final DMG. Teardown follows the
-  signing job with `always()`, so verification never holds the paid fleet.
+  notarizes, and staples one universal `.dmg`. A credential-free
+  `verify-macos-signed` job on the same fleet mounts and exercises the final
+  DMG. Teardown follows the signed smoke with `always()`. The Mac host is
+  reused inside its paid 24h window, so the signing job deletes its keychain
+  and key files in an `always()` step and the build never sees a secret.
 - **Windows x64:** compile the raw Tauri main executable and bundled engine on
   Windows; sign and verify both through the existing Azure Artifact Signing
   script on Linux; restore those signed bytes on Windows and create the MSI
@@ -577,11 +579,9 @@ Native runner requirements are:
 
 | Platform/job | Runner |
 | --- | --- |
-| macOS build | GitHub-hosted `macos-15`; adds both Apple Rust targets and produces the unsigned universal app. |
-| macOS signing | Existing on-demand `codebuild-anyray-install-runner-mac-…` MAC_ARM fleet; artifact-only, with no private source checkout. |
-| macOS signed smoke | GitHub-hosted `macos-15`; credential-free. |
-| Windows build/bundle/native verify | Existing `codebuild-anyray-install-runner-win-…` Windows x64 project. |
-| Linux build/native smoke | GitHub-hosted `ubuntu-24.04`, for webkit2gtk 4.1, Xvfb/DBus, and native deb/rpm tooling. |
+| macOS build, signing, signed smoke | Existing on-demand `codebuild-anyray-install-runner-mac-…` MAC_ARM fleet. Signing is artifact-only, with no private source checkout. Rust comes from the image, with a pinned `rustup-init` fallback. |
+| Windows build/bundle/native verify | Existing `codebuild-anyray-install-runner-win-…` Windows x64 project. The image is not documented to ship Rust or MSVC, so both compile jobs install a pinned VS 2022 Build Tools (VCTools workload) and a pinned `rustup-init.exe`, each checksum-verified, skipping whatever is already present. |
+| Linux build/native smoke | `codebuild-anyray-install-runner-ubuntu-…` (Ubuntu 22.04 `standard:7.0`), for webkit2gtk 4.1, Xvfb/DBus, and native deb/rpm tooling. 22.04 on purpose: the build host's glibc (2.35) is the floor for every machine that runs the shipped binary; 24.04 would drop Ubuntu 22.04 and Debian 12 users. Rust from a pinned `rustup-init`. |
 | Azure/GPG/assembly/publish | Existing `codebuild-anyray-install-runner-…` Linux project. |
 
 The two GitHub App secret names above now exist in the install repository. The
@@ -589,11 +589,10 @@ first dry run must still validate the external side of that trust boundary: the
 App is installed on `anyrayHQ/monorepo` and its installation grant is repository
 Contents read-only.
 
-GitHub-hosted runner access is required for both `macos-15` and
-`ubuntu-24.04`. The persistent install runner is Amazon Linux and cannot
-substitute for either native build environment. Confirm hosted-runner billing
-before the first dry run, or deliberately provision equivalent self-hosted
-runners and review the label changes.
+No job uses a GitHub-hosted runner, so the lane does not depend on the org's
+Actions billing. The persistent install runner is Amazon Linux and cannot
+substitute for the Ubuntu or Mac build environments; the Ubuntu project and the
+Mac fleet are the replacements.
 
 The Mac universal build, Windows MSI bundling, and final signing sequence also
 need one full credentialed dry-run rehearsal on the real runners. Local static

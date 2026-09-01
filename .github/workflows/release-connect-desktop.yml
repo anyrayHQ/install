@@ -15,6 +15,14 @@ name: Release Anyray Connect desktop (staging only)
 # uploaded as an artifact. Signing jobs only receive unsigned build artifacts,
 # never private source, so build.rs and other source-controlled code cannot read
 # the Apple, Azure, or Linux signing material.
+#
+# Every job runs on the account's CodeBuild runners; nothing here depends on
+# GitHub-hosted runner billing. Linux compiles on the Ubuntu 22.04 project
+# (`anyray-install-runner-ubuntu`) on purpose: the build host's glibc is the
+# floor for every machine that runs the shipped binary, and 24.04's 2.39 would
+# drop the Ubuntu 22.04 and Debian 12 users that 2.35 still covers. macOS
+# compiles, signs, and smokes on the on-demand MAC_ARM fleet, so the Mac is
+# provisioned right after preflight and released after the signed smoke.
 
 on:
   workflow_dispatch:
@@ -43,6 +51,16 @@ concurrency:
 env:
   TAURI_CLI_VERSION: '2.11.4'
   BUN_VERSION: '1.3.14'
+  # rustup-init from the versioned archive path, one digest per platform
+  # (published at <archive>/<triple>/rustup-init[.exe].sha256). Bump together.
+  RUSTUP_VERSION: '1.29.0'
+  RUSTUP_INIT_SHA256_LINUX_X64: '4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10'
+  RUSTUP_INIT_SHA256_DARWIN_ARM64: 'aeb4105778ca1bd3c6b0e75768f581c656633cd51368fa61289b6a71696ac7e1'
+  RUSTUP_INIT_SHA256_WINDOWS_X64: '86478e53f769379d7f0ebfa7c9aa97cb76ca92233f79aa2cc0dbee2efaac73c7'
+  # Fixed-version VS 2022 Build Tools bootstrapper (17.14.39, August 2026), from
+  # the release-history "fixed version bootstrappers" table, not the floating alias.
+  VS_BUILDTOOLS_URL: 'https://download.visualstudio.microsoft.com/download/pr/fa619120-9c0e-47e6-bfe0-3ee96fb671b2/236367b68ba9a51708263ab10a1c85546cc4a8eca78b365168811d19c4fb2f29/vs_BuildTools.exe'
+  VS_BUILDTOOLS_SHA256: '236367b68ba9a51708263ab10a1c85546cc4a8eca78b365168811d19c4fb2f29'
   JSIGN_VERSION: '7.5'
   JSIGN_SHA256: 602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
 
@@ -127,7 +145,7 @@ jobs:
           echo "desktop release inputs are explicit and all signing lanes are configured"
 
   provision-mac:
-    needs: [preflight, build-macos-unsigned]
+    needs: preflight
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
@@ -141,8 +159,8 @@ jobs:
       - run: ./scripts/mac-fleet.sh up
 
   build-macos-unsigned:
-    needs: preflight
-    runs-on: macos-15
+    needs: [preflight, provision-mac]
+    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -214,6 +232,21 @@ jobs:
               "$TARGET_TRIPLE" \
               "$GITHUB_WORKSPACE/engine/anyray-connect-universal"
           )
+
+      # The fleet image is expected to ship Rust; this only fills the gap if it
+      # does not, from a pinned rustup-init verified against its digest.
+      - name: Rust toolchain (pinned rustup-init when the image has none)
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/aarch64-apple-darwin/rustup-init"
+            curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
+            echo "${RUSTUP_INIT_SHA256_DARWIN_ARM64}  rustup-init" | shasum -a 256 -c -
+            chmod +x rustup-init
+            ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable
+            rm -f rustup-init
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Build the unsigned universal Tauri app bundle
         env:
@@ -413,7 +446,7 @@ jobs:
   # keychain are gone from the job boundary.
   verify-macos-signed:
     needs: [preflight, sign-macos]
-    runs-on: macos-15
+    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
     env:
@@ -520,7 +553,7 @@ jobs:
           test ! -e "$installed_app"
 
   teardown-mac:
-    needs: sign-macos
+    needs: [sign-macos, verify-macos-signed]
     if: ${{ always() }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
@@ -595,6 +628,43 @@ jobs:
             $env:TARGET_TRIPLE `
             "$env:GITHUB_WORKSPACE/engine/anyray-connect-windows-x64.exe"
           Pop-Location
+
+      # windows-base:2022-1.0 is not documented to ship Rust or MSVC. Install
+      # both from pinned, checksum-verified downloads when absent; a no-op when
+      # the image already has them. Exit 3010 is "installed, reboot pending".
+      - name: Rust toolchain and MSVC build tools (pinned)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vc = $null
+          if (Test-Path $vswhere) {
+            $vc = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          }
+          if (-not $vc) {
+            $bootstrapper = Join-Path $env:RUNNER_TEMP 'vs_BuildTools.exe'
+            Invoke-WebRequest -Uri $env:VS_BUILDTOOLS_URL -OutFile $bootstrapper
+            $got = (Get-FileHash $bootstrapper -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $env:VS_BUILDTOOLS_SHA256) { throw "vs_BuildTools.exe checksum mismatch: got $got" }
+            $install = Start-Process -FilePath $bootstrapper -Wait -PassThru -ArgumentList @(
+              '--quiet', '--wait', '--norestart', '--nocache',
+              '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended'
+            )
+            if ($install.ExitCode -notin 0, 3010) { throw "VS Build Tools install failed with exit $($install.ExitCode)" }
+          }
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $rustupInit = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+            Invoke-WebRequest -Uri "https://static.rust-lang.org/rustup/archive/$env:RUSTUP_VERSION/x86_64-pc-windows-msvc/rustup-init.exe" -OutFile $rustupInit
+            $got = (Get-FileHash $rustupInit -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $env:RUSTUP_INIT_SHA256_WINDOWS_X64) { throw "rustup-init.exe checksum mismatch: got $got" }
+            & $rustupInit -y --no-modify-path --profile minimal --default-toolchain stable
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init.exe exited $LASTEXITCODE" }
+            $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+            $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            $env:Path = "$cargoBin;$env:Path"
+          }
+          rustup --version
+          cargo --version
 
       - name: Compile the unsigned Windows app executable
         shell: pwsh
@@ -733,6 +803,43 @@ jobs:
           ./scripts/verify-authenticode-windows.ps1 -Path "$target/connect-tray.exe"
           ./scripts/verify-authenticode-windows.ps1 `
             -Path "private-source/connect-tray/src-tauri/binaries/anyray-connect-$env:TARGET_TRIPLE.exe"
+
+      # windows-base:2022-1.0 is not documented to ship Rust or MSVC. Install
+      # both from pinned, checksum-verified downloads when absent; a no-op when
+      # the image already has them. Exit 3010 is "installed, reboot pending".
+      - name: Rust toolchain and MSVC build tools (pinned)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vc = $null
+          if (Test-Path $vswhere) {
+            $vc = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          }
+          if (-not $vc) {
+            $bootstrapper = Join-Path $env:RUNNER_TEMP 'vs_BuildTools.exe'
+            Invoke-WebRequest -Uri $env:VS_BUILDTOOLS_URL -OutFile $bootstrapper
+            $got = (Get-FileHash $bootstrapper -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $env:VS_BUILDTOOLS_SHA256) { throw "vs_BuildTools.exe checksum mismatch: got $got" }
+            $install = Start-Process -FilePath $bootstrapper -Wait -PassThru -ArgumentList @(
+              '--quiet', '--wait', '--norestart', '--nocache',
+              '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended'
+            )
+            if ($install.ExitCode -notin 0, 3010) { throw "VS Build Tools install failed with exit $($install.ExitCode)" }
+          }
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $rustupInit = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+            Invoke-WebRequest -Uri "https://static.rust-lang.org/rustup/archive/$env:RUSTUP_VERSION/x86_64-pc-windows-msvc/rustup-init.exe" -OutFile $rustupInit
+            $got = (Get-FileHash $rustupInit -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $env:RUSTUP_INIT_SHA256_WINDOWS_X64) { throw "rustup-init.exe checksum mismatch: got $got" }
+            & $rustupInit -y --no-modify-path --profile minimal --default-toolchain stable
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init.exe exited $LASTEXITCODE" }
+            $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+            $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            $env:Path = "$cargoBin;$env:Path"
+          }
+          rustup --version
+          cargo --version
 
       - name: Bundle the signed inner executables into an unsigned MSI
         shell: pwsh
@@ -949,13 +1056,12 @@ jobs:
             throw 'MSI install/uninstall changed the existing scheduler sentinel'
           }
 
-  # A native Ubuntu runner is required here. The persistent install CodeBuild
-  # runner is Amazon Linux and has neither webkit2gtk-4.1 nor a compatible
-  # package toolchain. Hosted-runner billing (or an equivalent Ubuntu x64
-  # self-hosted runner) is an explicit infrastructure prerequisite.
+  # The persistent install runner is Amazon Linux (no webkit2gtk-4.1, no
+  # Docker daemon), so Linux compiles on the Ubuntu 22.04 CodeBuild project
+  # bound to this repo. It ships no Rust; the pinned rustup-init step fills it.
   build-linux-unsigned:
     needs: preflight
-    runs-on: ubuntu-24.04
+    runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -994,10 +1100,26 @@ jobs:
           "$EXPECTED_SOURCE_SHA"
       - name: Install native Tauri Linux build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          SUDO=""
+          [ "$(id -u)" -ne 0 ] && SUDO=sudo
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev build-essential libssl-dev libxdo-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf rpm
+
+      # Same pinned rustup-init pattern as the monorepo tray gate: file
+      # download + digest check, never rustup.rs piped into sh.
+      - name: Rust toolchain (pinned rustup-init, no third-party action)
+        run: |
+          set -euo pipefail
+          url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
+          curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
+          echo "${RUSTUP_INIT_SHA256_LINUX_X64}  rustup-init" | sha256sum -c -
+          chmod +x rustup-init
+          ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable
+          rm -f rustup-init
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -1101,7 +1223,7 @@ jobs:
 
   smoke-linux-installers:
     needs: [preflight, sign-linux-artifacts]
-    runs-on: ubuntu-24.04
+    runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
     env:
@@ -1113,13 +1235,18 @@ jobs:
           path: signed
       - name: Install native package runtime and inspection tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          SUDO=""
+          [ "$(id -u)" -ne 0 ] && SUDO=sudo
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
             rpm xvfb xauth dbus-x11
       - name: Verify signatures, install/uninstall deb and rpm, preserve CLI state
         run: |
           set -euo pipefail
+          SUDO=""
+          [ "$(id -u)" -ne 0 ] && SUDO=sudo
           export GNUPGHOME="$RUNNER_TEMP/gv"
           mkdir -m 700 "$GNUPGHOME"
           gpg --batch --import signed/anyray-connect-desktop-signing-key.asc
@@ -1149,8 +1276,8 @@ jobs:
           deb_installed=false
           rpm_installed=false
           cleanup() {
-            if [ "$rpm_installed" = true ]; then sudo rpm -e "$rpm_name" >/dev/null 2>&1 || true; fi
-            if [ "$deb_installed" = true ]; then sudo dpkg -r "$deb_name" >/dev/null 2>&1 || true; fi
+            if [ "$rpm_installed" = true ]; then $SUDO rpm -e "$rpm_name" >/dev/null 2>&1 || true; fi
+            if [ "$deb_installed" = true ]; then $SUDO dpkg -r "$deb_name" >/dev/null 2>&1 || true; fi
           }
           trap cleanup EXIT
 
@@ -1202,7 +1329,7 @@ jobs:
             test "$(sha256sum "$scheduler")" = "$scheduler_before"
           )
 
-          sudo dpkg -i "$deb"
+          $SUDO dpkg -i "$deb"
           deb_installed=true
           deb_engine="$(dpkg -L "$deb_name" | grep -E '/anyray-connect$' | head -1)"
           deb_main="$(dpkg -L "$deb_name" | grep -E '/connect-tray$' | head -1)"
@@ -1210,14 +1337,14 @@ jobs:
           test -x "$deb_main"
           test "$(HOME="$existing_home" "$deb_engine" --version | head -1)" = "anyray-connect $VERSION"
           smoke_installed_tray "$deb_main"
-          sudo dpkg -r "$deb_name"
+          $SUDO dpkg -r "$deb_name"
           deb_installed=false
           test ! -e "$deb_engine"
           test ! -e "$deb_main"
           test "$(sha256sum "$state")" = "$state_before"
           test "$(sha256sum "$scheduler")" = "$scheduler_before"
 
-          sudo rpm -i --nodeps "$rpm"
+          $SUDO rpm -i --nodeps "$rpm"
           rpm_installed=true
           rpm_engine="$(rpm -ql "$rpm_name" | grep -E '/anyray-connect$' | head -1)"
           rpm_main="$(rpm -ql "$rpm_name" | grep -E '/connect-tray$' | head -1)"
@@ -1225,7 +1352,7 @@ jobs:
           test -x "$rpm_main"
           test "$(HOME="$existing_home" "$rpm_engine" --version | head -1)" = "anyray-connect $VERSION"
           smoke_installed_tray "$rpm_main"
-          sudo rpm -e "$rpm_name"
+          $SUDO rpm -e "$rpm_name"
           rpm_installed=false
           test ! -e "$rpm_engine"
           test ! -e "$rpm_main"

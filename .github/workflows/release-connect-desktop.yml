@@ -1,0 +1,1390 @@
+name: Release Anyray Connect desktop (staging only)
+
+# Manual, isolated release lane for the self-contained Tauri desktop app.
+#
+# This workflow is deliberately NOT called by release-connect-binaries.yml and
+# has no push, tag, workflow_run, or repository_dispatch trigger. It never
+# reads npm, never updates releases/latest, and never renders or publishes the
+# CLI's connect manifests, Homebrew cask, Winget manifests, or updater metadata.
+# A failure here therefore cannot block or downgrade the existing CLI release.
+#
+# Supply-chain boundary: every source-consuming native job uses its own
+# short-lived, contents:read GitHub App token. Before source executes, the exact
+# requested commit must be reachable from the fetched origin/main and all CLI /
+# Cargo / Tauri versions must match the explicit input. Private source is never
+# uploaded as an artifact. Signing jobs only receive unsigned build artifacts,
+# never private source, so build.rs and other source-controlled code cannot read
+# the Apple, Azure, or Linux signing material.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact Connect version at the private source commit (plain x.y.z)'
+        required: true
+        type: string
+      source_sha:
+        description: 'Exact 40-hex anyrayHQ/monorepo commit reachable from origin/main'
+        required: true
+        type: string
+      dry_run:
+        description: 'Build, sign, notarize, and retain a workflow artifact only. When false, publish only a staging prerelease that is never latest.'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-desktop-staging-${{ inputs.version }}-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+env:
+  TAURI_CLI_VERSION: '2.11.4'
+  BUN_VERSION: '1.3.14'
+  JSIGN_VERSION: '7.5'
+  JSIGN_SHA256: 602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
+
+jobs:
+  # Refuse before any job receives repository secrets or private source. A
+  # manual dispatch from a feature branch is useful for ordinary CI and is not
+  # an acceptable identity for a distribution signing lane.
+  dispatch-main-only:
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions: {}
+    env:
+      DISPATCH_REF: ${{ github.ref }}
+    steps:
+      - name: Distribution workflows run only from install main
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_REF" != 'refs/heads/main' ]; then
+            echo "::error::desktop distribution must be dispatched from refs/heads/main, got '$DISPATCH_REF'"
+            exit 1
+          fi
+          echo 'dispatch ref is refs/heads/main'
+
+  preflight:
+    needs: dispatch-main-only
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      version: ${{ steps.inputs.outputs.version }}
+      source_sha: ${{ steps.inputs.outputs.source_sha }}
+      short_sha: ${{ steps.inputs.outputs.short_sha }}
+    env:
+      VERSION_INPUT: ${{ inputs.version }}
+      SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+      MONOREPO_READ_APP_ID: ${{ secrets.MONOREPO_READ_APP_ID }}
+      MONOREPO_READ_APP_PRIVATE_KEY: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
+      AWS_MAC_FLEET_ROLE_ARN: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+      APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
+      APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+      AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+      AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
+      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
+    steps:
+      - name: Validate immutable inputs and every release prerequisite
+        id: inputs
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION_INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be a plain x.y.z version, got '$VERSION_INPUT'"
+            exit 1
+          fi
+          if [[ ! "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::source_sha must be an exact lowercase 40-hex commit SHA"
+            exit 1
+          fi
+
+          missing=''
+          for name in \
+            MONOREPO_READ_APP_ID MONOREPO_READ_APP_PRIVATE_KEY \
+            AWS_MAC_FLEET_ROLE_ARN \
+            APPLE_SIGNING_CERT_P12 APPLE_SIGNING_CERT_PASSWORD \
+            APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID \
+            AZURE_SIGNING_CLIENT_ID AZURE_SIGNING_TENANT_ID \
+            AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT_PROFILE \
+            LINUX_SIGNING_GPG_KEY LINUX_SIGNING_GPG_PASSPHRASE; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::desktop staging release prerequisites are incomplete. Missing:$missing (see RELEASING.md)"
+            exit 1
+          fi
+
+          {
+            echo "version=$VERSION_INPUT"
+            echo "source_sha=$SOURCE_SHA_INPUT"
+            echo "short_sha=${SOURCE_SHA_INPUT:0:12}"
+          } >> "$GITHUB_OUTPUT"
+          echo "desktop release inputs are explicit and all signing lanes are configured"
+
+  provision-mac:
+    needs: [preflight, build-macos-unsigned]
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          aws-region: eu-central-1
+      - run: ./scripts/mac-fleet.sh up
+
+  build-macos-unsigned:
+    needs: preflight
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+      TARGET_TRIPLE: universal-apple-darwin
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Mint a short-lived read-only token for the private monorepo
+        id: monorepo-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.MONOREPO_READ_APP_ID }}
+          private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
+          owner: anyrayHQ
+          repositories: monorepo
+          permission-contents: read
+
+      - name: Checkout and gate the exact reviewed private source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: anyrayHQ/monorepo
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          token: ${{ steps.monorepo-token.outputs.token }}
+          path: private-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+
+      - name: Gate source SHA, origin/main ancestry, versions, and externalBin
+        env:
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: >-
+          node scripts/verify-connect-desktop-source.mjs
+          private-source
+          "$EXPECTED_VERSION"
+          "$EXPECTED_SOURCE_SHA"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build the matching self-contained universal engine
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm -C private-source install --frozen-lockfile --ignore-scripts
+          corepack pnpm -C private-source --filter anyray-connect build
+          mkdir -p engine
+          bun build --compile --minify --compile-exec-argv="--use-system-ca" \
+            --target=bun-darwin-arm64 private-source/connect/dist/index.js \
+            --outfile engine/anyray-connect-darwin-arm64
+          bun build --compile --minify --compile-exec-argv="--use-system-ca" \
+            --target=bun-darwin-x64 private-source/connect/dist/index.js \
+            --outfile engine/anyray-connect-darwin-x64
+          lipo -create \
+            engine/anyray-connect-darwin-arm64 \
+            engine/anyray-connect-darwin-x64 \
+            -output engine/anyray-connect-universal
+          lipo -archs engine/anyray-connect-universal | grep -q arm64
+          lipo -archs engine/anyray-connect-universal | grep -q x86_64
+          (
+            cd private-source
+            node scripts/stage-connect-tray-engine.mjs \
+              "$TARGET_TRIPLE" \
+              "$GITHUB_WORKSPACE/engine/anyray-connect-universal"
+          )
+
+      - name: Build the unsigned universal Tauri app bundle
+        env:
+          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo install tauri-cli --version "=${TAURI_CLI_VERSION}" --locked
+          (
+            cd private-source/connect-tray/src-tauri
+            cargo tauri build \
+              --target "$TARGET_TRIPLE" \
+              --bundles app \
+              --ci \
+              --no-sign \
+              -- --locked
+          )
+          bundle_dir="private-source/connect-tray/src-tauri/target/$TARGET_TRIPLE/release/bundle/macos"
+          app="$(find "$bundle_dir" \
+            -maxdepth 1 -type d -name '*.app' -print -quit)"
+          [ -n "$app" ] || { echo '::error::Tauri produced no macOS .app bundle'; exit 1; }
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
+          test -x "$app/Contents/MacOS/anyray-connect"
+          test "$("$app/Contents/MacOS/anyray-connect" --version | head -1)" = "anyray-connect $VERSION"
+          lipo -archs "$app/Contents/MacOS/anyray-connect" | grep -q arm64
+          lipo -archs "$app/Contents/MacOS/anyray-connect" | grep -q x86_64
+          main="$(find "$app/Contents/MacOS" -maxdepth 1 -type f ! -name anyray-connect -print -quit)"
+          [ -n "$main" ] || { echo '::error::Tauri app main executable is missing'; exit 1; }
+          lipo -archs "$main" | grep -q arm64
+          lipo -archs "$main" | grep -q x86_64
+          mkdir -p out
+          ditto -c -k --keepParent "$app" out/connect-desktop-unsigned.zip
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-macos-unsigned
+          path: out/connect-desktop-unsigned.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-macos:
+    needs: [preflight, build-macos-unsigned, provision-mac]
+    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 75
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
+      APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-macos-unsigned
+          path: unsigned
+
+      - name: Import the Developer ID Application identity
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/connect-desktop-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          ( umask 077; printf '%s' "$KEYCHAIN_PASSWORD" > "$RUNNER_TEMP/connect-desktop-keychain-password" )
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+
+          ca_dir="$RUNNER_TEMP/apple-developer-id-ca"
+          mkdir -p "$ca_dir"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://www.apple.com/certificateauthority/DeveloperIDCA.cer \
+            --output "$ca_dir/DeveloperIDCA.cer"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+            --output "$ca_dir/DeveloperIDG2CA.cer"
+          printf '%s  %s\n' \
+            '7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f' \
+            "$ca_dir/DeveloperIDCA.cer" \
+            'f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a' \
+            "$ca_dir/DeveloperIDG2CA.cer" \
+            | shasum -a 256 -c -
+          security import "$ca_dir/DeveloperIDCA.cer" -k "$KEYCHAIN"
+          security import "$ca_dir/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
+
+          printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/connect-desktop-cert.p12"
+          security import "$RUNNER_TEMP/connect-desktop-cert.p12" \
+            -k "$KEYCHAIN" -f pkcs12 -P "$APPLE_SIGNING_CERT_PASSWORD" \
+            -A -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          SYSTEM_ROOT_KEYCHAIN='/System/Library/Keychains/SystemRootCertificates.keychain'
+          security list-keychains -s "$KEYCHAIN" "$SYSTEM_ROOT_KEYCHAIN"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$IDENTITY" ]; then
+            echo '::error::APPLE_SIGNING_CERT_P12 imported no valid Developer ID Application identity'
+            exit 1
+          fi
+          echo "identity=$IDENTITY" >> "$GITHUB_ENV"
+
+          umask 077
+          printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/connect-desktop-notary-key.p8"
+          test -s "$RUNNER_TEMP/connect-desktop-notary-key.p8"
+
+      - name: Sign, notarize, and staple the app and DMG
+        run: |
+          set -euo pipefail
+          mkdir -p expanded out
+          ditto -x -k unsigned/connect-desktop-unsigned.zip expanded
+          app="$(find expanded -maxdepth 1 -type d -name '*.app' -print -quit)"
+          [ -n "$app" ] || { echo '::error::unsigned app artifact contains no .app'; exit 1; }
+          engine="$app/Contents/MacOS/anyray-connect"
+          test -x "$engine"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
+
+          cat > "$RUNNER_TEMP/connect-desktop-engine-entitlements.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.cs.allow-jit</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          codesign --force --options runtime --timestamp \
+            --entitlements "$RUNNER_TEMP/connect-desktop-engine-entitlements.plist" \
+            --identifier ai.anyray.connect-engine --sign "$identity" "$engine"
+          codesign --verify --strict --verbose=2 "$engine"
+
+          # The nested engine is signed first; signing the bundle then signs the
+          # app's main executable and seals the already-signed sidecar.
+          codesign --force --options runtime --timestamp --sign "$identity" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign_details="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          printf '%s\n' "$codesign_details" | grep -Fxq 'TeamIdentifier=V53XMA78UF'
+          printf '%s\n' "$codesign_details" | grep -Fxq 'Identifier=ai.anyray.connect-tray'
+
+          app_zip="$RUNNER_TEMP/connect-desktop-notary.zip"
+          ditto -c -k --keepParent "$app" "$app_zip"
+          status="$(xcrun notarytool submit "$app_zip" \
+            --key "$RUNNER_TEMP/connect-desktop-notary-key.p8" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
+          [ "$status" = Accepted ] || { echo "::error::app notarization failed: $status"; exit 1; }
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl -a -vvv -t exec "$app"
+
+          dmgroot="$RUNNER_TEMP/connect-desktop-dmgroot"
+          mkdir -p "$dmgroot"
+          ditto "$app" "$dmgroot/Anyray Connect.app"
+          ln -s /Applications "$dmgroot/Applications"
+          dmg="out/anyray-connect-desktop-${VERSION}-macos-universal.dmg"
+          hdiutil create -volname 'Anyray Connect' -srcfolder "$dmgroot" \
+            -ov -format UDZO "$dmg"
+          codesign --force --timestamp --sign "$identity" "$dmg"
+          codesign --verify --verbose=2 "$dmg"
+
+          status="$(xcrun notarytool submit "$dmg" \
+            --key "$RUNNER_TEMP/connect-desktop-notary-key.p8" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
+          [ "$status" = Accepted ] || { echo "::error::DMG notarization failed: $status"; exit 1; }
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          hdiutil verify "$dmg"
+          spctl -a -vvv -t open --context context:primary-signature "$dmg"
+
+      - name: Delete the throwaway Apple signing material
+        if: always()
+        run: |
+          rm -f \
+            "$RUNNER_TEMP/connect-desktop-cert.p12" \
+            "$RUNNER_TEMP/connect-desktop-notary-key.p8" \
+            "$RUNNER_TEMP/connect-desktop-keychain-password" \
+            "$RUNNER_TEMP/connect-desktop-engine-entitlements.plist" \
+            "$RUNNER_TEMP/connect-desktop-notary.zip"
+          if [ -f "$RUNNER_TEMP/connect-desktop-signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/connect-desktop-signing.keychain-db"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-macos-signed
+          path: out/*.dmg
+          if-no-files-found: error
+
+  # Runtime validation is deliberately separate from signing. The signed app
+  # and bundled engine execute only after the Apple secrets and throwaway
+  # keychain are gone from the job boundary.
+  verify-macos-signed:
+    needs: [preflight, sign-macos]
+    runs-on: macos-15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-macos-signed
+          path: signed
+      - name: Verify, install, execute, and uninstall without touching CLI state
+        run: |
+          set -euo pipefail
+          dmg="$(find signed -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          [ -n "$dmg" ] || { echo '::error::signed macOS DMG is missing'; exit 1; }
+          codesign --verify --verbose=2 "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl -a -vvv -t open --context context:primary-signature "$dmg"
+
+          mountpoint="$RUNNER_TEMP/connect-desktop-mounted"
+          mkdir -p "$mountpoint"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "$dmg"
+          install_root="$RUNNER_TEMP/connect-desktop-installed"
+          existing_home="$RUNNER_TEMP/connect-desktop-existing-cli-home"
+          state="$existing_home/.anyray/profiles/default.json"
+          scheduler="$existing_home/Library/LaunchAgents/ai.anyray.connect.refresh.plist"
+          autostart="$existing_home/Library/LaunchAgents/ai.anyray.connect-tray.plist"
+          mkdir -p "$install_root" "$(dirname "$state")" "$(dirname "$scheduler")"
+          app_pid=''
+          owns_autostart=false
+          cleanup() {
+            if [ -n "$app_pid" ] && kill -0 "$app_pid" >/dev/null 2>&1; then
+              kill -9 "$app_pid" >/dev/null 2>&1 || true
+              wait "$app_pid" >/dev/null 2>&1 || true
+            fi
+            if [ "$owns_autostart" = true ]; then rm -f "$autostart"; fi
+            rm -rf "$install_root/Anyray Connect.app"
+            hdiutil detach "$mountpoint" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          [ ! -e "$autostart" ] || {
+            echo '::error::test-owned desktop autostart plist already exists'
+            exit 1
+          }
+          owns_autostart=true
+          printf '%s\n' '{"profile":"existing-cli-sentinel"}' > "$state"
+          printf '%s\n' '<plist><dict><key>Label</key><string>existing-scheduler-sentinel</string></dict></plist>' > "$scheduler"
+          state_before="$(shasum -a 256 "$state")"
+          scheduler_before="$(shasum -a 256 "$scheduler")"
+          app="$(find "$mountpoint" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          [ -n "$app" ] || { echo '::error::signed DMG contains no .app'; exit 1; }
+          engine="$app/Contents/MacOS/anyray-connect"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --verify --strict --verbose=2 "$engine"
+          codesign_details="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          printf '%s\n' "$codesign_details" | grep -Fxq 'TeamIdentifier=V53XMA78UF'
+          printf '%s\n' "$codesign_details" | grep -Fxq 'Identifier=ai.anyray.connect-tray'
+          spctl -a -vvv -t exec "$app"
+          lipo -archs "$engine" | grep -q arm64
+          lipo -archs "$engine" | grep -q x86_64
+
+          installed_app="$install_root/Anyray Connect.app"
+          ditto "$app" "$installed_app"
+          installed_engine="$installed_app/Contents/MacOS/anyray-connect"
+          installed_main="$(find "$installed_app/Contents/MacOS" \
+            -maxdepth 1 -type f ! -name anyray-connect -print -quit)"
+          test -x "$installed_engine"
+          test -x "$installed_main"
+          codesign --verify --deep --strict --verbose=2 "$installed_app"
+          codesign --verify --strict --verbose=2 "$installed_engine"
+          HOME="$existing_home" "$installed_engine" --version > "$RUNNER_TEMP/connect-desktop-version.txt"
+          test "$(head -1 "$RUNNER_TEMP/connect-desktop-version.txt")" = "anyray-connect $VERSION"
+
+          HOME="$existing_home" "$installed_main" \
+            > "$RUNNER_TEMP/connect-desktop-main.log" 2>&1 &
+          app_pid=$!
+          for _ in $(seq 1 30); do
+            [ -f "$autostart" ] && break
+            kill -0 "$app_pid" >/dev/null 2>&1 || {
+              echo '::error::installed macOS tray exited before creating autostart state'
+              exit 1
+            }
+            sleep 1
+          done
+          [ -f "$autostart" ] || {
+            echo '::error::installed macOS tray did not create its LaunchAgent within 30 seconds'
+            exit 1
+          }
+          plutil -lint "$autostart"
+          test "$(plutil -extract Label raw -o - "$autostart")" = 'ai.anyray.connect-tray'
+          plutil -p "$autostart" | grep -Fq "$installed_main"
+          kill -9 "$app_pid"
+          wait "$app_pid" >/dev/null 2>&1 || true
+          app_pid=''
+
+          test "$(shasum -a 256 "$state")" = "$state_before"
+          test "$(shasum -a 256 "$scheduler")" = "$scheduler_before"
+
+          # A DMG install is a copy into Applications; uninstall is removing
+          # only that app bundle. The test-owned LaunchAgent is cleaned by the
+          # trap, independently of uninstall. Use a runner-temporary
+          # Applications analogue so the smoke does not mutate /Applications.
+          rm -rf "$installed_app"
+          test ! -e "$installed_app"
+
+  teardown-mac:
+    needs: sign-macos
+    if: ${{ always() }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          aws-region: eu-central-1
+      - run: ./scripts/mac-fleet.sh down
+
+  build-windows-unsigned:
+    needs: preflight
+    runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TARGET_TRIPLE: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Mint a short-lived read-only token for the private monorepo
+        id: monorepo-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.MONOREPO_READ_APP_ID }}
+          private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
+          owner: anyrayHQ
+          repositories: monorepo
+          permission-contents: read
+      - name: Checkout and gate the exact reviewed private source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: anyrayHQ/monorepo
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          token: ${{ steps.monorepo-token.outputs.token }}
+          path: private-source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+      - name: Gate source SHA, origin/main ancestry, versions, and externalBin
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: >-
+          node scripts/verify-connect-desktop-source.mjs
+          private-source
+          "$env:EXPECTED_VERSION"
+          "$env:EXPECTED_SOURCE_SHA"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build and stage the matching Windows engine
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          corepack enable
+          corepack pnpm -C private-source install --frozen-lockfile --ignore-scripts
+          corepack pnpm -C private-source --filter anyray-connect build
+          New-Item -ItemType Directory -Force -Path engine | Out-Null
+          bun build --compile --minify '--compile-exec-argv=--use-system-ca' `
+            --target=bun-windows-x64 private-source/connect/dist/index.js `
+            --outfile engine/anyray-connect-windows-x64.exe
+          Push-Location private-source
+          node scripts/stage-connect-tray-engine.mjs `
+            $env:TARGET_TRIPLE `
+            "$env:GITHUB_WORKSPACE/engine/anyray-connect-windows-x64.exe"
+          Pop-Location
+
+      - name: Compile the unsigned Windows app executable
+        shell: pwsh
+        env:
+          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add $env:TARGET_TRIPLE
+          cargo install tauri-cli --version "=$env:TAURI_CLI_VERSION" --locked
+          Push-Location private-source/connect-tray/src-tauri
+          cargo tauri build --target $env:TARGET_TRIPLE --no-bundle --ci -- --locked
+          Pop-Location
+          $target = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release"
+          $main = Join-Path $target 'connect-tray.exe'
+          $engine = "private-source/connect-tray/src-tauri/binaries/anyray-connect-$env:TARGET_TRIPLE.exe"
+          if (-not (Test-Path $main)) { throw 'Tauri main Windows executable is missing' }
+          if (-not (Test-Path $engine)) { throw 'Tauri Windows engine sidecar is missing' }
+          $line = (& $engine --version | Select-Object -First 1)
+          if ($line -ne "anyray-connect $env:VERSION") { throw "engine version mismatch: $line" }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item $main out/anyray-connect-tray-windows-x64.exe
+          Copy-Item $engine out/anyray-connect-engine-windows-x64.exe
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-windows-inner-unsigned
+          path: out/*.exe
+          if-no-files-found: error
+
+  sign-windows-inner:
+    needs: [preflight, build-windows-unsigned]
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+      AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-windows-inner-unsigned
+          path: out
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Fetch pinned jsign and Microsoft trust anchor
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
+            "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
+          echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/ms-root.crt" \
+            'https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt'
+          echo "5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270  $RUNNER_TEMP/ms-root.crt" | sha256sum -c -
+          openssl x509 -inform DER -in "$RUNNER_TEMP/ms-root.crt" -out "$RUNNER_TEMP/ms-root.pem"
+      - name: Authenticode-sign and independently verify both inner executables
+        env:
+          JSIGN_JAR: ${{ runner.temp }}/jsign.jar
+        run: |
+          set -euo pipefail
+          for exe in out/*.exe; do
+            ./scripts/azure-artifact-sign.sh "$exe" 'Anyray Connect Desktop' 'https://anyray.ai'
+            python3 scripts/verify-authenticode.py "$exe" \
+              --ca-file "$RUNNER_TEMP/ms-root.pem" \
+              --expect-publisher 'Othentic Labs LTD'
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-windows-inner-signed
+          path: out/*.exe
+          if-no-files-found: error
+
+  bundle-windows-unsigned:
+    needs: [preflight, sign-windows-inner]
+    runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TARGET_TRIPLE: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Mint a short-lived read-only token for the private monorepo
+        id: monorepo-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.MONOREPO_READ_APP_ID }}
+          private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
+          owner: anyrayHQ
+          repositories: monorepo
+          permission-contents: read
+      - name: Checkout and gate the exact reviewed private source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: anyrayHQ/monorepo
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          token: ${{ steps.monorepo-token.outputs.token }}
+          path: private-source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+      - name: Gate source SHA, origin/main ancestry, versions, and externalBin
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: >-
+          node scripts/verify-connect-desktop-source.mjs
+          private-source
+          "$env:EXPECTED_VERSION"
+          "$env:EXPECTED_SOURCE_SHA"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-windows-inner-signed
+          path: signed-inner
+      - name: Restore the signed inner executables
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location private-source
+          node scripts/stage-connect-tray-engine.mjs `
+            $env:TARGET_TRIPLE `
+            "$env:GITHUB_WORKSPACE/signed-inner/anyray-connect-engine-windows-x64.exe"
+          Pop-Location
+          $target = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release"
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          Copy-Item signed-inner/anyray-connect-tray-windows-x64.exe "$target/connect-tray.exe"
+          ./scripts/verify-authenticode-windows.ps1 -Path "$target/connect-tray.exe"
+          ./scripts/verify-authenticode-windows.ps1 `
+            -Path "private-source/connect-tray/src-tauri/binaries/anyray-connect-$env:TARGET_TRIPLE.exe"
+
+      - name: Bundle the signed inner executables into an unsigned MSI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          cargo install tauri-cli --version "=$env:TAURI_CLI_VERSION" --locked
+          $main = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release/connect-tray.exe"
+          $before = (Get-FileHash $main -Algorithm SHA256).Hash
+          Push-Location private-source/connect-tray/src-tauri
+          cargo tauri bundle --target $env:TARGET_TRIPLE --bundles msi `
+            --ci --no-sign
+          Pop-Location
+          $after = (Get-FileHash $main -Algorithm SHA256).Hash
+          if ($after -ne $before) { throw 'Tauri bundle rewrote the already-signed main executable' }
+          $installer = Get-ChildItem `
+            "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release/bundle/msi" `
+            -Filter '*.msi' | Select-Object -First 1
+          if (-not $installer) { throw 'Tauri produced no MSI installer' }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item $installer.FullName `
+            "out/anyray-connect-desktop-$env:VERSION-windows-x64.msi"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-windows-installer-unsigned
+          path: out/*.msi
+          if-no-files-found: error
+
+  sign-windows-installer:
+    needs: [preflight, bundle-windows-unsigned]
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+      AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-windows-installer-unsigned
+          path: out
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Fetch pinned jsign and Microsoft trust anchor
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
+            "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
+          echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/ms-root.crt" \
+            'https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt'
+          echo "5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270  $RUNNER_TEMP/ms-root.crt" | sha256sum -c -
+          openssl x509 -inform DER -in "$RUNNER_TEMP/ms-root.crt" -out "$RUNNER_TEMP/ms-root.pem"
+      - name: Authenticode-sign and independently verify the MSI installer
+        env:
+          JSIGN_JAR: ${{ runner.temp }}/jsign.jar
+        run: |
+          set -euo pipefail
+          installer="$(find out -maxdepth 1 -type f -name '*.msi' -print -quit)"
+          [ -n "$installer" ] || { echo '::error::MSI installer is missing'; exit 1; }
+          ./scripts/azure-artifact-sign.sh "$installer" 'Anyray Connect Desktop' 'https://anyray.ai'
+          python3 scripts/verify-authenticode.py "$installer" \
+            --ca-file "$RUNNER_TEMP/ms-root.pem" \
+            --expect-publisher 'Othentic Labs LTD'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-windows-installer-signed
+          path: out/*.msi
+          if-no-files-found: error
+
+  verify-windows-signatures:
+    needs: [preflight, sign-windows-inner, sign-windows-installer]
+    runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-windows-inner-signed
+          path: inner
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-windows-installer-signed
+          path: installer
+      - name: Verify, install, execute, and uninstall without touching CLI state
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inner = @(Get-ChildItem inner -Filter '*.exe')
+          $installers = @(Get-ChildItem installer -Filter '*.msi')
+          if ($inner.Count -ne 2) { throw "expected two signed inner executables, found $($inner.Count)" }
+          if ($installers.Count -ne 1) { throw "expected one signed MSI, found $($installers.Count)" }
+          $inner | ForEach-Object {
+            ./scripts/verify-authenticode-windows.ps1 -Path $_.FullName
+          }
+          $installers | ForEach-Object {
+            ./scripts/verify-authenticode-windows.ps1 -Path $_.FullName
+          }
+          $engine = Resolve-Path 'inner/anyray-connect-engine-windows-x64.exe'
+          $line = (& $engine --version | Select-Object -First 1)
+          if ($line -ne "anyray-connect $env:VERSION") { throw "signed engine version mismatch: $line" }
+
+          $existingHome = Join-Path $env:RUNNER_TEMP 'connect-desktop-existing-cli-home'
+          $state = Join-Path $existingHome '.anyray\profiles\default.json'
+          $scheduler = Join-Path $existingHome 'AppData\Roaming\Anyray\anyray-connect-refresh.scheduler-sentinel'
+          New-Item -ItemType Directory -Force -Path (Split-Path $state),(Split-Path $scheduler) | Out-Null
+          Set-Content -NoNewline -Path $state -Value '{"profile":"existing-cli-sentinel"}'
+          Set-Content -NoNewline -Path $scheduler -Value 'existing-scheduler-sentinel'
+          $stateBefore = (Get-FileHash $state -Algorithm SHA256).Hash
+          $schedulerBefore = (Get-FileHash $scheduler -Algorithm SHA256).Hash
+          $env:HOME = $existingHome
+          $env:USERPROFILE = $existingHome
+          $env:APPDATA = Join-Path $existingHome 'AppData\Roaming'
+          $env:LOCALAPPDATA = Join-Path $existingHome 'AppData\Local'
+
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $runName = 'ai.anyray.connect-tray'
+          if (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue) {
+            throw "test-owned desktop autostart registry value already exists: $runName"
+          }
+
+          $msi = $installers[0].FullName
+          $installDir = Join-Path $env:RUNNER_TEMP 'connect-desktop-installed'
+          $log = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi.log'
+          $installed = $false
+          $appProcess = $null
+          try {
+            $proc = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+              '/i', "`"$msi`"", '/qn', '/norestart',
+              "INSTALLDIR=`"$installDir`"", "/L*v", "`"$log`""
+            )
+            if ($proc.ExitCode -notin 0,3010) {
+              Get-Content $log -Tail 80 -ErrorAction SilentlyContinue
+              throw "MSI install failed with exit $($proc.ExitCode)"
+            }
+            $installed = $true
+            $installedEngine = Get-ChildItem $installDir -Recurse -Filter 'anyray-connect.exe' |
+              Select-Object -First 1
+            $installedMain = Get-ChildItem $installDir -Recurse -Filter 'connect-tray.exe' |
+              Select-Object -First 1
+            if (-not $installedEngine) { throw 'installed MSI has no bundled anyray-connect.exe' }
+            if (-not $installedMain) { throw 'installed MSI has no connect-tray.exe' }
+            ./scripts/verify-authenticode-windows.ps1 -Path $installedEngine.FullName
+            ./scripts/verify-authenticode-windows.ps1 -Path $installedMain.FullName
+            $installedVersion = (& $installedEngine.FullName --version | Select-Object -First 1)
+            if ($installedVersion -ne "anyray-connect $env:VERSION") {
+              throw "installed engine version mismatch: $installedVersion"
+            }
+
+            $appProcess = Start-Process -FilePath $installedMain.FullName -PassThru
+            $runValue = $null
+            foreach ($attempt in 1..30) {
+              if ($appProcess.HasExited) {
+                throw 'installed Windows tray exited before creating autostart state'
+              }
+              $runValue = Get-ItemPropertyValue -Path $runKey -Name $runName `
+                -ErrorAction SilentlyContinue
+              if ($null -ne $runValue) { break }
+              Start-Sleep -Seconds 1
+              $appProcess.Refresh()
+            }
+            if ($null -eq $runValue) {
+              throw 'installed Windows tray did not create its HKCU Run value within 30 seconds'
+            }
+            if ($runValue.IndexOf($installedMain.FullName, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+              throw "desktop autostart value does not contain installed main path: $runValue"
+            }
+            Stop-Process -Id $appProcess.Id -Force
+            Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
+            $appProcess = $null
+
+            if ((Get-FileHash $state -Algorithm SHA256).Hash -ne $stateBefore) {
+              throw 'running the installed tray changed existing CLI state'
+            }
+            if ((Get-FileHash $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
+              throw 'running the installed tray changed the existing scheduler sentinel'
+            }
+          }
+          finally {
+            if ($null -ne $appProcess -and -not $appProcess.HasExited) {
+              Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+              Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
+            }
+            # The tray owns this exact test-created Run value; MSI uninstall
+            # is not expected to remove per-user autostart state.
+            Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+            if ($installed) {
+              $remove = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+                '/x', "`"$msi`"", '/qn', '/norestart'
+              )
+              if ($remove.ExitCode -notin 0,3010) {
+                throw "MSI uninstall failed with exit $($remove.ExitCode)"
+              }
+            }
+          }
+          if (Get-ChildItem $installDir -Recurse -Include 'connect-tray.exe','anyray-connect.exe' -ErrorAction SilentlyContinue) {
+            throw 'MSI uninstall left a desktop executable behind'
+          }
+          if ((Get-FileHash $state -Algorithm SHA256).Hash -ne $stateBefore) {
+            throw 'MSI install/uninstall changed existing CLI state'
+          }
+          if ((Get-FileHash $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
+            throw 'MSI install/uninstall changed the existing scheduler sentinel'
+          }
+
+  # A native Ubuntu runner is required here. The persistent install CodeBuild
+  # runner is Amazon Linux and has neither webkit2gtk-4.1 nor a compatible
+  # package toolchain. Hosted-runner billing (or an equivalent Ubuntu x64
+  # self-hosted runner) is an explicit infrastructure prerequisite.
+  build-linux-unsigned:
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TARGET_TRIPLE: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Mint a short-lived read-only token for the private monorepo
+        id: monorepo-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.MONOREPO_READ_APP_ID }}
+          private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
+          owner: anyrayHQ
+          repositories: monorepo
+          permission-contents: read
+      - name: Checkout and gate the exact reviewed private source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: anyrayHQ/monorepo
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          token: ${{ steps.monorepo-token.outputs.token }}
+          path: private-source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+      - name: Gate source SHA, origin/main ancestry, versions, and externalBin
+        env:
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: >-
+          node scripts/verify-connect-desktop-source.mjs
+          private-source
+          "$EXPECTED_VERSION"
+          "$EXPECTED_SOURCE_SHA"
+      - name: Install native Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev build-essential libssl-dev libxdo-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf rpm
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Build and stage the matching Linux engine
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack pnpm -C private-source install --frozen-lockfile --ignore-scripts
+          corepack pnpm -C private-source --filter anyray-connect build
+          mkdir -p engine
+          bun build --compile --minify --compile-exec-argv="--use-system-ca" \
+            --target=bun-linux-x64 private-source/connect/dist/index.js \
+            --outfile engine/anyray-connect-linux-x64
+          (
+            cd private-source
+            node scripts/stage-connect-tray-engine.mjs \
+              "$TARGET_TRIPLE" \
+              "$GITHUB_WORKSPACE/engine/anyray-connect-linux-x64"
+          )
+      - name: Compile the raw Linux app executable
+        env:
+          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add "$TARGET_TRIPLE"
+          cargo install tauri-cli --version "=${TAURI_CLI_VERSION}" --locked
+          (
+            cd private-source/connect-tray/src-tauri
+            cargo tauri build --target "$TARGET_TRIPLE" --no-bundle --ci -- --locked
+          )
+          target="private-source/connect-tray/src-tauri/target/$TARGET_TRIPLE/release"
+          main="$target/connect-tray"
+          engine="private-source/connect-tray/src-tauri/binaries/anyray-connect-$TARGET_TRIPLE"
+          test -x "$main"
+          test -x "$engine"
+          test "$("$engine" --version | head -1)" = "anyray-connect $VERSION"
+
+      - name: Bundle native deb/rpm installers from the compiled executables
+        run: |
+          set -euo pipefail
+          target="private-source/connect-tray/src-tauri/target/$TARGET_TRIPLE/release"
+          main="$target/connect-tray"
+          engine="private-source/connect-tray/src-tauri/binaries/anyray-connect-$TARGET_TRIPLE"
+          test -x "$main"
+          test -x "$engine"
+          before="$(sha256sum "$main")"
+          (
+            cd private-source/connect-tray/src-tauri
+            cargo tauri bundle --target "$TARGET_TRIPLE" --bundles deb,rpm \
+              --ci --no-sign
+          )
+          after="$(sha256sum "$main")"
+          test "$after" = "$before" || {
+            echo '::error::Tauri bundle rewrote the raw main executable before Linux signing'
+            exit 1
+          }
+          deb="$(find "$target/bundle/deb" -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          rpm="$(find "$target/bundle/rpm" -maxdepth 1 -type f -name '*.rpm' -print -quit)"
+          test -n "$deb"
+          test -n "$rpm"
+          mkdir -p out
+          cp "$main" out/anyray-connect-tray-linux-x64
+          cp "$engine" out/anyray-connect-engine-linux-x64
+          cp "$deb" "out/anyray-connect-desktop-${VERSION}-linux-x64.deb"
+          cp "$rpm" "out/anyray-connect-desktop-${VERSION}-linux-x64.rpm"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-linux-unsigned
+          path: out/
+          if-no-files-found: error
+
+  sign-linux-artifacts:
+    needs: build-linux-unsigned
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+    env:
+      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-linux-unsigned
+          path: out
+      - name: GPG-sign Linux inner executables and outer packages
+        run: |
+          set -euo pipefail
+          mapfile -t linux_artifacts < <(find out -maxdepth 1 -type f -name '*linux*x64*' -print | sort)
+          test "${#linux_artifacts[@]}" -eq 4
+          ./scripts/sign-gpg-artifacts.sh out "${linux_artifacts[@]}"
+          mv out/anyray-endpoint-signing-key.asc \
+            out/anyray-connect-desktop-signing-key.asc
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-linux-signed
+          path: out/
+          if-no-files-found: error
+
+  smoke-linux-installers:
+    needs: [preflight, sign-linux-artifacts]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-linux-signed
+          path: signed
+      - name: Install native package runtime and inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
+            rpm xvfb xauth dbus-x11
+      - name: Verify signatures, install/uninstall deb and rpm, preserve CLI state
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/gv"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --import signed/anyray-connect-desktop-signing-key.asc
+          for artifact in \
+            signed/anyray-connect-tray-linux-x64 \
+            signed/anyray-connect-engine-linux-x64 \
+            signed/*.deb signed/*.rpm; do
+            gpg --batch --verify "${artifact}.asc" "$artifact"
+          done
+
+          existing_home="$RUNNER_TEMP/connect-desktop-existing-cli-home"
+          state="$existing_home/.anyray/profiles/default.json"
+          scheduler="$existing_home/.config/systemd/user/anyray-connect-refresh.service"
+          mkdir -p "$(dirname "$state")" "$(dirname "$scheduler")"
+          printf '%s\n' '{"profile":"existing-cli-sentinel"}' > "$state"
+          printf '%s\n' 'existing-scheduler-sentinel' > "$scheduler"
+          state_before="$(sha256sum "$state")"
+          scheduler_before="$(sha256sum "$scheduler")"
+          autostart="$existing_home/.config/autostart/ai.anyray.connect-tray.desktop"
+
+          deb="$(find signed -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          rpm="$(find signed -maxdepth 1 -type f -name '*.rpm' -print -quit)"
+          test -n "$deb"
+          test -n "$rpm"
+          deb_name="$(dpkg-deb -f "$deb" Package)"
+          rpm_name="$(rpm -qp --queryformat '%{NAME}' "$rpm")"
+          deb_installed=false
+          rpm_installed=false
+          cleanup() {
+            if [ "$rpm_installed" = true ]; then sudo rpm -e "$rpm_name" >/dev/null 2>&1 || true; fi
+            if [ "$deb_installed" = true ]; then sudo dpkg -r "$deb_name" >/dev/null 2>&1 || true; fi
+          }
+          trap cleanup EXIT
+
+          smoke_installed_tray() (
+            set -euo pipefail
+            main="$1"
+            tray_pid=''
+            owns_autostart=false
+            # Invoked by the subshell EXIT trap.
+            # shellcheck disable=SC2329
+            cleanup_tray() {
+              if [ -n "$tray_pid" ]; then
+                kill -KILL -- "-$tray_pid" >/dev/null 2>&1 || true
+                wait "$tray_pid" >/dev/null 2>&1 || true
+              fi
+              if [ "$owns_autostart" = true ]; then rm -f "$autostart"; fi
+            }
+            trap cleanup_tray EXIT
+
+            [ ! -e "$autostart" ] || {
+              echo '::error::test-owned desktop autostart file already exists'
+              exit 1
+            }
+            mkdir -p "$(dirname "$autostart")"
+            owns_autostart=true
+            HOME="$existing_home" XDG_CONFIG_HOME="$existing_home/.config" \
+              setsid dbus-run-session -- xvfb-run -a "$main" \
+              > "$RUNNER_TEMP/connect-desktop-linux-main.log" 2>&1 &
+            tray_pid=$!
+            for _ in $(seq 1 30); do
+              [ -f "$autostart" ] && break
+              kill -0 "$tray_pid" >/dev/null 2>&1 || {
+                echo '::error::installed Linux tray exited before creating autostart state'
+                exit 1
+              }
+              sleep 1
+            done
+            [ -f "$autostart" ] || {
+              echo '::error::installed Linux tray did not create its desktop entry within 30 seconds'
+              exit 1
+            }
+            grep -Fxq '[Desktop Entry]' "$autostart"
+            grep -Fq "$main" "$autostart"
+            kill -KILL -- "-$tray_pid"
+            wait "$tray_pid" >/dev/null 2>&1 || true
+            tray_pid=''
+
+            test "$(sha256sum "$state")" = "$state_before"
+            test "$(sha256sum "$scheduler")" = "$scheduler_before"
+          )
+
+          sudo dpkg -i "$deb"
+          deb_installed=true
+          deb_engine="$(dpkg -L "$deb_name" | grep -E '/anyray-connect$' | head -1)"
+          deb_main="$(dpkg -L "$deb_name" | grep -E '/connect-tray$' | head -1)"
+          test -x "$deb_engine"
+          test -x "$deb_main"
+          test "$(HOME="$existing_home" "$deb_engine" --version | head -1)" = "anyray-connect $VERSION"
+          smoke_installed_tray "$deb_main"
+          sudo dpkg -r "$deb_name"
+          deb_installed=false
+          test ! -e "$deb_engine"
+          test ! -e "$deb_main"
+          test "$(sha256sum "$state")" = "$state_before"
+          test "$(sha256sum "$scheduler")" = "$scheduler_before"
+
+          sudo rpm -i --nodeps "$rpm"
+          rpm_installed=true
+          rpm_engine="$(rpm -ql "$rpm_name" | grep -E '/anyray-connect$' | head -1)"
+          rpm_main="$(rpm -ql "$rpm_name" | grep -E '/connect-tray$' | head -1)"
+          test -x "$rpm_engine"
+          test -x "$rpm_main"
+          test "$(HOME="$existing_home" "$rpm_engine" --version | head -1)" = "anyray-connect $VERSION"
+          smoke_installed_tray "$rpm_main"
+          sudo rpm -e "$rpm_name"
+          rpm_installed=false
+          test ! -e "$rpm_engine"
+          test ! -e "$rpm_main"
+
+          test "$(sha256sum "$state")" = "$state_before"
+          test "$(sha256sum "$scheduler")" = "$scheduler_before"
+
+  assemble-signed-staging:
+    needs:
+      - preflight
+      - verify-macos-signed
+      - verify-windows-signatures
+      - smoke-linux-installers
+      - sign-linux-artifacts
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-macos-signed
+          path: platform/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-windows-inner-signed
+          path: platform/windows-inner
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-windows-installer-signed
+          path: platform/windows-installer
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-linux-signed
+          path: platform/linux
+
+      - name: Assemble signed platform outputs
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          cp platform/macos/*.dmg assets/
+          cp platform/windows-inner/*.exe assets/
+          cp platform/windows-installer/*.msi assets/
+          cp platform/linux/* assets/
+          test "$(find assets -maxdepth 1 -type f -name '*.dmg' | wc -l)" -eq 1
+          test "$(find assets -maxdepth 1 -type f -name '*windows*x64*.exe' | wc -l)" -eq 2
+          test "$(find assets -maxdepth 1 -type f -name '*windows*x64.msi' | wc -l)" -eq 1
+          test "$(find assets -maxdepth 1 -type f -name '*linux*x64*' ! -name '*.asc' | wc -l)" -eq 4
+          test "$(find assets -maxdepth 1 -type f -name '*linux*x64*.asc' | wc -l)" -eq 4
+          test -f assets/anyray-connect-desktop-signing-key.asc
+
+      - name: Generate and sign the content-addressed staging manifest
+        run: |
+          set -euo pipefail
+          (
+            cd assets
+            sha256sum -- * > SHA256SUMS
+          )
+          jq -Rn \
+            --arg version "$VERSION" \
+            --arg sourceCommit "$SOURCE_SHA" \
+            --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '[inputs | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")] as $artifacts
+             | {schemaVersion: 1, artifact: "anyray-connect-desktop-staging", version: $version, sourceCommit: $sourceCommit, createdAt: $createdAt, updater: null, artifacts: $artifacts}' \
+            assets/SHA256SUMS > assets/connect-desktop-staging.json
+          key_check="$RUNNER_TEMP/connect-desktop-public-key-check"
+          mkdir -p "$key_check"
+          ./scripts/sign-gpg-artifacts.sh "$key_check" \
+            assets/SHA256SUMS assets/connect-desktop-staging.json
+          cmp "$key_check/anyray-endpoint-signing-key.asc" \
+            assets/anyray-connect-desktop-signing-key.asc
+          export GNUPGHOME="$RUNNER_TEMP/gv"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --import assets/anyray-connect-desktop-signing-key.asc
+          gpg --batch --verify assets/SHA256SUMS.asc assets/SHA256SUMS
+          gpg --batch --verify \
+            assets/connect-desktop-staging.json.asc \
+            assets/connect-desktop-staging.json
+          test "$(jq -r .version assets/connect-desktop-staging.json)" = "$VERSION"
+          test "$(jq -r .sourceCommit assets/connect-desktop-staging.json)" = "$SOURCE_SHA"
+          test "$(jq -r .artifact assets/connect-desktop-staging.json)" = 'anyray-connect-desktop-staging'
+          test "$(jq -r .updater assets/connect-desktop-staging.json)" = 'null'
+          cat assets/SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-staging-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
+          path: assets/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-staging-prerelease:
+    needs: [preflight, assemble-signed-staging]
+    if: ${{ !inputs.dry_run }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+      SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Install pinned gh CLI
+        run: |
+          set -euo pipefail
+          V=2.76.1
+          SHA=18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
+          curl -fsSL -o /tmp/gh.tgz \
+            "https://github.com/cli/cli/releases/download/v${V}/gh_${V}_linux_amd64.tar.gz"
+          echo "${SHA}  /tmp/gh.tgz" | sha256sum -c -
+          tar -xzf /tmp/gh.tgz -C /tmp
+          install -m 0755 "/tmp/gh_${V}_linux_amd64/bin/gh" /usr/local/bin/gh
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-staging-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
+          path: assets
+      - name: Publish only an explicit staging prerelease and preserve latest
+        run: |
+          set -euo pipefail
+          tag="connect-desktop-staging-v${VERSION}-${SHORT_SHA}"
+          latest_before="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+          case "$tag" in
+            connect-desktop-staging-v*) ;;
+            *) echo "::error::refusing non-staging desktop tag: $tag"; exit 1 ;;
+          esac
+          test "$(jq -r .version assets/connect-desktop-staging.json)" = "$VERSION"
+          test "$(jq -r .sourceCommit assets/connect-desktop-staging.json)" = "$SOURCE_SHA"
+
+          if existing_prerelease="$(gh api "repos/${REPO}/releases/tags/${tag}" \
+            --jq .prerelease 2>/dev/null)"; then
+            if [ "$existing_prerelease" != true ] || [ "$latest_before" = "$tag" ]; then
+              echo "::error::refusing to replace $tag because the existing release is not an isolated prerelease"
+              exit 1
+            fi
+          fi
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" \
+            --title "Anyray Connect desktop ${VERSION} (${SHORT_SHA}, staging only)" \
+            --notes "Signed staging-only desktop installers built from private monorepo commit ${SOURCE_SHA}. This prerelease has no updater manifest and is deliberately never latest; connect.sh, connect.ps1, npm, Homebrew, Winget, and the existing CLI release lane are unchanged." \
+            --prerelease \
+            --latest=false \
+            assets/*
+
+          prerelease="$(gh api "repos/${REPO}/releases/tags/${tag}" --jq .prerelease)"
+          latest_after="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+          test "$prerelease" = true || {
+            echo "::error::$tag was not published as a prerelease"
+            exit 1
+          }
+          test "$latest_after" = "$latest_before" || {
+            echo "::error::desktop staging release changed releases/latest from $latest_before to $latest_after"
+            exit 1
+          }
+          echo "published staging prerelease $tag; releases/latest remains $latest_after"

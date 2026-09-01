@@ -425,6 +425,182 @@ package, and `APPLE_NOTARY_KEY` (base64 `.p8`) + `APPLE_NOTARY_KEY_ID` +
 `APPLE_NOTARY_ISSUER_ID` for notarization. (`APPLE_SIGNING_CERT_PEM` was set for
 the abandoned rcodesign path and is unused.)
 
+## Connect desktop installers — isolated staging lane (ANY-250)
+
+`.github/workflows/release-connect-desktop.yml` is a **manual, staging-only**
+release lane for the self-contained Tauri desktop app. It is intentionally a
+separate workflow from `release-connect-binaries.yml`: the CLI publisher does
+not call it, and a desktop failure cannot block an npm or CLI-binary release.
+It has no push, tag, `workflow_run`, or repository-dispatch trigger.
+
+The dispatch has exactly three inputs:
+
+| Input | Contract |
+| --- | --- |
+| `version` | Explicit plain `x.y.z`; `latest` and moving ranges are rejected. |
+| `source_sha` | Exact lowercase 40-hex commit in the private `anyrayHQ/monorepo`; it must be reachable from the fetched `origin/main`. The workflow never checks out moving `main`. |
+| `dry_run` | Defaults to `true`. A dry run retains signed assets only as a workflow artifact. `false` may create only `connect-desktop-staging-v<version>-<short-sha>`, marked prerelease and `--latest=false`. |
+
+There is deliberately no stable/public selector. Before a staging prerelease is
+created, the workflow records `releases/latest`; after publication it requires
+that value to be unchanged. The lane never writes `connect-update.json`, a
+Tauri updater manifest, `SHA256SUMS` in an existing CLI release, npm, Homebrew,
+Winget, `connect.sh`, `connect.ps1`, or any current install path. The signed
+manifest explicitly carries `"updater": null` until updater design is a
+separate reviewed change.
+
+Invoke it from Actions → **Release Anyray Connect desktop (staging only)**.
+The workflow must itself be dispatched from the install repository's `main`
+branch; its first job rejects any other workflow ref before preflight reads
+secrets or any job fetches private source.
+Paste the Connect version and the full private-monorepo commit, leave `dry_run`
+checked for the first rehearsal, and inspect the retained
+`connect-desktop-staging-assets-<version>-<short-sha>` artifact. Unchecking it
+does not make the release public/stable; it only creates the explicit staging
+prerelease described above.
+
+The retained/published set contains one signed/notarized universal macOS DMG,
+one Authenticode-signed Windows x64 MSI, the two signed Windows inner
+executables for audit, Linux x64 deb/rpm packages plus the two raw inner
+executables, detached GPG signatures and public key, signed `SHA256SUMS`, and a
+signed `connect-desktop-staging.json` binding them to `version` and
+`source_sha`.
+
+### Private source and version contract
+
+Each native job that needs source mints its own short-lived GitHub App token,
+restricted to `contents: read` on **only** `anyrayHQ/monorepo`. Checkout uses
+the explicit SHA, `fetch-depth: 0` (so ancestry can be proven), and
+`persist-credentials: false`. `scripts/verify-connect-desktop-source.mjs` then
+requires all of the following before source-controlled build code executes:
+
+- checked-out `HEAD` equals `source_sha`;
+- that commit is an ancestor of the fetched `refs/remotes/origin/main`;
+- `connect/package.json`, the tray's `Cargo.toml`, `Cargo.lock`, and
+  `tauri.conf.json` all equal `version`;
+- Tauri's `bundle.externalBin` is exactly `binaries/anyray-connect`.
+
+The private checkout is local to that native job and is **never uploaded**.
+Only compiled executables and packages cross a job boundary. Provision a GitHub
+App installed only on the private monorepo, grant it repository Contents
+read-only, and set these install-repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `MONOREPO_READ_APP_ID` | The read-only GitHub App id. |
+| `MONOREPO_READ_APP_PRIVATE_KEY` | Its PEM private key. GitHub exchanges it for a short-lived installation token and revokes that token in the action post-step. |
+
+The private commit must already contain
+`scripts/stage-connect-tray-engine.mjs`. The workflow builds the CLI engine from
+that same checkout and lets the script enforce the app/engine version contract
+while staging the Tauri external binary:
+
+| Desktop target | Required staged engine |
+| --- | --- |
+| macOS universal | `connect-tray/src-tauri/binaries/anyray-connect-universal-apple-darwin` (Bun arm64 + x64 joined with `lipo`) |
+| Windows x64 | `connect-tray/src-tauri/binaries/anyray-connect-x86_64-pc-windows-msvc.exe` |
+| Linux x64 | `connect-tray/src-tauri/binaries/anyray-connect-x86_64-unknown-linux-gnu` |
+
+Only the three native Tauri compilation steps receive
+`ANYRAY_CONNECT_DESKTOP_DISTRIBUTION=staging`. Unsigned monorepo CI/local builds
+and the Windows bundle-only job do not receive the distribution marker.
+
+### Native build, signing, and verification order
+
+Compilation jobs receive the private-source credential but **no signing
+credentials**. Signing jobs download compiled artifacts and receive no private
+source or GitHub App credential:
+
+- **macOS:** build one unsigned universal `.app` on hosted `macos-15`. Only
+  after that succeeds does `provision-mac` allocate the ephemeral CodeBuild Mac.
+  The artifact-only `sign-macos` job signs the bundled Bun engine (hardened
+  runtime + minimal `allow-jit` entitlement), signs the outer app, requires
+  Apple Team ID `V53XMA78UF` and bundle identifier
+  `ai.anyray.connect-tray`, notarizes and staples it, then creates, signs,
+  notarizes, and staples one universal `.dmg`. A credential-free hosted
+  `macos-15` job mounts and exercises the final DMG. Teardown follows the
+  signing job with `always()`, so verification never holds the paid fleet.
+- **Windows x64:** compile the raw Tauri main executable and bundled engine on
+  Windows; sign and verify both through the existing Azure Artifact Signing
+  script on Linux; restore those signed bytes on Windows and create the MSI
+  from the already-built files (with a before/after hash guard); sign the outer
+  MSI through Azure; finally verify the two inner executables and MSI with
+  Windows' `Get-AuthenticodeSignature` trust stack, including publisher and
+  timestamp.
+- **Linux x64:** compile the raw Tauri main executable and engine, then build
+  native `.deb` and `.rpm` packages from those already-built files (with the
+  same before/after hash guard). A separate artifact-only signing job uses the
+  existing release GPG key to detach-sign both inner executables and both outer
+  packages and exports the public key. Final assembly uses the same key and
+  checked-in signer to sign `SHA256SUMS` plus
+  `connect-desktop-staging.json`.
+
+After signing, credential-free native jobs exercise the actual install/remove
+path before assembly can run. In addition to checking the bundled engine
+version, every platform launches the **installed Tauri main executable**, waits
+up to 30 seconds for its exact stable autostart artifact, validates that artifact
+points at the installed main executable, force-kills the tray, and then performs
+the real uninstall:
+
+- macOS copies the app from the DMG into a temporary Applications analogue and
+  validates `$HOME/Library/LaunchAgents/ai.anyray.connect-tray.plist`, including
+  its `Label` and installed executable path;
+- Windows silently installs the MSI into a temporary `INSTALLDIR` and validates
+  the `ai.anyray.connect-tray` value under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
+- Ubuntu installs and tests both the deb and rpm under Xvfb/DBus and validates
+  `$HOME/.config/autostart/ai.anyray.connect-tray.desktop`, including its
+  `[Desktop Entry]` header and installed executable path.
+
+Each smoke fails if its test-owned autostart artifact pre-exists and removes only
+that exact artifact in its trap/finally cleanup; installer uninstall is not
+claimed to remove per-user autostart state. Every smoke also pre-creates and
+hashes representative Connect profile state plus an existing refresh-scheduler
+sentinel, and requires both hashes to remain unchanged after running and
+uninstalling the desktop app.
+
+`SHA256SUMS` is generated only after Apple/Azure signing, because those signers
+rewrite their artifacts. The staging manifest binds every checksum to the
+explicit Connect version and private source commit.
+
+### Required infrastructure and first-run validation
+
+The existing Apple Application certificate/password and notarization trio,
+four Azure variables, Linux GPG key/passphrase, and Mac-fleet role listed
+earlier in this document are mandatory; preflight fails closed and names
+anything absent. (A DMG uses the Application identity, so this lane does not
+consume the separate Apple Installer certificate used by `.pkg`.) The lane also
+needs the two GitHub App secrets above. Do not turn a missing credential into
+an unsigned skip.
+
+Native runner requirements are:
+
+| Platform/job | Runner |
+| --- | --- |
+| macOS build | GitHub-hosted `macos-15`; adds both Apple Rust targets and produces the unsigned universal app. |
+| macOS signing | Existing on-demand `codebuild-anyray-install-runner-mac-…` MAC_ARM fleet; artifact-only, with no private source checkout. |
+| macOS signed smoke | GitHub-hosted `macos-15`; credential-free. |
+| Windows build/bundle/native verify | Existing `codebuild-anyray-install-runner-win-…` Windows x64 project. |
+| Linux build/native smoke | GitHub-hosted `ubuntu-24.04`, for webkit2gtk 4.1, Xvfb/DBus, and native deb/rpm tooling. |
+| Azure/GPG/assembly/publish | Existing `codebuild-anyray-install-runner-…` Linux project. |
+
+The two GitHub App secret names above now exist in the install repository. The
+first dry run must still validate the external side of that trust boundary: the
+App is installed on `anyrayHQ/monorepo` and its installation grant is repository
+Contents read-only.
+
+GitHub-hosted runner access is required for both `macos-15` and
+`ubuntu-24.04`. The persistent install runner is Amazon Linux and cannot
+substitute for either native build environment. Confirm hosted-runner billing
+before the first dry run, or deliberately provision equivalent self-hosted
+runners and review the label changes.
+
+The Mac universal build, Windows MSI bundling, and final signing sequence also
+need one full credentialed dry-run rehearsal on the real runners. Local static
+checks cannot emulate Developer ID notarization, Azure-issued signatures,
+Windows native trust verification, or Tauri's platform bundlers; do not publish
+the staging prerelease until that dry run is green.
+
 ## Trusted-channel packages (winget · Homebrew)
 
 Alongside the raw binaries and the MDM `.pkg`/`.deb`/`.rpm`, each production

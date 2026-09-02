@@ -130,13 +130,14 @@ services:
       # whole plane stays dormant until a gateway that reads it ships — so this
       # line is safe ahead of that gateway. A literal, like ANYRAY_OPTIMIZER_URL.
       ANYRAY_ENDPOINT_CONTROL_URL: http://endpoint-control:8090
-      # In-stack address of the org MCP hub (ANY-289), same optional shape:
-      # a gateway that predates the hub ignores it, and /mcp/org answers 404
-      # until a gateway that reads it ships. The gateway mints the hub's
-      # bearer tokens with the hub's signing key, which the mcp-hub service
-      # below sets to ANYRAY_ADMIN_TOKEN (paired key, never a second mint);
-      # the override is the same value on both services or nothing.
-      ANYRAY_MCP_HUB_URL: http://mcp-hub:4444
+      # In-stack address of the org MCP hub (ANY-289), opt-in by profile:
+      # unset = the lane is absent and /mcp/org answers 404; set it to
+      # http://mcp-hub:4444 together with `docker compose --profile mcp-hub`.
+      # A gateway that predates the hub ignores it. The gateway mints the
+      # hub's bearer tokens with the hub's signing key, which the mcp-hub
+      # service below sets to ANYRAY_ADMIN_TOKEN (paired key, never a second
+      # mint); the override is the same value on both services or nothing.
+      ANYRAY_MCP_HUB_URL: ${ANYRAY_MCP_HUB_URL:-}
       ANYRAY_MCP_HUB_JWT_SECRET: ${ANYRAY_MCP_HUB_JWT_SECRET:-}
     volumes:
       - anyray_gateway_data:/data
@@ -307,9 +308,15 @@ services:
   # (whose error_message quotes raw upstream error bodies) from ever being
   # written; observability, request logging and audit rows are off by default
   # and pinned off here anyway. UI and admin UI stay off.
+  #
+  # Opt-in by profile in this release: a new container cannot ride an
+  # image-only (soft) update, and a default-on service would turn every
+  # install's next release into a hard one. `docker compose --profile mcp-hub
+  # up -d` with ANYRAY_MCP_HUB_URL=http://mcp-hub:4444 on the gateway.
   mcp-hub:
     logging: *default-logging
     image: "${ANYRAY_MCP_HUB_IMAGE:-ghcr.io/ibm/mcp-context-forge:v1.0.9}"
+    profiles: ["mcp-hub"]
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:4444/health || exit 1"]
@@ -325,8 +332,11 @@ services:
       # admin token (paired key, same value on both services), or the
       # optional override. 32+ characters or the hub refuses to boot.
       JWT_SECRET_KEY: ${ANYRAY_MCP_HUB_JWT_SECRET:-${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}}
-      # The hub's own at-rest key (connector OAuth tokens); hub-only secret.
-      AUTH_ENCRYPTION_SECRET: ${ANYRAY_MCP_HUB_ENCRYPTION_SECRET:?run ./setup.sh first}
+      # The hub's own at-rest key (connector OAuth tokens); hub-only secret,
+      # minted by setup.sh. A `:-` default, not `:?`: compose interpolates a
+      # profiled service even when the profile is off, and an install that
+      # never enables the hub must keep booting without this var.
+      AUTH_ENCRYPTION_SECRET: ${ANYRAY_MCP_HUB_ENCRYPTION_SECRET:-}
       # Keep in lockstep with MCP_HUB_ADMIN_EMAIL in the gateway
       # (gateway/src/services/mcpHub.ts): every token the gateway mints is
       # for this address, the only one the hub honors on its MCP paths. The

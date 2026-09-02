@@ -354,11 +354,11 @@ services:
       LOG_REQUESTS: "false"
       AUDIT_TRAIL_ENABLED: "false"
       LOG_LEVEL: ERROR
-      # Connectors register with auth_type none in this release; the hub's
-      # /oauth/* consent flow is a follow-up, so the public domain is set for
-      # that day (derived like ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL) and unused
-      # until then.
-      APP_DOMAIN: ${ANYRAY_PUBLIC_DOMAIN:+https://${ANYRAY_PUBLIC_DOMAIN:-}}
+      # No APP_DOMAIN: connectors register with auth_type none in this
+      # release, so the hub's /oauth/* consent flow (the only reader of that
+      # setting) is a follow-up. An empty value would stop the hub booting,
+      # which is what a `${ANYRAY_PUBLIC_DOMAIN:+…}` derivation renders on a
+      # private deployment; the image's own default stands until then.
       DATABASE_URL: sqlite:////data/mcp.db
     volumes:
       - anyray_mcp_hub_data:/data

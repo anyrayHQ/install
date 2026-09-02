@@ -130,6 +130,14 @@ services:
       # whole plane stays dormant until a gateway that reads it ships — so this
       # line is safe ahead of that gateway. A literal, like ANYRAY_OPTIMIZER_URL.
       ANYRAY_ENDPOINT_CONTROL_URL: http://endpoint-control:8090
+      # In-stack address of the org MCP hub (ANY-289), same optional shape:
+      # a gateway that predates the hub ignores it, and /mcp/org answers 404
+      # until a gateway that reads it ships. The gateway mints the hub's
+      # bearer tokens with the hub's signing key, which the mcp-hub service
+      # below sets to ANYRAY_ADMIN_TOKEN (paired key, never a second mint);
+      # the override is the same value on both services or nothing.
+      ANYRAY_MCP_HUB_URL: http://mcp-hub:4444
+      ANYRAY_MCP_HUB_JWT_SECRET: ${ANYRAY_MCP_HUB_JWT_SECRET:-}
     volumes:
       - anyray_gateway_data:/data
     # /livez, NOT `/`. `GET /` is the gateway's READINESS probe and a metered
@@ -287,6 +295,63 @@ services:
       timeout: 5s
       retries: 10
       start_period: 5s
+
+  # Org MCP hub (ANY-289) — an unmodified IBM ContextForge MCP Gateway that
+  # aggregates every connector the console configures into one MCP endpoint
+  # the gateway relays at /mcp/org. In-network only; the gateway is its sole
+  # client, over bearer tokens it mints itself. Not an Anyray image, so it is
+  # pinned to an upstream tag rather than ANYRAY_IMAGE_TAG and left out of
+  # the watchtower set; a bump is a deliberate edit here (matched by the
+  # monorepo's root compose). Privacy posture, verified against v1.0.9:
+  # DB_METRICS_RECORDING_ENABLED=false is what stops the tool_metrics row
+  # (whose error_message quotes raw upstream error bodies) from ever being
+  # written; observability, request logging and audit rows are off by default
+  # and pinned off here anyway. UI and admin UI stay off.
+  mcp-hub:
+    logging: *default-logging
+    image: "${ANYRAY_MCP_HUB_IMAGE:-ghcr.io/ibm/mcp-context-forge:v1.0.9}"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4444/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      # First boot runs a long migration chain on a cold volume.
+      start_period: 120s
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4444
+      # The signing key the gateway mints hub tokens with: the deployment's
+      # admin token (paired key, same value on both services), or the
+      # optional override. 32+ characters or the hub refuses to boot.
+      JWT_SECRET_KEY: ${ANYRAY_MCP_HUB_JWT_SECRET:-${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}}
+      # The hub's own at-rest key (connector OAuth tokens); hub-only secret.
+      AUTH_ENCRYPTION_SECRET: ${ANYRAY_MCP_HUB_ENCRYPTION_SECRET:?run ./setup.sh first}
+      # Keep in lockstep with MCP_HUB_ADMIN_EMAIL in the gateway
+      # (gateway/src/services/mcpHub.ts): every token the gateway mints is
+      # for this address, the only one the hub honors on its MCP paths. The
+      # password is the break-glass admin token; nothing in the stack logs in
+      # with it.
+      PLATFORM_ADMIN_EMAIL: hub-admin@anyray.ai
+      PLATFORM_ADMIN_PASSWORD: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
+      ADMIN_REQUIRE_PASSWORD_CHANGE_ON_BOOTSTRAP: "false"
+      REQUIRE_PASSWORD_CHANGE_FOR_DEFAULT_PASSWORD: "false"
+      MCPGATEWAY_UI_ENABLED: "false"
+      MCPGATEWAY_ADMIN_API_ENABLED: "false"
+      DB_METRICS_RECORDING_ENABLED: "false"
+      OBSERVABILITY_ENABLED: "false"
+      OTEL_ENABLE_OBSERVABILITY: "false"
+      LOG_REQUESTS: "false"
+      AUDIT_TRAIL_ENABLED: "false"
+      LOG_LEVEL: ERROR
+      # Connectors register with auth_type none in this release; the hub's
+      # /oauth/* consent flow is a follow-up, so the public domain is set for
+      # that day (derived like ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL) and unused
+      # until then.
+      APP_DOMAIN: ${ANYRAY_PUBLIC_DOMAIN:+https://${ANYRAY_PUBLIC_DOMAIN:-}}
+      DATABASE_URL: sqlite:////data/mcp.db
+    volumes:
+      - anyray_mcp_hub_data:/data
 
   proxy:
     logging: *default-logging
@@ -486,6 +551,7 @@ services:
 volumes:
   anyray_gateway_data:
   anyray_optimizer_data:
+  anyray_mcp_hub_data:
   anyray_postgres_data:
   anyray_caddy_data:
   anyray_caddy_config:

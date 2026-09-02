@@ -314,6 +314,12 @@ if [ "$K8S" -eq 0 ]; then
     rm -rf "$_sign_tmp"
   fi
   add_if_missing ANYRAY_CONTENT_KEY              "$(hex 32)"
+  # The org MCP hub's own at-rest key (ANY-289): encrypts the connector OAuth
+  # tokens the hub stores. Hub-only; the gateway never reads it. The hub's
+  # SIGNING key is not minted here on purpose — compose pairs it to
+  # ANYRAY_ADMIN_TOKEN on both services, the same way ANYRAY_UPDATER_TOKEN and
+  # ANYRAY_ENDPOINT_CONTROL_ADMIN_TOKEN derive, so the two can never drift.
+  add_if_missing ANYRAY_MCP_HUB_ENCRYPTION_SECRET "$(hex 32)"
   # Feeds the OPTIMIZER only — the gateway's content mode is set in the console
   # and stored in the shared database. This still governs BYO /v1/record writes
   # and attach mode, which run without a gateway.

@@ -1,4 +1,4 @@
-# Anyray — install
+# Anyray install
 
 Self-host [Anyray](https://docs.anyray.ai), the AI-spend optimizer gateway, from
 published images. This repo is the install path for every target: Docker, Kubernetes,
@@ -6,10 +6,39 @@ AWS, Google Cloud, and Railway.
 
 > Full docs and platform recipes: **https://docs.anyray.ai**
 
-## Quick start (Docker)
+## Quick start with a coding agent
 
-Grab a deployment token (`adt_…`) from [app.anyray.ai](https://app.anyray.ai)
-→ *Deployments → Connect a deployment*, then:
+Create a deployment at [app.anyray.ai](https://app.anyray.ai). Under **Install
+with your coding agent**, copy the generated prompt and paste it into Claude
+Code, Codex, or another coding agent with access to your infrastructure.
+
+```text
+Install Anyray for my organization. Open <install_url>, follow the agent instructions exactly, and continue until that URL reports status `ready`. Do not ask me for a deployment token or provider API keys, and never print, echo, or log credentials.
+```
+
+The portal fills in a one-hour, single-use `aic_` URL. It contains no durable
+deployment credential. The URL gives the agent the current Docker or Kubernetes
+runbook and reports:
+
+```text
+pending -> claimed -> preflight -> configured -> gateway_connected -> ready
+```
+
+`ready` means the local health check passed and Billing received a heartbeat
+from the newly issued deployment credential.
+
+| What | Where |
+| --- | --- |
+| **Console** | `http://<host>:3000` — sign in with the admin key `setup.sh` printed, then run the ~3-min in-console setup |
+| **Gateway** | `http://<host>:8787/v1/…` — point AI tools and SDKs here |
+
+> Keep ports 3000 and 8787 reachable from your org network only. Never expose
+> them publicly.
+
+## Manual Docker install
+
+In the portal, select **Use manual installation**. This disables the live agent
+link before the one-time deployment token appears. Then run:
 
 ```bash
 git clone https://github.com/anyrayHQ/install anyray && cd anyray
@@ -17,14 +46,7 @@ git clone https://github.com/anyrayHQ/install anyray && cd anyray
 docker compose up -d
 ```
 
-That's it. Within a minute the deployment shows as **Connected** at app.anyray.ai.
-
-| What | Where |
-| --- | --- |
-| **Console** | `http://<host>:3000` — sign in with the admin key `setup.sh` printed, then run the ~3-min in-console setup |
-| **Gateway** | `http://<host>:8787/v1/…` — point AI tools and SDKs here |
-
-> Keep ports 3000 and 8787 reachable from your org network only — never public.
+Within a minute the deployment shows as connected at app.anyray.ai.
 
 ## Add a provider key (required)
 
@@ -138,7 +160,7 @@ optimizer config from the console — your `.env` and secrets are untouched.
 ```bash
 docker compose ps           # service health
 docker compose logs <svc>   # diagnose a failing service
-./setup.sh                  # safe to re-run after the initial --connect
+./setup.sh                  # safe to re-run after the initial claim or --connect
                             # (--connect rewrites only the connect vars)
 ```
 
@@ -172,10 +194,8 @@ the UPDATE path from the currently published version, and tears it down.**
 
 Adding or materially changing an artifact? Add/extend its live lane in the same PR.
 
-## Install with an AI agent
-
-Paste [AGENT.md](./AGENT.md) into Claude Code / Codex on a machine with your infra
-access and it will drive the install for you.
+The [agent install reference](./AGENT.md) documents the prompt, progress states,
+and credential boundary.
 
 ## Releasing (maintainers)
 

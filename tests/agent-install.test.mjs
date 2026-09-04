@@ -66,7 +66,7 @@ if (args[0] === 'volume' && args[1] === 'inspect') process.exit(1);
 process.exit(0);
 `;
 
-const makeWorld = async (initialStatus) => {
+const makeWorld = async (initialStatus, activeClaimUrl = claimUrl) => {
   const root = await mkdtemp(join(tmpdir(), 'anyray-agent-install-'));
   const bin = join(root, 'bin');
   await mkdir(bin);
@@ -85,11 +85,18 @@ const makeWorld = async (initialStatus) => {
       PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
       CLAIM_TEST_ARGV: argv,
       CLAIM_TEST_READY: ready,
-      CLAIM_TEST_URL: claimUrl,
+      CLAIM_TEST_URL: activeClaimUrl,
       CLAIM_TEST_DEPLOYMENT_TOKEN: deploymentToken,
       CLAIM_TEST_INITIAL_STATUS: initialStatus,
     },
   };
+};
+
+const readYamlSecret = async (root, key) => {
+  const yaml = await readFile(join(root, 'anyray-secrets.yaml'), 'utf8');
+  const encoded = yaml.match(new RegExp(`^\\s*${key}:\\s*(\\S+)\\s*$`, 'm'))?.[1];
+  assert.ok(encoded, `${key} missing from anyray-secrets.yaml`);
+  return Buffer.from(encoded, 'base64').toString('utf8');
 };
 
 const statuses = (stdout) =>
@@ -156,6 +163,94 @@ test('setup rejects a claim from another origin before curl or credential rotati
   assert.notEqual(result.status, 0);
   assert.deepEqual(statuses(result.stdout), ['error']);
   await assert.rejects(readFile(world.argv, 'utf8'));
+});
+
+test('setup rejects a plaintext claim origin before making any request', async () => {
+  const insecureOrigin = 'http://198.51.100.42:18080';
+  const insecureClaim = `${insecureOrigin}/install/aic_synthetic_claim_for_tests`;
+  const world = await makeWorld('pending', insecureClaim);
+  const result = spawnSync(
+    setup,
+    [
+      '--claim',
+      insecureClaim,
+      '--control-plane',
+      insecureOrigin,
+      '--host',
+      'ci.example.com',
+      '--json',
+    ],
+    { cwd: world.root, env: world.env, encoding: 'utf8' }
+  );
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(statuses(result.stdout), ['error']);
+  assert.match(result.stderr, /requires an https control-plane origin/);
+  await assert.rejects(readFile(world.argv, 'utf8'));
+});
+
+test('Kubernetes claims preserve a custom Billing origin across setup and verification', async () => {
+  const controlPlane = 'https://billing.dev.example';
+  const firstClaim = `${controlPlane}/install/aic_first_synthetic_claim`;
+  const secondClaim = `${controlPlane}/install/aic_second_synthetic_claim`;
+  const world = await makeWorld('pending', firstClaim);
+  const setupArgs = (activeClaim) => [
+    '--k8s',
+    '--claim',
+    activeClaim,
+    '--control-plane',
+    controlPlane,
+    '--host',
+    'cluster.example.com',
+    '--namespace',
+    'anyray',
+    '--json',
+  ];
+
+  const firstSetup = spawnSync(setup, setupArgs(firstClaim), {
+    cwd: world.root,
+    env: world.env,
+    encoding: 'utf8',
+  });
+  assert.equal(firstSetup.status, 0, firstSetup.stderr);
+  assert.equal(
+    await readYamlSecret(world.root, 'ANYRAY_CONTROL_PLANE_URL'),
+    controlPlane
+  );
+
+  const secondSetup = spawnSync(setup, setupArgs(secondClaim), {
+    cwd: world.root,
+    env: { ...world.env, CLAIM_TEST_URL: secondClaim },
+    encoding: 'utf8',
+  });
+  assert.equal(secondSetup.status, 0, secondSetup.stderr);
+  const secretYaml = await readFile(join(world.root, 'anyray-secrets.yaml'), 'utf8');
+  assert.equal((secretYaml.match(/ANYRAY_CONTROL_PLANE_URL:/g) ?? []).length, 1);
+  assert.equal(
+    await readYamlSecret(world.root, 'ANYRAY_CONTROL_PLANE_URL'),
+    controlPlane
+  );
+
+  const scripts = join(world.root, 'scripts');
+  await mkdir(scripts);
+  const copiedVerify = join(scripts, 'verify-deploy.sh');
+  await copyFile(verify, copiedVerify);
+  await chmod(copiedVerify, 0o755);
+  const verified = spawnSync(
+    copiedVerify,
+    ['--claim', secondClaim, '--json', 'http://gateway.test:8787'],
+    {
+      cwd: world.root,
+      env: {
+        ...world.env,
+        CLAIM_TEST_URL: secondClaim,
+        CLAIM_TEST_INITIAL_STATUS: 'gateway_connected',
+      },
+      encoding: 'utf8',
+    }
+  );
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.deepEqual(statuses(verified.stdout), ['gateway_connected', 'ready']);
+  await assertSecretAbsent(verified, world.argv);
 });
 
 test('setup disables xtrace before the redeemed credential enters shell state', async () => {

@@ -1,96 +1,44 @@
 # Install Anyray with your AI agent
 
-Copy everything below the line into Claude Code / Codex / your coding agent,
-running on a machine that has access to your infrastructure.
+Create a deployment at [app.anyray.ai](https://app.anyray.ai), then copy the
+prompt under **Install with your coding agent**. Paste it into Claude Code,
+Codex, or another coding agent running where it can reach your infrastructure.
 
----
+## The prompt
 
-You are installing Anyray, a self-hosted AI-spend optimizer (gateway +
-optimizer + observability console). Docs: https://docs.anyray.ai
+```text
+Install Anyray for my organization. Open <install_url>, follow the agent instructions exactly, and continue until that URL reports status `ready`. Do not ask me for a deployment token or provider API keys, and never print, echo, or log credentials.
+```
 
-## Step 1 — Ask the operator (do not guess)
+The portal fills in `<install_url>` with a one-hour, single-use `aic_` link. The
+durable deployment credential is not part of the prompt. The installer redeems
+it on the target machine and writes it directly to `.env` or
+`anyray-secrets.yaml` without placing it in stdout, stderr, or command arguments.
 
-1. Where should Anyray run? (this machine / a remote VM with SSH — EC2, GCP,
-   Hetzner, etc. / Kubernetes / somewhere else)
-2. What hostname or IP will users reach it on? For Kubernetes, this must be the
-   external Ingress/LoadBalancer hostname, not a node IP.
-3. If Kubernetes: which namespace should Anyray run in? Use an existing
-   namespace unless the operator explicitly asks you to create one. If they want
-   the current kubectl/Helm namespace, confirm that explicitly and omit
-   `--namespace`.
-4. Their Anyray Cloud deployment token (starts with `adt_`) — they get it at
-   https://app.anyray.ai (Deployments → Connect a deployment). Gateway installs
-   require it. Only gateway-less LiteLLM attach mode uses `./setup.sh --attach`
-   without a token.
+## What to expect
 
-## Step 2 — Platform preparation (your job)
+The link serves the current runbook and reports progress through:
 
-- For Docker/VM installs, ensure the target machine has Docker Engine + Compose
-  v2 and ~2 GB RAM free.
-- For Kubernetes installs, ensure Kubernetes 1.24+, Helm 3.10+, a default
-  StorageClass or explicit chart storage classes, and access to the target
-  namespace. Do not create a namespace unless the operator approved it.
-- Ensure ports 3000 (console) and 8787 (gateway API) are reachable from the
-  org's network ONLY — e.g. a security group scoped to the office/VPN CIDR.
-  NEVER open them to 0.0.0.0/0.
-- If a DNS record is wanted, create it before installing and use it as <host>.
+```text
+pending -> claimed -> preflight -> configured -> gateway_connected -> ready
+```
 
-## Step 3 — Install (run exactly this; do not improvise)
+The agent may ask where Anyray should run, which host users will reach, and the
+existing Kubernetes namespace when applicable. It must not ask for a deployment
+token or provider API keys.
 
-On the target machine (or with DOCKER_HOST=ssh://user@<vm> from here):
+`ready` means both checks completed:
 
-    git clone https://github.com/anyrayHQ/install anyray && cd anyray
-    ./setup.sh --host <host> --connect <adt_token>
-    docker compose up -d
+- The local verifier passed gateway and admin health checks.
+- Billing received a heartbeat from the newly issued deployment credential.
 
-(If the gateway will be
-reached at a URL other than http://<host>:8787 — e.g. behind TLS or a
-load balancer — add `--gateway-url <url>` so the portal shows developers
-the right connect URL.)
+If the link expires or reports `error`, create a fresh install link for the same
+deployment in the portal and paste the new prompt.
 
-Do NOT hand-assemble compose files, edit image tags, or generate secrets
-yourself — `setup.sh` and the pinned artifacts are the only install path.
+## Safety rules
 
-For Kubernetes/Helm:
-
-    git clone https://github.com/anyrayHQ/install anyray && cd anyray
-    ./setup.sh --k8s --host <gateway-ingress-hostname> --namespace <existing-namespace> --connect <adt_token>
-    kubectl apply -n <existing-namespace> -f anyray-secrets.yaml
-    helm install anyray ./helm -f my-values.yaml --namespace <existing-namespace>
-
-(If the operator explicitly chooses the current kubectl/Helm namespace, omit
-`--namespace` and the `-n` / `--namespace` flags. Never assume `default`; ask.)
-
-## Step 4 — Verify and hand off
-
-For Docker/VM:
-
-    docker compose ps                      # all services healthy/running
-    curl -fs http://<host>:8787/           # gateway answers
-    curl -fso /dev/null http://<host>:3000/anyray-login && echo console-ok
-
-For Kubernetes:
-
-    kubectl rollout status -n <namespace> deployment/anyray-gateway
-    kubectl rollout status -n <namespace> deployment/anyray-proxy
-    curl -fsI https://<gateway-ingress-hostname>/ && echo console-ok
-
-Report to the operator: the console URL (Docker: `http://<host>:3000`;
-Kubernetes Ingress: `https://<gateway-ingress-hostname>/`), where the admin key
-lives (`ANYRAY_ADMIN_TOKEN` in `.env`, or in `anyray-secrets.yaml` for
-Kubernetes — `setup.sh` printed it once), and that the next step is the
-in-console setup (~3 min): connect a provider key, send a test request, invite
-developers. Also tell them the deployment will appear as Connected at
-https://app.anyray.ai within a minute.
-
-## Hard rules
-
-- NEVER ask for, read, or handle provider API keys (OpenAI/Anthropic/etc.) —
-  the operator enters them in the console themselves.
-- NEVER expose ports 3000/8787 publicly.
-- NEVER set the content mode to `plaintext` (console Privacy page, or
-  ANYRAY_CONTENT_MODE for the optimizer-only paths) or ANYRAY_ALLOW_PLAINTEXT=true.
-- NEVER print the contents of `.env` or `anyray-secrets.yaml` into your
-  conversation beyond confirming it exists. In particular
-  ANYRAY_PSEUDONYM_SALT is privacy-critical and must never leave the machine —
-  `setup.sh --connect` generates it locally.
+- Keep ports 3000 and 8787 private to the organization's network.
+- Do not print `.env` or `anyray-secrets.yaml`.
+- Enter provider API keys in the Anyray console after the deployment is ready.
+- Use `setup.sh` and the published install artifacts. Do not hand-build manifests
+  or change image tags during setup.

@@ -3,6 +3,7 @@
   "private": true,
   "description": "Railway Infrastructure-as-Code for the Anyray stack (.railway/railway.ts). Run `npm install` then `railway config apply`.",
   "scripts": {
+    "test:agent-install": "node --test tests/agent-install.test.mjs",
     "test:desktop-release": "node --test scripts/verify-connect-desktop-*.test.mjs"
   },
   "devDependencies": {

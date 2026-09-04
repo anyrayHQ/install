@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Anyray setup — generates stack secrets.
 # Default: Docker Compose. --k8s: Kubernetes and Helm.
-# Gateway installs require --connect <adt_token> on the first run.
+# Gateway installs use --claim <install_url> (agent path) or the legacy
+# --connect <adt_token> on the first run.
 # --attach: gateway-less LiteLLM mode; no Billing token required.
 # With --upstream <url>: point Anyray at an existing OpenAI-compatible gateway
 #   (LiteLLM, OpenRouter, …) so clients send plain requests with NO per-request
@@ -22,12 +23,16 @@ DB_STORAGE_GB="${ANYRAY_DB_STORAGE_GB:-50}"
 HOST=""
 K8S=0
 CONNECT_TOKEN=""
+CLAIM_URL=""
 CONTROL_PLANE="https://app.anyray.ai"
 CONTROL_PLANE_SET=0
 GATEWAY_URL=""
 UPSTREAM_URL=""
 NAMESPACE=""
 ATTACH=0
+JSON_OUTPUT=0
+CLAIM_REDEEMED=0
+JSON_ERROR_EMITTED=0
 
 usage() {
   cat <<'EOF'
@@ -37,7 +42,9 @@ Options:
   --host <hostname-or-ip>         Host users reach for Docker/VM installs.
   --k8s                          Generate Kubernetes Secret + Helm values.
   --namespace <namespace>         Existing Kubernetes namespace for --k8s.
+  --claim <install_url>           Short-lived agent install claim from Billing.
   --connect <adt_token>           Required Billing token for gateway installs.
+  --json                          Stream content-free NDJSON status events (requires --claim).
   --attach                        Gateway-less LiteLLM mode (no --connect).
   --gateway-url <url>             Public gateway URL shown to developers.
   --upstream <url>                Seed an OpenAI-compatible upstream gateway.
@@ -52,7 +59,9 @@ while [ $# -gt 0 ]; do
     --host) HOST="${2:?--host needs a value}"; shift 2 ;;
     --k8s)  K8S=1; shift ;;
     --namespace)     NAMESPACE="${2:?--namespace needs a Kubernetes namespace}"; shift 2 ;;
+    --claim)         CLAIM_URL="${2:?--claim needs an install URL}"; shift 2 ;;
     --connect)       CONNECT_TOKEN="${2:?--connect needs a deployment token (adt_…)}"; shift 2 ;;
+    --json)          JSON_OUTPUT=1; shift ;;
     --attach)        ATTACH=1; shift ;;
     --control-plane) CONTROL_PLANE="${2:?--control-plane needs a URL}"; CONTROL_PLANE_SET=1; shift 2 ;;
     --gateway-url)   GATEWAY_URL="${2:?--gateway-url needs a URL}"; shift 2 ;;
@@ -61,6 +70,47 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# In JSON mode, ordinary human output (including the one-time admin key) stays
+# off stdout. Only fixed, content-free NDJSON events are written to fd 3.
+if [ "$JSON_OUTPUT" -eq 1 ]; then
+  exec 3>&1
+  exec 1>/dev/null
+fi
+
+emit_json_status() {
+  [ "$JSON_OUTPUT" -eq 1 ] || return 0
+  case "$1" in
+    pending|claimed|preflight|configured|gateway_connected|ready)
+      printf '{"status":"%s"}\n' "$1" >&3 ;;
+    error)
+      JSON_ERROR_EMITTED=1
+      printf '{"status":"error","errorCode":"%s"}\n' "${2:-setup_failed}" >&3 ;;
+  esac
+}
+
+setup_exit() {
+  code=$?
+  if [ "$code" -ne 0 ]; then
+    if [ "$CLAIM_REDEEMED" -eq 1 ] && command -v report_claim_status >/dev/null 2>&1; then
+      report_claim_status error setup_failed >/dev/null 2>&1 || true
+    fi
+    if [ "$JSON_ERROR_EMITTED" -eq 0 ]; then
+      emit_json_status error setup_failed
+    fi
+  fi
+}
+trap setup_exit EXIT
+
+if [ "$JSON_OUTPUT" -eq 1 ] && [ -z "$CLAIM_URL" ]; then
+  echo "✗ --json requires --claim <install_url>" >&2
+  exit 1
+fi
+
+if [ -n "$CLAIM_URL" ] && [ -n "$CONNECT_TOKEN" ]; then
+  echo "✗ use either --claim or --connect, not both" >&2
+  exit 1
+fi
+
 valid_deployment_token() {
   [[ "$1" =~ ^adt_[A-Za-z0-9_-]+$ ]]
 }
@@ -68,6 +118,45 @@ valid_deployment_token() {
 if [ -n "$CONNECT_TOKEN" ] && ! valid_deployment_token "$CONNECT_TOKEN"; then
   echo "✗ deployment token must match adt_[A-Za-z0-9_-]+ (get one at https://app.anyray.ai)" >&2
   exit 1
+fi
+
+CONTROL_PLANE_NORM="${CONTROL_PLANE%/}"
+CLAIM_TOKEN=""
+if [ -n "$CLAIM_URL" ]; then
+  case "$CONTROL_PLANE_NORM" in
+    https://*) : ;;
+    http://*)
+      echo "✗ --claim requires an https control-plane origin" >&2
+      exit 1 ;;
+    *)
+      echo "✗ --control-plane must be an https origin when --claim is used" >&2
+      exit 1 ;;
+  esac
+  CONTROL_PLANE_AUTHORITY="${CONTROL_PLANE_NORM#*://}"
+  case "$CONTROL_PLANE_AUTHORITY" in
+    ''|*/*|*@*|*\?*|*\#*)
+      echo "✗ --control-plane must be an origin only (scheme, host, and optional port)" >&2
+      exit 1 ;;
+  esac
+  if [[ "$CONTROL_PLANE_AUTHORITY" == *[[:space:]]* ]] ||
+     [[ "$CONTROL_PLANE_AUTHORITY" == *\"* ]] ||
+     [[ "$CONTROL_PLANE_AUTHORITY" == *\\* ]]; then
+    echo "✗ --control-plane contains an unsafe character" >&2
+    exit 1
+  fi
+  case "$CLAIM_URL" in
+    "${CONTROL_PLANE_NORM}/install/"*)
+      CLAIM_TOKEN="${CLAIM_URL#"${CONTROL_PLANE_NORM}/install/"}" ;;
+    *)
+      echo "✗ --claim must use the configured control-plane origin and /install/aic_… path" >&2
+      exit 1 ;;
+  esac
+  if [[ ! "$CLAIM_TOKEN" =~ ^aic_[A-Za-z0-9_-]{16,128}$ ]] || \
+     [ "$CLAIM_URL" != "${CONTROL_PLANE_NORM}/install/${CLAIM_TOKEN}" ]; then
+    echo "✗ --claim must be an exact /install/aic_… URL with no query or fragment" >&2
+    exit 1
+  fi
+  emit_json_status pending
 fi
 
 # Gateway installs require Billing. Only attach mode or an already-connected
@@ -85,14 +174,14 @@ elif [ "$K8S" -eq 0 ] && [ -f .env ] && grep -Eq '^ANYRAY_DEPLOYMENT_TOKEN=adt_[
   EXISTING_CONNECT=1
 fi
 if [ "$ATTACH" -eq 1 ]; then
-  if [ "$K8S" -eq 1 ] || [ -n "$CONNECT_TOKEN" ] || [ -n "$UPSTREAM_URL" ] || [ -n "$GATEWAY_URL" ] || [ "$CONTROL_PLANE_SET" -eq 1 ]; then
-    echo "✗ --attach is gateway-less and cannot be combined with --k8s, --connect, --upstream, --gateway-url, or --control-plane" >&2
+  if [ "$K8S" -eq 1 ] || [ -n "$CONNECT_TOKEN" ] || [ -n "$CLAIM_URL" ] || [ -n "$UPSTREAM_URL" ] || [ -n "$GATEWAY_URL" ] || [ "$CONTROL_PLANE_SET" -eq 1 ]; then
+    echo "✗ --attach is gateway-less and cannot be combined with --k8s, --claim, --connect, --upstream, --gateway-url, or --control-plane" >&2
     exit 1
   fi
 fi
-if [ "$ATTACH" -eq 0 ] && [ -z "$CONNECT_TOKEN" ] && [ "$EXISTING_CONNECT" -eq 0 ]; then
-  echo "✗ --connect <adt_token> is required for every gateway deployment" >&2
-  echo "  Get a token at https://app.anyray.ai (Deployments → Connect a deployment)." >&2
+if [ "$ATTACH" -eq 0 ] && [ -z "$CONNECT_TOKEN" ] && [ -z "$CLAIM_URL" ] && [ "$EXISTING_CONNECT" -eq 0 ]; then
+  echo "✗ --claim <install_url> or --connect <adt_token> is required for every gateway deployment" >&2
+  echo "  Get an install link at https://app.anyray.ai (Deployments → New deployment)." >&2
   echo "  Use --attach only for the gateway-less LiteLLM integration." >&2
   exit 1
 fi
@@ -115,6 +204,10 @@ if [ -n "$NAMESPACE" ]; then
 fi
 
 command -v openssl >/dev/null 2>&1 || { echo "✗ openssl not found" >&2; exit 1; }
+[ -z "$CLAIM_URL" ] || command -v curl >/dev/null 2>&1 || {
+  echo "✗ curl not found — required to redeem the install claim" >&2
+  exit 1
+}
 
 if [ "$K8S" -eq 0 ]; then
   command -v docker >/dev/null 2>&1 || { echo "✗ docker not found — https://docs.docker.com/engine/install/" >&2; exit 1; }
@@ -147,6 +240,92 @@ elif [ -z "$HOST" ]; then
   # the gateway URL shown to developers is reachable, not "localhost".
   [ -n "$HOST" ] || HOST="$(ipconfig getifaddr en0 2>/dev/null || true)"
   [ -n "$HOST" ] || HOST=localhost
+fi
+
+claim_abort() {
+  emit_json_status error "$1"
+  echo "✗ $2" >&2
+  exit 1
+}
+
+# Progress uses curl's stdin config so the rotated adt_ credential never enters
+# argv (and therefore never appears in process listings or captured commands).
+report_claim_status() {
+  status="$1"
+  error_code="${2:-}"
+  [ "$CLAIM_REDEEMED" -eq 1 ] || return 1
+  if [ "$status" = error ]; then
+    progress_body="{\"status\":\"error\",\"errorCode\":\"${error_code:-setup_failed}\"}"
+  else
+    progress_body="{\"status\":\"${status}\"}"
+  fi
+  for _claim_attempt in 1 2 3; do
+    if curl -q --config - >/dev/null 2>&1 <<EOF
+url = "${CLAIM_URL}/progress"
+request = "POST"
+header = "Accept: application/json"
+header = "Content-Type: application/json"
+header = "Authorization: Bearer ${CONNECT_TOKEN}"
+data = "${progress_body//\"/\\\"}"
+connect-timeout = 10
+max-time = 30
+fail
+silent
+show-error
+EOF
+    then
+      return 0
+    fi
+  done
+  return 1
+}
+
+finish_claim_configuration() {
+  [ -n "$CLAIM_URL" ] || return 0
+  report_claim_status configured || claim_abort progress_unavailable "configuration was written, but Billing could not record its status"
+  emit_json_status configured
+}
+
+# Finish every fallible local preflight before consuming the one-time claim.
+# The status preview also catches expired or superseded links without rotating
+# the deployment credential.
+if [ -n "$CLAIM_URL" ]; then
+  CLAIM_PREVIEW="$(curl -q --config - 2>/dev/null <<EOF
+url = "${CLAIM_URL}"
+header = "Accept: application/json"
+connect-timeout = 10
+max-time = 30
+fail
+silent
+show-error
+EOF
+)" || claim_abort claim_unavailable "install claim is unavailable; create a fresh link in the Anyray portal"
+  CLAIM_STATE="$(printf '%s' "$CLAIM_PREVIEW" | tr -d '\r\n' | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p')"
+  unset CLAIM_PREVIEW
+  [ "$CLAIM_STATE" = pending ] || claim_abort claim_unavailable "install claim is expired, consumed, or superseded; create a fresh link"
+
+  # `bash -x setup.sh` must not echo the redemption body, the token assignment,
+  # or any later file write. A child script cannot usefully restore its caller's
+  # tracing state, so leave xtrace off for the rest of this process.
+  case "$-" in *x*) set +x ;; esac
+  REDEEM_JSON="$(curl -q --config - 2>/dev/null <<EOF
+url = "${CLAIM_URL}/redeem"
+request = "POST"
+header = "Accept: application/json"
+connect-timeout = 10
+max-time = 30
+fail
+silent
+show-error
+EOF
+)" || claim_abort claim_redeem_failed "install claim could not be redeemed; create a fresh link"
+  CONNECT_TOKEN="$(printf '%s' "$REDEEM_JSON" | tr -d '\r\n' | sed -n 's/.*"deploymentToken"[[:space:]]*:[[:space:]]*"\(adt_[A-Za-z0-9_-]*\)".*/\1/p')"
+  unset REDEEM_JSON
+  valid_deployment_token "$CONNECT_TOKEN" || claim_abort invalid_redeem_response "Billing returned an invalid install response"
+  CLAIM_REDEEMED=1
+  emit_json_status claimed
+  report_claim_status preflight || claim_abort progress_unavailable "could not report install preflight to Billing"
+  emit_json_status preflight
 fi
 
 hex() { openssl rand -hex "$1"; }
@@ -366,7 +545,11 @@ EOF
     echo "✓ Secrets generated → .env"
     echo ""
     echo "  Console:   http://${HOST}:3000"
-    echo "  Admin key: $(get_env ANYRAY_ADMIN_TOKEN)   (also stored in .env as ANYRAY_ADMIN_TOKEN)"
+    if [ -n "$CLAIM_URL" ]; then
+      echo "  Admin key: stored in .env as ANYRAY_ADMIN_TOKEN"
+    else
+      echo "  Admin key: $(get_env ANYRAY_ADMIN_TOKEN)   (also stored in .env as ANYRAY_ADMIN_TOKEN)"
+    fi
     if [ "$ATTACH" -eq 1 ]; then
       echo "  Optimizer: http://${HOST}:8088 (keep private)"
       echo ""
@@ -562,6 +745,7 @@ EOF
     is_internal_host "$UP_HOST" && echo "  Proxy guard cleared for internal host ${UP_HOST}"
     [ -n "$CONNECT_TOKEN" ] || { echo ""; echo "  Next:      docker compose up -d"; }
   fi
+  finish_claim_configuration
   exit 0
 fi
 
@@ -576,10 +760,13 @@ if [ -f anyray-secrets.yaml ]; then
 
   if [ -n "$CONNECT_TOKEN" ]; then
     # Update only the Billing keys. Keep the salt so usage history remains stable.
+    # The origin lets claim verification use the same Billing deployment that
+    # issued the credential instead of silently falling back to production.
     EXISTING_SALT="$(sed -n 's/^[[:space:]]*ANYRAY_PSEUDONYM_SALT:[[:space:]]*//p' anyray-secrets.yaml | head -n 1)"
-    grep -v -E '^[[:space:]]*ANYRAY_(DEPLOYMENT_TOKEN|PSEUDONYM_SALT):' anyray-secrets.yaml > anyray-secrets.yaml.tmp || true
+    grep -v -E '^[[:space:]]*ANYRAY_(CONTROL_PLANE_URL|DEPLOYMENT_TOKEN|PSEUDONYM_SALT):' anyray-secrets.yaml > anyray-secrets.yaml.tmp || true
     mv anyray-secrets.yaml.tmp anyray-secrets.yaml
     {
+      echo "  ANYRAY_CONTROL_PLANE_URL: $(b64enc "$CONTROL_PLANE_NORM")"
       echo "  ANYRAY_DEPLOYMENT_TOKEN: $(b64enc "$CONNECT_TOKEN")"
       if [ -n "$EXISTING_SALT" ]; then
         echo "  ANYRAY_PSEUDONYM_SALT: ${EXISTING_SALT}"
@@ -603,6 +790,7 @@ if [ -f anyray-secrets.yaml ]; then
     echo "    $(helm_upgrade_command)"
     echo ""
     echo "  Then:      this deployment appears as Connected at ${CONTROL_PLANE} within a minute"
+    finish_claim_configuration
   else
     if [ -z "$NAMESPACE" ]; then
       echo "✓ anyray-secrets.yaml already exists — leaving it untouched (delete it to regenerate)"
@@ -630,10 +818,11 @@ data:
   POSTGRES_PASSWORD: $(b64enc "$POSTGRES_PW")
 EOF
 
-# Add the Billing token and local pseudonym salt to the Secret.
+# Add the Billing origin, token, and local pseudonym salt to the Secret.
 if [ -n "$CONNECT_TOKEN" ]; then
   PSEUDONYM_SALT="$(hex 32)"
   cat >> anyray-secrets.yaml <<EOF
+  ANYRAY_CONTROL_PLANE_URL: $(b64enc "$CONTROL_PLANE_NORM")
   ANYRAY_DEPLOYMENT_TOKEN: $(b64enc "$CONNECT_TOKEN")
   ANYRAY_PSEUDONYM_SALT: $(b64enc "$PSEUDONYM_SALT")
 EOF
@@ -656,8 +845,13 @@ echo "  Next:"
 echo "    $(kubectl_apply_command)"
 echo "    $(helm_install_command)"
 echo ""
-echo "  Admin key: ${ADMIN_TOKEN}   (base64-encoded in anyray-secrets.yaml)"
+if [ -n "$CLAIM_URL" ]; then
+  echo "  Admin key: stored in anyray-secrets.yaml"
+else
+  echo "  Admin key: ${ADMIN_TOKEN}   (base64-encoded in anyray-secrets.yaml)"
+fi
 echo "  Ingress:   console https://${HOST}/  gateway https://${HOST}/v1"
 echo "  NodePort:  console http://${HOST}:30000  gateway http://${HOST}:30787 (if you set the NodePort values)"
 [ -n "$CONNECT_TOKEN" ] && echo "  Then:      this deployment appears as Connected at ${CONTROL_PLANE} within a minute"
+finish_claim_configuration
 exit 0

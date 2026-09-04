@@ -545,6 +545,8 @@ jobs:
           set -- **/*.sh
           bash -c 'for f in "$@"; do bash -n "$f" || exit 1; done' _ "$@"
           shellcheck -S error "$@"
+      - name: agent install claim keeps deployment credentials out of output and argv
+        run: npm run test:agent-install
 
   connect-binary-system-ca:
     # The release binaries compile with `--compile-exec-argv="--use-system-ca"`

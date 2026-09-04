@@ -124,9 +124,12 @@ CONTROL_PLANE_NORM="${CONTROL_PLANE%/}"
 CLAIM_TOKEN=""
 if [ -n "$CLAIM_URL" ]; then
   case "$CONTROL_PLANE_NORM" in
-    http://*|https://*) : ;;
+    https://*) : ;;
+    http://*)
+      echo "✗ --claim requires an https control-plane origin" >&2
+      exit 1 ;;
     *)
-      echo "✗ --control-plane must be an http(s) origin when --claim is used" >&2
+      echo "✗ --control-plane must be an https origin when --claim is used" >&2
       exit 1 ;;
   esac
   CONTROL_PLANE_AUTHORITY="${CONTROL_PLANE_NORM#*://}"
@@ -757,10 +760,13 @@ if [ -f anyray-secrets.yaml ]; then
 
   if [ -n "$CONNECT_TOKEN" ]; then
     # Update only the Billing keys. Keep the salt so usage history remains stable.
+    # The origin lets claim verification use the same Billing deployment that
+    # issued the credential instead of silently falling back to production.
     EXISTING_SALT="$(sed -n 's/^[[:space:]]*ANYRAY_PSEUDONYM_SALT:[[:space:]]*//p' anyray-secrets.yaml | head -n 1)"
-    grep -v -E '^[[:space:]]*ANYRAY_(DEPLOYMENT_TOKEN|PSEUDONYM_SALT):' anyray-secrets.yaml > anyray-secrets.yaml.tmp || true
+    grep -v -E '^[[:space:]]*ANYRAY_(CONTROL_PLANE_URL|DEPLOYMENT_TOKEN|PSEUDONYM_SALT):' anyray-secrets.yaml > anyray-secrets.yaml.tmp || true
     mv anyray-secrets.yaml.tmp anyray-secrets.yaml
     {
+      echo "  ANYRAY_CONTROL_PLANE_URL: $(b64enc "$CONTROL_PLANE_NORM")"
       echo "  ANYRAY_DEPLOYMENT_TOKEN: $(b64enc "$CONNECT_TOKEN")"
       if [ -n "$EXISTING_SALT" ]; then
         echo "  ANYRAY_PSEUDONYM_SALT: ${EXISTING_SALT}"
@@ -812,10 +818,11 @@ data:
   POSTGRES_PASSWORD: $(b64enc "$POSTGRES_PW")
 EOF
 
-# Add the Billing token and local pseudonym salt to the Secret.
+# Add the Billing origin, token, and local pseudonym salt to the Secret.
 if [ -n "$CONNECT_TOKEN" ]; then
   PSEUDONYM_SALT="$(hex 32)"
   cat >> anyray-secrets.yaml <<EOF
+  ANYRAY_CONTROL_PLANE_URL: $(b64enc "$CONTROL_PLANE_NORM")
   ANYRAY_DEPLOYMENT_TOKEN: $(b64enc "$CONNECT_TOKEN")
   ANYRAY_PSEUDONYM_SALT: $(b64enc "$PSEUDONYM_SALT")
 EOF

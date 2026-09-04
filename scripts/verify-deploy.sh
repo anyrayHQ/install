@@ -82,8 +82,13 @@ valid_deployment_token() {
 
 claim_url_valid() {
   cp_origin="$(get_env ANYRAY_CONTROL_PLANE_URL)"
+  [ -n "$cp_origin" ] || cp_origin="$(get_yaml_secret ANYRAY_CONTROL_PLANE_URL)"
   [ -n "$cp_origin" ] || cp_origin="https://app.anyray.ai"
   cp_origin="${cp_origin%/}"
+  case "$cp_origin" in
+    https://*) : ;;
+    *) return 1 ;;
+  esac
   case "$CLAIM_URL" in
     "${cp_origin}/install/"*) claim_token="${CLAIM_URL#"${cp_origin}/install/"}" ;;
     *) return 1 ;;

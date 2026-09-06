@@ -461,38 +461,68 @@ separate workflow from `release-connect-binaries.yml`: the CLI publisher does
 not call it, and a desktop failure cannot block an npm or CLI-binary release.
 It has no push, tag, `workflow_run`, or repository-dispatch trigger.
 
-The dispatch has exactly three inputs:
+The dispatch has exactly four inputs:
 
 | Input | Contract |
 | --- | --- |
 | `version` | Explicit plain `x.y.z`; `latest` and moving ranges are rejected. |
 | `source_sha` | Exact lowercase 40-hex commit in the private `anyrayHQ/monorepo`; it must be reachable from the fetched `origin/main`. The workflow never checks out moving `main`. |
-| `dry_run` | Defaults to `true`. A dry run retains signed assets only as a workflow artifact. `false` may create only `connect-desktop-staging-v<version>-<short-sha>`, marked prerelease and `--latest=false`. |
+| `min_version` | Optional numeric dotted version with two to four components. Installs older than this floor update without asking; empty omits `minVersion` from the staging manifest. |
+| `dry_run` | Defaults to `true`. A dry run retains signed assets only as a workflow artifact. `false` creates the versioned prerelease and re-points the prerelease tag `connect-desktop-staging`; neither becomes latest. |
 
 There is deliberately no stable/public selector. Before a staging prerelease is
 created, the workflow records `releases/latest`; after publication it requires
-that value to be unchanged. The lane never writes `connect-update.json`, a
-Tauri updater manifest, `SHA256SUMS` in an existing CLI release, npm, Homebrew,
-Winget, `connect.sh`, `connect.ps1`, or any current install path. The signed
-manifest explicitly carries `"updater": null` until updater design is a
-separate reviewed change.
+that value to be unchanged. A non-dry run also updates the prerelease feed
+`connect-desktop-staging` with only the signed update manifest. The lane never
+writes `connect-update.json`, `SHA256SUMS` in an existing CLI release, npm,
+Homebrew, Winget, `connect.sh`, `connect.ps1`, or any current install path.
+The stable `connect-desktop` updater feed is not published yet.
+
+Versioned releases are create-only: redispatching the same version/source cannot
+replace their bytes. Use a new version/source for a rebuild. If publication of
+the feed fails after the versioned release was created, recover the feed and
+run `node scripts/publish-desktop-feed.mjs` with `REPO`, `VERSION`, `SHORT_SHA`,
+and `GH_TOKEN` set, from a directory containing `assets/` with the original
+manifest and signature downloaded from that release. Do not regenerate them.
+
+Feed publication aborts on lookup errors, malformed versions, and backward
+version changes. Both replacement assets upload as `.pending` before any live
+asset is renamed. Old assets are retained as `.previous` until publication
+succeeds; a failed switch attempts to restore their original names. GitHub asset
+renames are not atomic: clients may see a brief missing asset or mismatched pair
+during the switch and should retry later.
+
+A failed upload, interrupted runner, failed rollback, or failed backup cleanup
+can leave `.pending`/`.previous` assets. Further publication then stops for
+operator recovery. Inspect asset IDs and manifests first. For rollback, rename
+any new canonical assets to `.pending`, restore the old `.previous` assets to
+their canonical names, verify the manifest/signature pair, then remove only the
+abandoned `.pending` assets. If the new canonical pair is already valid and the
+switch succeeded, remove only the old `.previous` backups. Never delete or
+rebuild the versioned release to repair a feed.
+
+The desktop app fetches `connect-desktop-staging.json` from the
+`connect-desktop-staging` release. It downloads the artifact named there from
+the versioned prerelease. It verifies its sha256 from the manifest and its Apple
+or Microsoft signature before installing; no updater key exists.
 
 Invoke it from Actions → **Release Anyray Connect desktop (staging only)**.
 The workflow must itself be dispatched from the install repository's `main`
 branch; its first job rejects any other workflow ref before preflight reads
 secrets or any job fetches private source.
 Paste the Connect version and the full private-monorepo commit, leave `dry_run`
-checked for the first rehearsal, and inspect the retained
+checked for the first rehearsal, optionally set `min_version`, and inspect the
+retained
 `connect-desktop-staging-assets-<version>-<short-sha>` artifact. Unchecking it
-does not make the release public/stable; it only creates the explicit staging
-prerelease described above.
+does not make the release public/stable; it creates the explicit versioned
+staging prerelease and re-points the staging-only updater feed.
 
 The retained/published set contains one signed/notarized universal macOS DMG,
-one Authenticode-signed Windows x64 MSI, the two signed Windows inner
-executables for audit, Linux x64 deb/rpm packages plus the two raw inner
-executables, detached GPG signatures and public key, signed `SHA256SUMS`, and a
-signed `connect-desktop-staging.json` binding them to `version` and
-`source_sha`.
+one universal `.app.tar.gz` containing the signed and stapled app, one
+Authenticode-signed Windows x64 MSI, the two signed Windows inner executables
+for audit, Linux x64 deb/rpm packages plus the two raw inner executables,
+detached GPG signatures and public key, signed `SHA256SUMS`, and a signed
+`connect-desktop-staging.json` binding them to `version` and `source_sha`.
 
 ### Private source and version contract
 
@@ -545,7 +575,8 @@ source or GitHub App credential:
   runtime + minimal `allow-jit` entitlement), signs the outer app, requires
   Apple Team ID `V53XMA78UF` and bundle identifier
   `ai.anyray.connect-tray`, notarizes and staples it, then creates, signs,
-  notarizes, and staples one universal `.dmg`. A credential-free
+  notarizes, and staples one universal `.dmg`. The stapled app is also packed
+  as a space-free `.app.tar.gz`. A credential-free
   `verify-macos-signed` job on the same fleet mounts and exercises the final
   DMG. Teardown follows the signed smoke with `always()`. The Mac host is
   reused inside its paid 24h window, so the signing job deletes its keychain
@@ -591,7 +622,8 @@ uninstalling the desktop app.
 
 `SHA256SUMS` is generated only after Apple/Azure signing, because those signers
 rewrite their artifacts. The staging manifest binds every checksum to the
-explicit Connect version and private source commit.
+explicit Connect version and private source commit and names the versioned
+prerelease tag that holds the artifacts.
 
 ### Required infrastructure and first-run validation
 
@@ -600,8 +632,9 @@ four Azure variables, Linux GPG key/passphrase, and Mac-fleet role listed
 earlier in this document are mandatory; preflight fails closed and names
 anything absent. (A DMG uses the Application identity, so this lane does not
 consume the separate Apple Installer certificate used by `.pkg`.) The lane also
-needs the two GitHub App secrets above. Do not turn a missing credential into
-an unsigned skip.
+needs only the two GitHub App secrets above.
+
+Do not turn a missing credential into an unsigned skip.
 
 Native runner requirements are:
 
@@ -626,7 +659,8 @@ The Mac universal build, Windows MSI bundling, and final signing sequence also
 need one full credentialed dry-run rehearsal on the real runners. Local static
 checks cannot emulate Developer ID notarization, Azure-issued signatures,
 Windows native trust verification, or Tauri's platform bundlers; do not publish
-the staging prerelease until that dry run is green.
+the staging prerelease until that dry run is green. This lane has never run with
+credentials, so the first credentialed dry run is the real integration test.
 
 ## Trusted-channel packages (winget · Homebrew)
 

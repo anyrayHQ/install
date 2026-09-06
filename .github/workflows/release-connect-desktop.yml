@@ -297,10 +297,26 @@ jobs:
           mkdir -p out
           ditto -c -k --keepParent "$app" out/connect-desktop-unsigned.zip
 
+      - name: Export the updater public key compiled into this build
+        run: |
+          set -euo pipefail
+          pubkey="$(jq -er '.plugins.updater.pubkey' private-source/connect-tray/src-tauri/tauri.conf.json)"
+          case "$pubkey" in
+            REPLACE_WITH_UPDATER_PUBKEY|'') echo '::error::tauri.conf.json still carries the placeholder updater public key'; exit 1 ;;
+          esac
+          printf '%s' "$pubkey" > out/updater-pubkey.b64
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: connect-desktop-macos-unsigned
           path: out/connect-desktop-unsigned.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: connect-desktop-updater-pubkey
+          path: out/updater-pubkey.b64
           if-no-files-found: error
           retention-days: 7
 
@@ -320,6 +336,24 @@ jobs:
         with:
           name: connect-desktop-macos-unsigned
           path: unsigned
+
+      # Separate job from the build: provision the pinned signer here too.
+      - name: Rust toolchain and pinned Tauri CLI for updater signing
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/aarch64-apple-darwin/rustup-init"
+            curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
+            echo "${RUSTUP_INIT_SHA256_DARWIN_ARM64}  rustup-init" | shasum -a 256 -c -
+            chmod +x rustup-init
+            ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable
+            rm -f rustup-init
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! cargo tauri --version 2>/dev/null | grep -Fq "tauri-cli ${TAURI_CLI_VERSION}"; then
+            cargo install tauri-cli --version "=${TAURI_CLI_VERSION}" --locked
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Import the Developer ID Application identity
         run: |
@@ -509,9 +543,6 @@ jobs:
           [ -n "$updater_app" ] || { echo '::error::macOS updater bundle contains no .app'; exit 1; }
           codesign --verify --deep --strict --verbose=2 "$updater_app"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$updater_app/Contents/Info.plist")" = "$VERSION"
-          decoded_signature="$RUNNER_TEMP/connect-desktop-macos-updater-signature.txt"
-          openssl base64 -d -A -in "$signature" -out "$decoded_signature"
-          head -1 "$decoded_signature" | grep -q '^untrusted comment:'
 
           dmg="$(find signed -maxdepth 1 -type f -name '*.dmg' -print -quit)"
           [ -n "$dmg" ] || { echo '::error::signed macOS DMG is missing'; exit 1; }
@@ -1026,17 +1057,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $inner = @(Get-ChildItem inner -Filter '*.exe')
           $installers = @(Get-ChildItem installer -Filter '*.msi')
-          $updaterSignatures = @(Get-ChildItem installer -Filter '*.msi.sig')
           if ($inner.Count -ne 2) { throw "expected two signed inner executables, found $($inner.Count)" }
           if ($installers.Count -ne 1) { throw "expected one signed MSI, found $($installers.Count)" }
-          if ($updaterSignatures.Count -ne 1) { throw "expected one MSI updater signature, found $($updaterSignatures.Count)" }
-          if ($updaterSignatures[0].Length -eq 0) { throw 'MSI updater signature is empty' }
-          $decodedUpdaterSignature = [Text.Encoding]::UTF8.GetString(
-            [Convert]::FromBase64String((Get-Content -Raw $updaterSignatures[0].FullName).Trim())
-          )
-          if (-not $decodedUpdaterSignature.StartsWith('untrusted comment:')) {
-            throw 'MSI updater signature is not a minisign signature'
-          }
           $inner | ForEach-Object {
             ./scripts/verify-authenticode-windows.ps1 -Path $_.FullName
           }
@@ -1487,6 +1509,24 @@ jobs:
         with:
           name: connect-desktop-linux-signed
           path: platform/linux
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connect-desktop-updater-pubkey
+          path: platform/pubkey
+
+      - name: Verify both updater signatures against the compiled-in public key
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign >/dev/null
+          # Tauri stores the minisign key and signature files base64-encoded.
+          key_line="$(base64 -d platform/pubkey/updater-pubkey.b64 | sed -n '2p')"
+          test -n "$key_line" || { echo '::error::updater public key decoded to nothing'; exit 1; }
+          for artifact in platform/macos/*.app.tar.gz platform/windows-installer/*.msi; do
+            base64 -d "${artifact}.sig" > "${artifact}.minisig"
+            minisign -Vm "$artifact" -x "${artifact}.minisig" -P "$key_line"
+            rm -f "${artifact}.minisig"
+          done
 
       - name: Assemble signed platform outputs
         run: |
@@ -1596,6 +1636,10 @@ jobs:
     needs: [preflight, assemble-signed-staging]
     if: ${{ !inputs.dry_run }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    # Every run rewrites the one staging feed; serialize across versions.
+    concurrency:
+      group: connect-desktop-staging-feed
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
@@ -1665,17 +1709,25 @@ jobs:
           tag="connect-desktop-staging-v${VERSION}-${SHORT_SHA}"
           feed_tag="connect-desktop-staging"
           latest_before="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+          notes="Updater feed for staging desktop builds. Points at ${tag}. Do not install from here; install from the versioned prerelease."
           # The feed release holds only the manifest; the bytes live in the versioned prerelease.
+          # Replace assets in place so the URL never goes dark between a delete and a create.
           if gh api "repos/${REPO}/releases/tags/${feed_tag}" --jq .prerelease >/dev/null 2>&1; then
             test "$(gh api "repos/${REPO}/releases/tags/${feed_tag}" --jq .prerelease)" = true || {
               echo "::error::${feed_tag} exists and is not a prerelease; refusing to replace it"; exit 1; }
-            gh release delete "$feed_tag" --yes --cleanup-tag
+            current="$(curl -fsSL "https://github.com/${REPO}/releases/download/${feed_tag}/latest.json" | jq -r .version || echo 0)"
+            if [ "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
+              echo "::error::feed already serves ${current}, newer than ${VERSION}; refusing to downgrade it"; exit 1
+            fi
+            gh release upload "$feed_tag" assets/latest.json assets/latest.json.asc --clobber
+            gh release edit "$feed_tag" --notes "$notes" --prerelease --latest=false
+          else
+            gh release create "$feed_tag" \
+              --title "Anyray Connect desktop staging feed" \
+              --notes "$notes" \
+              --prerelease --latest=false \
+              assets/latest.json assets/latest.json.asc
           fi
-          gh release create "$feed_tag" \
-            --title "Anyray Connect desktop staging feed" \
-            --notes "Updater feed for staging desktop builds. Points at ${tag}. Do not install from here; install from the versioned prerelease." \
-            --prerelease --latest=false \
-            assets/latest.json assets/latest.json.asc
           test "$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)" = "$latest_before" || {
             echo "::error::feed release changed releases/latest"; exit 1; }
           curl -fsSL "https://github.com/${REPO}/releases/download/${feed_tag}/latest.json" \

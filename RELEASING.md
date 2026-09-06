@@ -618,6 +618,12 @@ needs the two GitHub App secrets above and these updater secrets:
 | `TAURI_SIGNING_PRIVATE_KEY` | The Tauri minisign private key file content used to sign macOS updater bundles and the final Windows MSI. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password protecting that updater private key. |
 
+The matching public key lives in the monorepo's
+`connect-tray/src-tauri/tauri.conf.json`. The macOS build exports it from the
+selected source commit and fails on the `REPLACE_WITH_UPDATER_PUBKEY`
+placeholder; the assembly job then verifies both updater signatures against it
+with `minisign`, so a bundle signed with the wrong key never reaches the feed.
+
 Do not turn a missing credential into an unsigned skip.
 
 Native runner requirements are:

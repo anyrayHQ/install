@@ -5,7 +5,8 @@ name: Release Anyray Connect desktop (staging only)
 # This workflow is deliberately NOT called by release-connect-binaries.yml and
 # has no push, tag, workflow_run, or repository_dispatch trigger. It never
 # reads npm, never updates releases/latest, and never renders or publishes the
-# CLI's connect manifests, Homebrew cask, or Winget manifests; updater metadata is published only for the desktop app.
+# CLI's connect manifests, Homebrew cask, or Winget manifests.
+# This lane publishes the desktop update feed as a manifest only, with no updater signatures.
 # A failure here therefore cannot block or downgrade the existing CLI release.
 #
 # Supply-chain boundary: every source-consuming native job uses its own
@@ -114,8 +115,6 @@ jobs:
       AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Validate immutable inputs and every release prerequisite
         id: inputs
@@ -142,8 +141,7 @@ jobs:
             APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID \
             AZURE_SIGNING_CLIENT_ID AZURE_SIGNING_TENANT_ID \
             AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT_PROFILE \
-            LINUX_SIGNING_GPG_KEY LINUX_SIGNING_GPG_PASSPHRASE \
-            TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            LINUX_SIGNING_GPG_KEY LINUX_SIGNING_GPG_PASSPHRASE; do
             [ -n "${!name:-}" ] || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
@@ -297,26 +295,10 @@ jobs:
           mkdir -p out
           ditto -c -k --keepParent "$app" out/connect-desktop-unsigned.zip
 
-      - name: Export the updater public key compiled into this build
-        run: |
-          set -euo pipefail
-          pubkey="$(jq -er '.plugins.updater.pubkey' private-source/connect-tray/src-tauri/tauri.conf.json)"
-          case "$pubkey" in
-            REPLACE_WITH_UPDATER_PUBKEY|'') echo '::error::tauri.conf.json still carries the placeholder updater public key'; exit 1 ;;
-          esac
-          printf '%s' "$pubkey" > out/updater-pubkey.b64
-
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: connect-desktop-macos-unsigned
           path: out/connect-desktop-unsigned.zip
-          if-no-files-found: error
-          retention-days: 7
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: connect-desktop-updater-pubkey
-          path: out/updater-pubkey.b64
           if-no-files-found: error
           retention-days: 7
 
@@ -336,24 +318,6 @@ jobs:
         with:
           name: connect-desktop-macos-unsigned
           path: unsigned
-
-      # Separate job from the build: provision the pinned signer here too.
-      - name: Rust toolchain and pinned Tauri CLI for updater signing
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/aarch64-apple-darwin/rustup-init"
-            curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
-            echo "${RUSTUP_INIT_SHA256_DARWIN_ARM64}  rustup-init" | shasum -a 256 -c -
-            chmod +x rustup-init
-            ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable
-            rm -f rustup-init
-          fi
-          export PATH="$HOME/.cargo/bin:$PATH"
-          if ! cargo tauri --version 2>/dev/null | grep -Fq "tauri-cli ${TAURI_CLI_VERSION}"; then
-            cargo install tauri-cli --version "=${TAURI_CLI_VERSION}" --locked
-          fi
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Import the Developer ID Application identity
         run: |
@@ -450,21 +414,13 @@ jobs:
           xcrun stapler validate "$app"
           spctl -a -vvv -t exec "$app"
 
-      - name: Package and sign the updater bundle
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Package the updater bundle
         run: |
           set -euo pipefail
           app="$(find expanded -maxdepth 1 -type d -name '*.app' -print -quit)"
           [ -n "$app" ] || { echo '::error::signed app is missing before updater packaging'; exit 1; }
           tarball="out/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
           tar -czf "$tarball" -C "$(dirname "$app")" "$(basename "$app")"
-          cargo tauri signer sign \
-            --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
-            --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
-            "$tarball"
-          test -s "${tarball}.sig"
 
       - name: Create, sign, notarize, and staple the DMG
         run: |
@@ -511,7 +467,6 @@ jobs:
           path: |
             out/*.dmg
             out/*.app.tar.gz
-            out/*.app.tar.gz.sig
           if-no-files-found: error
 
   # Runtime validation is deliberately separate from signing. The signed app
@@ -533,9 +488,7 @@ jobs:
         run: |
           set -euo pipefail
           tarball="signed/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
-          signature="${tarball}.sig"
           test -s "$tarball" || { echo '::error::signed macOS updater bundle is missing'; exit 1; }
-          test -s "$signature" || { echo '::error::macOS updater signature is missing'; exit 1; }
           updater_root="$RUNNER_TEMP/connect-desktop-updater-bundle"
           mkdir -p "$updater_root"
           tar -xzf "$tarball" -C "$updater_root"
@@ -986,22 +939,6 @@ jobs:
             'https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt'
           echo "5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270  $RUNNER_TEMP/ms-root.crt" | sha256sum -c -
           openssl x509 -inform DER -in "$RUNNER_TEMP/ms-root.crt" -out "$RUNNER_TEMP/ms-root.pem"
-      - name: Install the pinned Tauri CLI for updater signing
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
-            curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
-            echo "${RUSTUP_INIT_SHA256_LINUX_X64}  rustup-init" | sha256sum -c -
-            chmod +x rustup-init
-            ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable
-            rm -f rustup-init
-          fi
-          export PATH="$HOME/.cargo/bin:$PATH"
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
-          cargo install tauri-cli --version "=${TAURI_CLI_VERSION}" --locked
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Authenticode-sign and independently verify the MSI installer
         env:
           JSIGN_JAR: ${{ runner.temp }}/jsign.jar
@@ -1013,25 +950,10 @@ jobs:
           python3 scripts/verify-authenticode.py "$installer" \
             --ca-file "$RUNNER_TEMP/ms-root.pem" \
             --expect-publisher 'Othentic Labs LTD'
-      - name: Sign the MSI for the updater
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          installer="$(find out -maxdepth 1 -type f -name '*.msi' -print -quit)"
-          [ -n "$installer" ] || { echo '::error::MSI installer is missing before updater signing'; exit 1; }
-          cargo tauri signer sign \
-            --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
-            --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
-            "$installer"
-          test -s "${installer}.sig" || { echo '::error::MSI updater signature is missing'; exit 1; }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: connect-desktop-windows-installer-signed
-          path: |
-            out/*.msi
-            out/*.msi.sig
+          path: out/*.msi
           if-no-files-found: error
 
   verify-windows-signatures:
@@ -1509,42 +1431,19 @@ jobs:
         with:
           name: connect-desktop-linux-signed
           path: platform/linux
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: connect-desktop-updater-pubkey
-          path: platform/pubkey
-
-      - name: Verify both updater signatures against the compiled-in public key
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq minisign >/dev/null
-          # Tauri stores the minisign key and signature files base64-encoded.
-          key_line="$(base64 -d platform/pubkey/updater-pubkey.b64 | sed -n '2p')"
-          test -n "$key_line" || { echo '::error::updater public key decoded to nothing'; exit 1; }
-          for artifact in platform/macos/*.app.tar.gz platform/windows-installer/*.msi; do
-            base64 -d "${artifact}.sig" > "${artifact}.minisig"
-            minisign -Vm "$artifact" -x "${artifact}.minisig" -P "$key_line"
-            rm -f "${artifact}.minisig"
-          done
-
       - name: Assemble signed platform outputs
         run: |
           set -euo pipefail
           mkdir -p assets
           cp platform/macos/*.dmg assets/
           cp platform/macos/*.app.tar.gz assets/
-          cp platform/macos/*.app.tar.gz.sig assets/
           cp platform/windows-inner/*.exe assets/
           cp platform/windows-installer/*.msi assets/
-          cp platform/windows-installer/*.msi.sig assets/
           cp platform/linux/* assets/
           test "$(find assets -maxdepth 1 -type f -name '*.dmg' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -type f -name '*.app.tar.gz' | wc -l)" -eq 1
-          test "$(find assets -maxdepth 1 -type f -name '*.app.tar.gz.sig' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -type f -name '*windows*x64*.exe' | wc -l)" -eq 2
           test "$(find assets -maxdepth 1 -type f -name '*windows*x64.msi' | wc -l)" -eq 1
-          test "$(find assets -maxdepth 1 -type f -name '*windows*x64.msi.sig' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -type f -name '*linux*x64*' ! -name '*.asc' | wc -l)" -eq 4
           test "$(find assets -maxdepth 1 -type f -name '*linux*x64*.asc' | wc -l)" -eq 4
           test -f assets/anyray-connect-desktop-signing-key.asc
@@ -1557,72 +1456,45 @@ jobs:
             sha256sum -- * > SHA256SUMS
           )
 
-      - name: Write the updater feed
+      - name: Generate and sign the content-addressed staging manifest
         env:
           MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
           SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
-        run: |
-          set -euo pipefail
-          tag="connect-desktop-staging-v${VERSION}-${SHORT_SHA}"
-          base="https://github.com/anyrayHQ/install/releases/download/${tag}"
-          mac="anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
-          msi="anyray-connect-desktop-${VERSION}-windows-x64.msi"
-          deb="anyray-connect-desktop-${VERSION}-linux-x64.deb"
-          test -s "assets/$mac"
-          test -s "assets/${mac}.sig"
-          test -s "assets/$msi"
-          test -s "assets/${msi}.sig"
-          test -s "assets/$deb"
-          mac_sig="$(cat "assets/${mac}.sig")"
-          msi_sig="$(cat "assets/${msi}.sig")"
-          jq -n \
-            --arg version "$VERSION" \
-            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg notes "Anyray Connect desktop ${VERSION} (staging)" \
-            --arg min "$MIN_VERSION" \
-            --arg mac_url "${base}/${mac}" --arg mac_sig "$mac_sig" \
-            --arg msi_url "${base}/${msi}" --arg msi_sig "$msi_sig" \
-            --arg deb_url "${base}/${deb}" \
-            '{version: $version, pub_date: $pub_date, notes: $notes}
-             + (if $min == "" then {} else {minVersion: $min} end)
-             + {platforms: {
-                 "darwin-universal": {url: $mac_url, signature: $mac_sig},
-                 "darwin-aarch64":   {url: $mac_url, signature: $mac_sig},
-                 "darwin-x86_64":    {url: $mac_url, signature: $mac_sig},
-                 "windows-x86_64":   {url: $msi_url, signature: $msi_sig},
-                 "linux-x86_64":     {url: $deb_url, signature: ""}}}' \
-            > assets/latest.json
-          jq -e '.platforms["darwin-universal"].signature | length > 0' assets/latest.json
-          jq -e '.platforms["windows-x86_64"].signature | length > 0' assets/latest.json
-
-      - name: Generate and sign the content-addressed staging manifest
         run: |
           set -euo pipefail
           jq -Rn \
             --arg version "$VERSION" \
             --arg sourceCommit "$SOURCE_SHA" \
             --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg tag "connect-desktop-staging-v${VERSION}-${SHORT_SHA}" \
+            --arg min "$MIN_VERSION" \
             '[inputs | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")] as $artifacts
-             | {schemaVersion: 1, artifact: "anyray-connect-desktop-staging", version: $version, sourceCommit: $sourceCommit, createdAt: $createdAt, updater: {feed: "latest.json"}, artifacts: $artifacts}' \
+             | {schemaVersion: 1, artifact: "anyray-connect-desktop-staging", version: $version, sourceCommit: $sourceCommit, createdAt: $createdAt, tag: $tag}
+             + (if $min == "" then {} else {minVersion: $min} end)
+             + {updater: {feed: "connect-desktop-staging.json"}, artifacts: $artifacts}' \
             assets/SHA256SUMS > assets/connect-desktop-staging.json
           key_check="$RUNNER_TEMP/connect-desktop-public-key-check"
           mkdir -p "$key_check"
           ./scripts/sign-gpg-artifacts.sh "$key_check" \
-            assets/SHA256SUMS assets/latest.json assets/connect-desktop-staging.json
+            assets/SHA256SUMS assets/connect-desktop-staging.json
           cmp "$key_check/anyray-endpoint-signing-key.asc" \
             assets/anyray-connect-desktop-signing-key.asc
           export GNUPGHOME="$RUNNER_TEMP/gv"
           mkdir -m 700 "$GNUPGHOME"
           gpg --batch --import assets/anyray-connect-desktop-signing-key.asc
           gpg --batch --verify assets/SHA256SUMS.asc assets/SHA256SUMS
-          gpg --batch --verify assets/latest.json.asc assets/latest.json
           gpg --batch --verify \
             assets/connect-desktop-staging.json.asc \
             assets/connect-desktop-staging.json
           test "$(jq -r .version assets/connect-desktop-staging.json)" = "$VERSION"
           test "$(jq -r .sourceCommit assets/connect-desktop-staging.json)" = "$SOURCE_SHA"
           test "$(jq -r .artifact assets/connect-desktop-staging.json)" = 'anyray-connect-desktop-staging'
-          test "$(jq -r .updater.feed assets/connect-desktop-staging.json)" = 'latest.json'
+          test "$(jq -r .tag assets/connect-desktop-staging.json)" = "connect-desktop-staging-v${VERSION}-${SHORT_SHA}"
+          jq -e '.updater.feed == "connect-desktop-staging.json"' assets/connect-desktop-staging.json
+          jq -e '[.artifacts[] | select(.name | endswith(".app.tar.gz"))] | length == 1' \
+            assets/connect-desktop-staging.json
+          jq -e '[.artifacts[] | select(.name | endswith("windows-x64.msi"))] | length == 1' \
+            assets/connect-desktop-staging.json
           cat assets/SHA256SUMS
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -1686,7 +1558,7 @@ jobs:
           gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$tag" \
             --title "Anyray Connect desktop ${VERSION} (${SHORT_SHA}, staging only)" \
-            --notes "Signed staging-only desktop installers and updater assets built from private monorepo commit ${SOURCE_SHA}. This versioned prerelease includes latest.json and is deliberately never latest; connect.sh, connect.ps1, npm, Homebrew, Winget, and the existing CLI release lane are unchanged." \
+            --notes "Signed staging-only desktop installers and update manifest built from private monorepo commit ${SOURCE_SHA}. This versioned prerelease is deliberately never latest; connect.sh, connect.ps1, npm, Homebrew, Winget, and the existing CLI release lane are unchanged." \
             --prerelease \
             --latest=false \
             assets/*
@@ -1715,20 +1587,24 @@ jobs:
           if gh api "repos/${REPO}/releases/tags/${feed_tag}" --jq .prerelease >/dev/null 2>&1; then
             test "$(gh api "repos/${REPO}/releases/tags/${feed_tag}" --jq .prerelease)" = true || {
               echo "::error::${feed_tag} exists and is not a prerelease; refusing to replace it"; exit 1; }
-            current="$(curl -fsSL "https://github.com/${REPO}/releases/download/${feed_tag}/latest.json" | jq -r .version || echo 0)"
+            current="$(curl -fsSL "https://github.com/${REPO}/releases/download/${feed_tag}/connect-desktop-staging.json" | jq -r .version || echo 0)"
             if [ "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
               echo "::error::feed already serves ${current}, newer than ${VERSION}; refusing to downgrade it"; exit 1
             fi
-            gh release upload "$feed_tag" assets/latest.json assets/latest.json.asc --clobber
+            gh release upload "$feed_tag" \
+              assets/connect-desktop-staging.json \
+              assets/connect-desktop-staging.json.asc \
+              --clobber
             gh release edit "$feed_tag" --notes "$notes" --prerelease --latest=false
           else
             gh release create "$feed_tag" \
               --title "Anyray Connect desktop staging feed" \
               --notes "$notes" \
               --prerelease --latest=false \
-              assets/latest.json assets/latest.json.asc
+              assets/connect-desktop-staging.json \
+              assets/connect-desktop-staging.json.asc
           fi
           test "$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)" = "$latest_before" || {
             echo "::error::feed release changed releases/latest"; exit 1; }
-          curl -fsSL "https://github.com/${REPO}/releases/download/${feed_tag}/latest.json" \
+          curl -fsSL "https://github.com/${REPO}/releases/download/${feed_tag}/connect-desktop-staging.json" \
             | jq -e --arg v "$VERSION" '.version == $v'

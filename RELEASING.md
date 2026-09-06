@@ -461,38 +461,46 @@ separate workflow from `release-connect-binaries.yml`: the CLI publisher does
 not call it, and a desktop failure cannot block an npm or CLI-binary release.
 It has no push, tag, `workflow_run`, or repository-dispatch trigger.
 
-The dispatch has exactly three inputs:
+The dispatch has exactly four inputs:
 
 | Input | Contract |
 | --- | --- |
 | `version` | Explicit plain `x.y.z`; `latest` and moving ranges are rejected. |
 | `source_sha` | Exact lowercase 40-hex commit in the private `anyrayHQ/monorepo`; it must be reachable from the fetched `origin/main`. The workflow never checks out moving `main`. |
-| `dry_run` | Defaults to `true`. A dry run retains signed assets only as a workflow artifact. `false` may create only `connect-desktop-staging-v<version>-<short-sha>`, marked prerelease and `--latest=false`. |
+| `min_version` | Optional numeric dotted version with two to four components. Installs older than this floor update without asking; empty omits `minVersion` from the updater feed. |
+| `dry_run` | Defaults to `true`. A dry run retains signed assets only as a workflow artifact. `false` creates the versioned prerelease and re-points the prerelease tag `connect-desktop-staging`; neither becomes latest. |
 
 There is deliberately no stable/public selector. Before a staging prerelease is
 created, the workflow records `releases/latest`; after publication it requires
-that value to be unchanged. The lane never writes `connect-update.json`, a
-Tauri updater manifest, `SHA256SUMS` in an existing CLI release, npm, Homebrew,
-Winget, `connect.sh`, `connect.ps1`, or any current install path. The signed
-manifest explicitly carries `"updater": null` until updater design is a
-separate reviewed change.
+that value to be unchanged. A non-dry run also recreates the prerelease tag
+`connect-desktop-staging` with only the signed updater feed. The lane never
+writes `connect-update.json`, `SHA256SUMS` in an existing CLI release, npm,
+Homebrew, Winget, `connect.sh`, `connect.ps1`, or any current install path.
+The stable `connect-desktop` updater feed is not published yet.
+
+Staging desktop apps read the updater feed from
+`https://github.com/anyrayHQ/install/releases/download/connect-desktop-staging/latest.json`.
+Its platform URLs point to the immutable versioned prerelease; the moving feed
+release holds only `latest.json` and `latest.json.asc`.
 
 Invoke it from Actions → **Release Anyray Connect desktop (staging only)**.
 The workflow must itself be dispatched from the install repository's `main`
 branch; its first job rejects any other workflow ref before preflight reads
 secrets or any job fetches private source.
 Paste the Connect version and the full private-monorepo commit, leave `dry_run`
-checked for the first rehearsal, and inspect the retained
+checked for the first rehearsal, optionally set `min_version`, and inspect the
+retained
 `connect-desktop-staging-assets-<version>-<short-sha>` artifact. Unchecking it
-does not make the release public/stable; it only creates the explicit staging
-prerelease described above.
+does not make the release public/stable; it creates the explicit versioned
+staging prerelease and re-points the staging-only updater feed.
 
 The retained/published set contains one signed/notarized universal macOS DMG,
-one Authenticode-signed Windows x64 MSI, the two signed Windows inner
-executables for audit, Linux x64 deb/rpm packages plus the two raw inner
-executables, detached GPG signatures and public key, signed `SHA256SUMS`, and a
-signed `connect-desktop-staging.json` binding them to `version` and
-`source_sha`.
+one signed universal `.app.tar.gz` plus its Tauri updater signature, one
+Authenticode-signed Windows x64 MSI plus its Tauri updater signature, the two
+signed Windows inner executables for audit, Linux x64 deb/rpm packages plus the
+two raw inner executables, detached GPG signatures and public key, signed
+`SHA256SUMS`, signed `latest.json`, and a signed
+`connect-desktop-staging.json` binding them to `version` and `source_sha`.
 
 ### Private source and version contract
 
@@ -545,7 +553,9 @@ source or GitHub App credential:
   runtime + minimal `allow-jit` entitlement), signs the outer app, requires
   Apple Team ID `V53XMA78UF` and bundle identifier
   `ai.anyray.connect-tray`, notarizes and staples it, then creates, signs,
-  notarizes, and staples one universal `.dmg`. A credential-free
+  notarizes, and staples one universal `.dmg`. The stapled app is also packed
+  as a space-free `.app.tar.gz` and signed with the Tauri updater key. A
+  credential-free
   `verify-macos-signed` job on the same fleet mounts and exercises the final
   DMG. Teardown follows the signed smoke with `always()`. The Mac host is
   reused inside its paid 24h window, so the signing job deletes its keychain
@@ -554,7 +564,8 @@ source or GitHub App credential:
   Windows; sign and verify both through the existing Azure Artifact Signing
   script on Linux; restore those signed bytes on Windows and create the MSI
   from the already-built files (with a before/after hash guard); sign the outer
-  MSI through Azure; finally verify the two inner executables and MSI with
+  MSI through Azure, then sign those final MSI bytes with the Tauri updater
+  key; finally verify the two inner executables, MSI, and updater signature with
   Windows' `Get-AuthenticodeSignature` trust stack, including publisher and
   timestamp.
 - **Linux x64:** compile the raw Tauri main executable and engine, then build
@@ -591,7 +602,7 @@ uninstalling the desktop app.
 
 `SHA256SUMS` is generated only after Apple/Azure signing, because those signers
 rewrite their artifacts. The staging manifest binds every checksum to the
-explicit Connect version and private source commit.
+explicit Connect version and private source commit and points to `latest.json`.
 
 ### Required infrastructure and first-run validation
 
@@ -600,8 +611,14 @@ four Azure variables, Linux GPG key/passphrase, and Mac-fleet role listed
 earlier in this document are mandatory; preflight fails closed and names
 anything absent. (A DMG uses the Application identity, so this lane does not
 consume the separate Apple Installer certificate used by `.pkg`.) The lane also
-needs the two GitHub App secrets above. Do not turn a missing credential into
-an unsigned skip.
+needs the two GitHub App secrets above and these updater secrets:
+
+| Secret | Value |
+| --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` | The Tauri minisign private key file content used to sign macOS updater bundles and the final Windows MSI. |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password protecting that updater private key. |
+
+Do not turn a missing credential into an unsigned skip.
 
 Native runner requirements are:
 
@@ -626,7 +643,8 @@ The Mac universal build, Windows MSI bundling, and final signing sequence also
 need one full credentialed dry-run rehearsal on the real runners. Local static
 checks cannot emulate Developer ID notarization, Azure-issued signatures,
 Windows native trust verification, or Tauri's platform bundlers; do not publish
-the staging prerelease until that dry run is green.
+the staging prerelease until that dry run is green. This lane has never run with
+credentials, so the first credentialed dry run is the real integration test.
 
 ## Trusted-channel packages (winget · Homebrew)
 

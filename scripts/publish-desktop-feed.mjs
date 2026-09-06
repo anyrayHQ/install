@@ -72,10 +72,15 @@ export function publishFeed({ repo, version, tag, assetsDir }, run = gh) {
     if (published.version !== version || published.tag !== tag) throw new Error('Published feed does not match release');
     run(['release', 'edit', feed, '--repo', repo, '--notes', notes, '--prerelease', '--latest=false']);
   } catch (error) {
+    const rollbackErrors = [];
     for (const [id, name] of renames.reverse()) {
       try { rename(id, name); } catch (rollbackError) {
-        throw new AggregateError([error, rollbackError], 'Feed rollback failed; recover retained previous/pending assets before retrying');
+        // One failed rename must not prevent independent assets being restored.
+        rollbackErrors.push(rollbackError);
       }
+    }
+    if (rollbackErrors.length > 0) {
+      throw new AggregateError([error, ...rollbackErrors], 'Feed rollback failed; recover retained previous/pending assets before retrying');
     }
     throw error;
   } finally {

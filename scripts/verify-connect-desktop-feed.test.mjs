@@ -132,3 +132,32 @@ test('failure after switching both assets rolls back the complete pair', (t) => 
   assert.deepEqual(f.assets.slice(0, 2).map((asset) => asset.name), names);
   assert.ok(!f.calls.some((args) => args.includes('DELETE')));
 });
+
+test('a failed candidate rollback does not skip restoring the remaining old assets', (t) => {
+  const f = fixture(t, { fail: (args) => args.includes('PATCH') && args[1].endsWith('/4') });
+  assert.throws(f.publish, (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.errors.length, 2);
+    return true;
+  });
+  assert.deepEqual(f.assets.slice(0, 2).map((asset) => asset.name), names);
+  assert.deepEqual(f.calls.filter((args) => args.includes('PATCH')).slice(-4)
+    .map((args) => Number(args[1].split('/').at(-1))), [4, 2, 3, 1]);
+  assert.ok(!f.calls.some((args) => args.includes('DELETE')));
+});
+
+test('rollback reports every failure after attempting every restoration', (t) => {
+  let failed = false;
+  const f = fixture(t, { fail: (args) => {
+    if (!args.includes('PATCH')) return false;
+    if (args[1].endsWith('/4')) failed = true;
+    return failed;
+  } });
+  assert.throws(f.publish, (error) => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.errors.length, 5); // Publication error and all four rollback errors.
+    return true;
+  });
+  assert.deepEqual(f.calls.filter((args) => args.includes('PATCH')).slice(-4)
+    .map((args) => Number(args[1].split('/').at(-1))), [4, 2, 3, 1]);
+});

@@ -1548,14 +1548,8 @@ jobs:
           test "$(jq -r .version assets/connect-desktop-staging.json)" = "$VERSION"
           test "$(jq -r .sourceCommit assets/connect-desktop-staging.json)" = "$SOURCE_SHA"
 
-          if existing_prerelease="$(gh api "repos/${REPO}/releases/tags/${tag}" \
-            --jq .prerelease 2>/dev/null)"; then
-            if [ "$existing_prerelease" != true ] || [ "$latest_before" = "$tag" ]; then
-              echo "::error::refusing to replace $tag because the existing release is not an isolated prerelease"
-              exit 1
-            fi
-          fi
-          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          # Create-only: an existing tag fails publication without changing bytes
+          # referenced by a live or cached feed. Rebuilds need a new version/source.
           gh release create "$tag" \
             --title "Anyray Connect desktop ${VERSION} (${SHORT_SHA}, staging only)" \
             --notes "Signed staging-only desktop installers and update manifest built from private monorepo commit ${SOURCE_SHA}. This versioned prerelease is deliberately never latest; connect.sh, connect.ps1, npm, Homebrew, Winget, and the existing CLI release lane are unchanged." \
@@ -1575,36 +1569,15 @@ jobs:
           }
           echo "published staging prerelease $tag; releases/latest remains $latest_after"
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
       - name: Point the staging feed at this release
         run: |
           set -euo pipefail
-          tag="connect-desktop-staging-v${VERSION}-${SHORT_SHA}"
-          feed_tag="connect-desktop-staging"
           latest_before="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
-          notes="Updater feed for staging desktop builds. Points at ${tag}. Do not install from here; install from the versioned prerelease."
-          # The feed release holds only the manifest; the bytes live in the versioned prerelease.
-          # Replace assets in place so the URL never goes dark between a delete and a create.
-          if gh api "repos/${REPO}/releases/tags/${feed_tag}" --jq .prerelease >/dev/null 2>&1; then
-            test "$(gh api "repos/${REPO}/releases/tags/${feed_tag}" --jq .prerelease)" = true || {
-              echo "::error::${feed_tag} exists and is not a prerelease; refusing to replace it"; exit 1; }
-            current="$(curl -fsSL "https://github.com/${REPO}/releases/download/${feed_tag}/connect-desktop-staging.json" | jq -r .version || echo 0)"
-            if [ "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
-              echo "::error::feed already serves ${current}, newer than ${VERSION}; refusing to downgrade it"; exit 1
-            fi
-            gh release upload "$feed_tag" \
-              assets/connect-desktop-staging.json \
-              assets/connect-desktop-staging.json.asc \
-              --clobber
-            gh release edit "$feed_tag" --notes "$notes" --prerelease --latest=false
-          else
-            gh release create "$feed_tag" \
-              --title "Anyray Connect desktop staging feed" \
-              --notes "$notes" \
-              --prerelease --latest=false \
-              assets/connect-desktop-staging.json \
-              assets/connect-desktop-staging.json.asc
-          fi
+          node scripts/publish-desktop-feed.mjs
           test "$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)" = "$latest_before" || {
             echo "::error::feed release changed releases/latest"; exit 1; }
-          curl -fsSL "https://github.com/${REPO}/releases/download/${feed_tag}/connect-desktop-staging.json" \
+          curl -fsSL "https://github.com/${REPO}/releases/download/connect-desktop-staging/connect-desktop-staging.json" \
             | jq -e --arg v "$VERSION" '.version == $v'

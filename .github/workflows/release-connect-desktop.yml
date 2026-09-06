@@ -5,7 +5,8 @@ name: Release Anyray Connect desktop (staging only)
 # This workflow is deliberately NOT called by release-connect-binaries.yml and
 # has no push, tag, workflow_run, or repository_dispatch trigger. It never
 # reads npm, never updates releases/latest, and never renders or publishes the
-# CLI's connect manifests, Homebrew cask, Winget manifests, or updater metadata.
+# CLI's connect manifests, Homebrew cask, or Winget manifests.
+# This lane publishes the desktop update feed as a manifest only, with no updater signatures.
 # A failure here therefore cannot block or downgrade the existing CLI release.
 #
 # Supply-chain boundary: every source-consuming native job uses its own
@@ -35,8 +36,13 @@ on:
         description: 'Exact 40-hex anyrayHQ/monorepo commit reachable from origin/main'
         required: true
         type: string
+      min_version:
+        description: 'Lowest desktop version allowed to keep running; older installs update without asking. Empty = no floor.'
+        required: false
+        type: string
+        default: ''
       dry_run:
-        description: 'Build, sign, notarize, and retain a workflow artifact only. When false, publish only a staging prerelease that is never latest.'
+        description: 'Build, sign, notarize, and retain a workflow artifact only. When false, publish the versioned staging prerelease and moving updater feed; neither becomes latest.'
         required: false
         type: boolean
         default: true
@@ -90,9 +96,11 @@ jobs:
       version: ${{ steps.inputs.outputs.version }}
       source_sha: ${{ steps.inputs.outputs.source_sha }}
       short_sha: ${{ steps.inputs.outputs.short_sha }}
+      min_version: ${{ steps.inputs.outputs.min_version }}
     env:
       VERSION_INPUT: ${{ inputs.version }}
       SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+      MIN_VERSION_INPUT: ${{ inputs.min_version }}
       MONOREPO_READ_APP_ID: ${{ secrets.MONOREPO_READ_APP_ID }}
       MONOREPO_READ_APP_PRIVATE_KEY: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
       AWS_MAC_FLEET_ROLE_ARN: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
@@ -120,6 +128,10 @@ jobs:
             echo "::error::source_sha must be an exact lowercase 40-hex commit SHA"
             exit 1
           fi
+          if [[ -n "$MIN_VERSION_INPUT" && ! "$MIN_VERSION_INPUT" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
+            echo "::error::min_version must be empty or a numeric dotted version with two to four components, got '$MIN_VERSION_INPUT'"
+            exit 1
+          fi
 
           missing=''
           for name in \
@@ -141,6 +153,7 @@ jobs:
             echo "version=$VERSION_INPUT"
             echo "source_sha=$SOURCE_SHA_INPUT"
             echo "short_sha=${SOURCE_SHA_INPUT:0:12}"
+            echo "min_version=$MIN_VERSION_INPUT"
           } >> "$GITHUB_OUTPUT"
           echo "desktop release inputs are explicit and all signing lanes are configured"
 
@@ -348,13 +361,13 @@ jobs:
             echo '::error::APPLE_SIGNING_CERT_P12 imported no valid Developer ID Application identity'
             exit 1
           fi
-          echo "identity=$IDENTITY" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
           umask 077
           printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/connect-desktop-notary-key.p8"
           test -s "$RUNNER_TEMP/connect-desktop-notary-key.p8"
 
-      - name: Sign, notarize, and staple the app and DMG
+      - name: Sign, notarize, and staple the app
         run: |
           set -euo pipefail
           mkdir -p expanded out
@@ -378,12 +391,12 @@ jobs:
 
           codesign --force --options runtime --timestamp \
             --entitlements "$RUNNER_TEMP/connect-desktop-engine-entitlements.plist" \
-            --identifier ai.anyray.connect-engine --sign "$identity" "$engine"
+            --identifier ai.anyray.connect-engine --sign "$APPLE_SIGNING_IDENTITY" "$engine"
           codesign --verify --strict --verbose=2 "$engine"
 
           # The nested engine is signed first; signing the bundle then signs the
           # app's main executable and seals the already-signed sidecar.
-          codesign --force --options runtime --timestamp --sign "$identity" "$app"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign_details="$(codesign -dv --verbose=4 "$app" 2>&1)"
           printf '%s\n' "$codesign_details" | grep -Fxq 'TeamIdentifier=V53XMA78UF'
@@ -401,6 +414,19 @@ jobs:
           xcrun stapler validate "$app"
           spctl -a -vvv -t exec "$app"
 
+      - name: Package the updater bundle
+        run: |
+          set -euo pipefail
+          app="$(find expanded -maxdepth 1 -type d -name '*.app' -print -quit)"
+          [ -n "$app" ] || { echo '::error::signed app is missing before updater packaging'; exit 1; }
+          tarball="out/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
+          tar -czf "$tarball" -C "$(dirname "$app")" "$(basename "$app")"
+
+      - name: Create, sign, notarize, and staple the DMG
+        run: |
+          set -euo pipefail
+          app="$(find expanded -maxdepth 1 -type d -name '*.app' -print -quit)"
+          [ -n "$app" ] || { echo '::error::signed app is missing before DMG packaging'; exit 1; }
           dmgroot="$RUNNER_TEMP/connect-desktop-dmgroot"
           mkdir -p "$dmgroot"
           ditto "$app" "$dmgroot/Anyray Connect.app"
@@ -408,7 +434,7 @@ jobs:
           dmg="out/anyray-connect-desktop-${VERSION}-macos-universal.dmg"
           hdiutil create -volname 'Anyray Connect' -srcfolder "$dmgroot" \
             -ov -format UDZO "$dmg"
-          codesign --force --timestamp --sign "$identity" "$dmg"
+          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
           codesign --verify --verbose=2 "$dmg"
 
           status="$(xcrun notarytool submit "$dmg" \
@@ -438,7 +464,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: connect-desktop-macos-signed
-          path: out/*.dmg
+          path: |
+            out/*.dmg
+            out/*.app.tar.gz
           if-no-files-found: error
 
   # Runtime validation is deliberately separate from signing. The signed app
@@ -459,6 +487,16 @@ jobs:
       - name: Verify, install, execute, and uninstall without touching CLI state
         run: |
           set -euo pipefail
+          tarball="signed/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
+          test -s "$tarball" || { echo '::error::signed macOS updater bundle is missing'; exit 1; }
+          updater_root="$RUNNER_TEMP/connect-desktop-updater-bundle"
+          mkdir -p "$updater_root"
+          tar -xzf "$tarball" -C "$updater_root"
+          updater_app="$(find "$updater_root" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          [ -n "$updater_app" ] || { echo '::error::macOS updater bundle contains no .app'; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$updater_app"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$updater_app/Contents/Info.plist")" = "$VERSION"
+
           dmg="$(find signed -maxdepth 1 -type f -name '*.dmg' -print -quit)"
           [ -n "$dmg" ] || { echo '::error::signed macOS DMG is missing'; exit 1; }
           codesign --verify --verbose=2 "$dmg"
@@ -1393,35 +1431,47 @@ jobs:
         with:
           name: connect-desktop-linux-signed
           path: platform/linux
-
       - name: Assemble signed platform outputs
         run: |
           set -euo pipefail
           mkdir -p assets
           cp platform/macos/*.dmg assets/
+          cp platform/macos/*.app.tar.gz assets/
           cp platform/windows-inner/*.exe assets/
           cp platform/windows-installer/*.msi assets/
           cp platform/linux/* assets/
           test "$(find assets -maxdepth 1 -type f -name '*.dmg' | wc -l)" -eq 1
+          test "$(find assets -maxdepth 1 -type f -name '*.app.tar.gz' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -type f -name '*windows*x64*.exe' | wc -l)" -eq 2
           test "$(find assets -maxdepth 1 -type f -name '*windows*x64.msi' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -type f -name '*linux*x64*' ! -name '*.asc' | wc -l)" -eq 4
           test "$(find assets -maxdepth 1 -type f -name '*linux*x64*.asc' | wc -l)" -eq 4
           test -f assets/anyray-connect-desktop-signing-key.asc
 
-      - name: Generate and sign the content-addressed staging manifest
+      - name: Generate desktop asset checksums
         run: |
           set -euo pipefail
           (
             cd assets
             sha256sum -- * > SHA256SUMS
           )
+
+      - name: Generate and sign the content-addressed staging manifest
+        env:
+          MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
+          SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
+        run: |
+          set -euo pipefail
           jq -Rn \
             --arg version "$VERSION" \
             --arg sourceCommit "$SOURCE_SHA" \
             --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg tag "connect-desktop-staging-v${VERSION}-${SHORT_SHA}" \
+            --arg min "$MIN_VERSION" \
             '[inputs | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")] as $artifacts
-             | {schemaVersion: 1, artifact: "anyray-connect-desktop-staging", version: $version, sourceCommit: $sourceCommit, createdAt: $createdAt, updater: null, artifacts: $artifacts}' \
+             | {schemaVersion: 1, artifact: "anyray-connect-desktop-staging", version: $version, sourceCommit: $sourceCommit, createdAt: $createdAt, tag: $tag}
+             + (if $min == "" then {} else {minVersion: $min} end)
+             + {updater: {feed: "connect-desktop-staging.json"}, artifacts: $artifacts}' \
             assets/SHA256SUMS > assets/connect-desktop-staging.json
           key_check="$RUNNER_TEMP/connect-desktop-public-key-check"
           mkdir -p "$key_check"
@@ -1439,7 +1489,12 @@ jobs:
           test "$(jq -r .version assets/connect-desktop-staging.json)" = "$VERSION"
           test "$(jq -r .sourceCommit assets/connect-desktop-staging.json)" = "$SOURCE_SHA"
           test "$(jq -r .artifact assets/connect-desktop-staging.json)" = 'anyray-connect-desktop-staging'
-          test "$(jq -r .updater assets/connect-desktop-staging.json)" = 'null'
+          test "$(jq -r .tag assets/connect-desktop-staging.json)" = "connect-desktop-staging-v${VERSION}-${SHORT_SHA}"
+          jq -e '.updater.feed == "connect-desktop-staging.json"' assets/connect-desktop-staging.json
+          jq -e '[.artifacts[] | select(.name | endswith(".app.tar.gz"))] | length == 1' \
+            assets/connect-desktop-staging.json
+          jq -e '[.artifacts[] | select(.name | endswith("windows-x64.msi"))] | length == 1' \
+            assets/connect-desktop-staging.json
           cat assets/SHA256SUMS
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -1453,6 +1508,10 @@ jobs:
     needs: [preflight, assemble-signed-staging]
     if: ${{ !inputs.dry_run }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    # Every run rewrites the one staging feed; serialize across versions.
+    concurrency:
+      group: connect-desktop-staging-feed
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
@@ -1489,17 +1548,11 @@ jobs:
           test "$(jq -r .version assets/connect-desktop-staging.json)" = "$VERSION"
           test "$(jq -r .sourceCommit assets/connect-desktop-staging.json)" = "$SOURCE_SHA"
 
-          if existing_prerelease="$(gh api "repos/${REPO}/releases/tags/${tag}" \
-            --jq .prerelease 2>/dev/null)"; then
-            if [ "$existing_prerelease" != true ] || [ "$latest_before" = "$tag" ]; then
-              echo "::error::refusing to replace $tag because the existing release is not an isolated prerelease"
-              exit 1
-            fi
-          fi
-          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          # Create-only: an existing tag fails publication without changing bytes
+          # referenced by a live or cached feed. Rebuilds need a new version/source.
           gh release create "$tag" \
             --title "Anyray Connect desktop ${VERSION} (${SHORT_SHA}, staging only)" \
-            --notes "Signed staging-only desktop installers built from private monorepo commit ${SOURCE_SHA}. This prerelease has no updater manifest and is deliberately never latest; connect.sh, connect.ps1, npm, Homebrew, Winget, and the existing CLI release lane are unchanged." \
+            --notes "Signed staging-only desktop installers and update manifest built from private monorepo commit ${SOURCE_SHA}. This versioned prerelease is deliberately never latest; connect.sh, connect.ps1, npm, Homebrew, Winget, and the existing CLI release lane are unchanged." \
             --prerelease \
             --latest=false \
             assets/*
@@ -1515,3 +1568,16 @@ jobs:
             exit 1
           }
           echo "published staging prerelease $tag; releases/latest remains $latest_after"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+      - name: Point the staging feed at this release
+        run: |
+          set -euo pipefail
+          latest_before="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+          node scripts/publish-desktop-feed.mjs
+          test "$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)" = "$latest_before" || {
+            echo "::error::feed release changed releases/latest"; exit 1; }
+          curl -fsSL "https://github.com/${REPO}/releases/download/connect-desktop-staging/connect-desktop-staging.json" \
+            | jq -e --arg v "$VERSION" '.version == $v'

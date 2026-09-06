@@ -218,6 +218,8 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(publish, /--latest=false/);
     assert.match(publish, /latest_before/);
     assert.match(publish, /latest_after/);
+    assert.doesNotMatch(publish, /release delete|--clobber|echo 0/);
+    assert.match(publish, /node scripts\/publish-desktop-feed\.mjs/);
     assert.doesNotMatch(workflow, /connect-update\.json|npm publish|gen-winget|gen-homebrew/);
   });
 });

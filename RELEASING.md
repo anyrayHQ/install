@@ -472,11 +472,34 @@ The dispatch has exactly four inputs:
 
 There is deliberately no stable/public selector. Before a staging prerelease is
 created, the workflow records `releases/latest`; after publication it requires
-that value to be unchanged. A non-dry run also recreates the prerelease tag
+that value to be unchanged. A non-dry run also updates the prerelease feed
 `connect-desktop-staging` with only the signed update manifest. The lane never
 writes `connect-update.json`, `SHA256SUMS` in an existing CLI release, npm,
 Homebrew, Winget, `connect.sh`, `connect.ps1`, or any current install path.
 The stable `connect-desktop` updater feed is not published yet.
+
+Versioned releases are create-only: redispatching the same version/source cannot
+replace their bytes. Use a new version/source for a rebuild. If publication of
+the feed fails after the versioned release was created, recover the feed and
+run `node scripts/publish-desktop-feed.mjs` with `REPO`, `VERSION`, `SHORT_SHA`,
+and `GH_TOKEN` set, from a directory containing `assets/` with the original
+manifest and signature downloaded from that release. Do not regenerate them.
+
+Feed publication aborts on lookup errors, malformed versions, and backward
+version changes. Both replacement assets upload as `.pending` before any live
+asset is renamed. Old assets are retained as `.previous` until publication
+succeeds; a failed switch attempts to restore their original names. GitHub asset
+renames are not atomic: clients may see a brief missing asset or mismatched pair
+during the switch and should retry later.
+
+A failed upload, interrupted runner, failed rollback, or failed backup cleanup
+can leave `.pending`/`.previous` assets. Further publication then stops for
+operator recovery. Inspect asset IDs and manifests first. For rollback, rename
+any new canonical assets to `.pending`, restore the old `.previous` assets to
+their canonical names, verify the manifest/signature pair, then remove only the
+abandoned `.pending` assets. If the new canonical pair is already valid and the
+switch succeeded, remove only the old `.previous` backups. Never delete or
+rebuild the versioned release to repair a feed.
 
 The desktop app fetches `connect-desktop-staging.json` from the
 `connect-desktop-staging` release. It downloads the artifact named there from

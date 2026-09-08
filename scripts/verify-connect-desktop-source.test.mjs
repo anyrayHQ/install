@@ -15,7 +15,10 @@ const git = (dir, ...args) =>
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
 
-const writeFixture = (dir, { externalBin = ['binaries/anyray-connect'] } = {}) => {
+const writeFixture = (dir, {
+  externalBin = ['binaries/anyray-connect'],
+  minimumSystemVersion = '13.0',
+} = {}) => {
   mkdirSync(join(dir, 'connect'), { recursive: true });
   mkdirSync(join(dir, 'connect-tray/src-tauri'), { recursive: true });
   writeFileSync(
@@ -33,7 +36,7 @@ const writeFixture = (dir, { externalBin = ['binaries/anyray-connect'] } = {}) =
   writeFileSync(
     join(dir, 'connect-tray/src-tauri/tauri.conf.json'),
     `${JSON.stringify(
-      { version: VERSION, bundle: { externalBin } },
+      { version: VERSION, bundle: { externalBin, macOS: { minimumSystemVersion } } },
       null,
       2
     )}\n`
@@ -129,6 +132,19 @@ describe('private Connect desktop source contract', () => {
           sourceSha: sha.slice(0, 12),
         }),
       /exact lowercase 40-hex/
+    );
+  });
+
+  test('refuses a desktop build that advertises an unsupported macOS version', () => {
+    const { dir } = repositoryFixture();
+    writeFixture(dir, { minimumSystemVersion: '10.13' });
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'unsupported macOS floor');
+    const sha = git(dir, 'rev-parse', 'HEAD');
+    git(dir, 'update-ref', 'refs/remotes/origin/main', sha);
+    assert.throws(
+      () => verifyConnectDesktopSource({ sourceDir: dir, version: VERSION, sourceSha: sha }),
+      /minimumSystemVersion must be 13\.0/
     );
   });
 });

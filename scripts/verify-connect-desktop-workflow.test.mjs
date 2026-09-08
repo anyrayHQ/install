@@ -157,6 +157,8 @@ describe('desktop staging workflow safety contract', () => {
 
   test('gates assembly on native install/uninstall smoke tests', () => {
     const mac = job('verify-macos-signed');
+    assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$updater_app\/Contents\/Info\.plist"\)" = '13\.0'/);
+    assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$app\/Contents\/Info\.plist"\)" = '13\.0'/);
     assert.match(mac, /ditto "\$app" "\$installed_app"/);
     assert.match(mac, /HOME="\$existing_home" "\$installed_main"/);
     assert.match(mac, /ai\.anyray\.connect-tray\.plist/);

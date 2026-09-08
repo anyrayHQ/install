@@ -192,11 +192,11 @@ It needs a `Role` (never a `ClusterRole`) granting `get`, `list` and `patch` on
 `patch` stamps the restart annotation. Nothing else.
 
 **A build that will not start stalls the roll, it does not drop the deployment.**
-The gateway and proxy roll with `maxUnavailable: 0`, so a replacement must pass
-its readiness probe before an old pod is retired. The optimizer is the exception
-while `optimizer.persistence.enabled` is `true`: its `ReadWriteOnce` volume forces
-`strategy: Recreate` and a real gap. The gateway fails open across that gap, so it
-costs prompt-cache efficiency rather than availability.
+The gateway, optimizer and proxy roll with `maxUnavailable: 0`, so a replacement
+must pass its readiness probe before an old pod is retired. Turning
+`optimizer.persistence.enabled` back on is the exception: its `ReadWriteOnce`
+volume forces `strategy: Recreate` and a real gap. The gateway fails open across
+that gap, so it costs prompt-cache efficiency rather than availability.
 
 **A roll is unconditional.** It cannot tell a release that only needs new bytes
 from one that needs a new setting from you first, which is the check the gateway
@@ -682,16 +682,20 @@ the gateway alone silently degrades the optimizer to in-memory stash
 
 ## v1 limitations to be aware of
 
-- **The optimizer is still on a single-attach PVC.** The gateway is not, as of
-  chart 0.5.0: everything an operator sets moved to the shared Postgres, so it runs
-  on `emptyDir`, rolls without a gap, and scales past one replica. The optimizer's
-  runtime config is the one admin-mutable store still held per pod, so it keeps its
-  volume by default and therefore keeps the `Recreate` strategy and `replicas: 1`.
-  That costs money rather than availability: the gateway fails open when the
-  optimizer is unreachable, and the fail-open path busts the provider prompt cache
-  on warm sessions. Set `optimizer.persistence.enabled: false` to trade that config
-  for a gap-free roll. Both PVCs survive `helm uninstall` via a
-  `helm.sh/resource-policy: keep` annotation.
+- **The optimizer defaults to one replica.** As of chart 0.7.0 it is off the
+  single-attach PVC, the way the gateway went in 0.5.0: its runtime config lives in
+  the shared Postgres (migration 0058, appVersion v1.10.224), so it runs on
+  `emptyDir` and rolls with `maxUnavailable: 0` and no gap. `optimizer.replicas`
+  still defaults to `1`, because `replicas > 1` requires `gateway.contentMode` to
+  be something other than `off` and raising the default would refuse to render for
+  every content-mode-off install. **Raise it to 2 once content mode is on.** A
+  single optimizer pod cannot answer while its event loop is blocked by an
+  onnxruntime inference: the accept backlog fills, new connections are refused, and
+  the gateway books `error:econnrefused`, fails open onto original bytes and holds
+  that session for 15 minutes. A second replica absorbs those. Setting
+  `optimizer.persistence.enabled: true` is still supported and re-imposes both the
+  `Recreate` strategy and the one-replica cap. Both PVCs survive `helm uninstall`
+  via a `helm.sh/resource-policy: keep` annotation.
 - **Single-replica bundled Postgres.** The bundled Postgres is a `replicas: 1`
   StatefulSet — adequate for most orgs, but not HA. Use the external-Postgres
   values above for a managed cloud equivalent.

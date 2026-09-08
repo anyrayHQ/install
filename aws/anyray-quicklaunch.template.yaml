@@ -43,7 +43,7 @@ Metadata:
             UpstreamUrl,
           ]
       - Label: { default: Optimizer }
-        Parameters: [OptimizerTimeoutMs, OptimizerVisionTimeoutMs]
+        Parameters: [OptimizerTimeoutMs]
       - Label: { default: Availability }
         Parameters: [HighAvailability]
       - Label: { default: Database }
@@ -277,11 +277,6 @@ Parameters:
     Default: '800'
     AllowedPattern: '^[0-9]+$'
     Description: Optimizer timeout for normal requests in milliseconds.
-  OptimizerVisionTimeoutMs:
-    Type: String
-    Default: '10000'
-    AllowedPattern: '^[0-9]+$'
-    Description: Optimizer timeout for vision requests in milliseconds.
   DbInstanceClass:
     Type: String
     Default: db.t4g.micro
@@ -1827,7 +1822,6 @@ Resources:
               - { Name: ANYRAY_UPDATER_URL, Value: !GetAtt UpdaterUrl.FunctionUrl }
               - !Ref 'AWS::NoValue'
             - { Name: ANYRAY_OPTIMIZER_TIMEOUT_MS, Value: !Ref OptimizerTimeoutMs }
-            - { Name: ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS, Value: !Ref OptimizerVisionTimeoutMs }
             - { Name: ANYRAY_DEFAULT_MODEL, Value: !Ref DefaultModel }
             - { Name: ANYRAY_ALLOW_PLAINTEXT, Value: !Ref AllowPlaintext }
             - { Name: ANYRAY_DATA_DIR, Value: /data }

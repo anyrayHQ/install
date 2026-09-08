@@ -572,6 +572,9 @@ jobs:
             .github/actions
             scripts
           sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -587,6 +590,7 @@ jobs:
           DESKTOP_MAC_TEST_USER: ${{ vars.DESKTOP_MAC_TEST_USER }}
         run: |
           set -euo pipefail
+          trap 'echo "::error::macOS verification failed at script line $LINENO"' ERR
           tarball="signed/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
           test -s "$tarball" || { echo '::error::signed macOS updater bundle is missing'; exit 1; }
           updater_root="$RUNNER_TEMP/connect-desktop-updater-bundle"
@@ -813,6 +817,7 @@ jobs:
           $line = (& $engine --version | Select-Object -First 1)
           if ($line -ne "anyray-connect $env:VERSION") { throw "engine version mismatch: $line" }
           New-Item -ItemType Directory -Force -Path out | Out-Null
+          node scripts/prepare-desktop-msi.mjs $main --prepare
           Copy-Item $main out/anyray-connect-tray-windows-x64.exe
           Copy-Item $engine out/anyray-connect-engine-windows-x64.exe
 
@@ -998,6 +1003,7 @@ jobs:
           rustup default "$env:RUST_TOOLCHAIN"
           npm install --prefix "$env:RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$env:TAURI_CLI_VERSION"
           $main = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release/connect-tray.exe"
+          node scripts/prepare-desktop-msi.mjs $main --check
           $before = (Get-FileHash $main -Algorithm SHA256).Hash
           Push-Location private-source/connect-tray/src-tauri
           node "$env:GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --target $env:TARGET_TRIPLE --bundles msi `
@@ -1081,6 +1087,9 @@ jobs:
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -1123,7 +1132,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Split-Path $state),(Split-Path $scheduler) | Out-Null
           Set-Content -NoNewline -Path $state -Value '{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true}'
           Set-Content -NoNewline -Path $scheduler -Value 'existing-scheduler-sentinel'
-          $stateBefore = (Get-FileHash $state -Algorithm SHA256).Hash
+          $profileBefore = Join-Path $env:RUNNER_TEMP 'connect-desktop-profile-before.json'
+          Copy-Item $state $profileBefore
           $schedulerBefore = (Get-FileHash $scheduler -Algorithm SHA256).Hash
           $env:HOME = $existingHome
           $env:USERPROFILE = $existingHome
@@ -1157,6 +1167,15 @@ jobs:
               Select-Object -First 1
             if (-not $installedEngine) { throw 'installed MSI has no bundled anyray-connect.exe' }
             if (-not $installedMain) { throw 'installed MSI has no connect-tray.exe' }
+            # Compare the actual MSI payload, not just Tauri's restored input.
+            foreach ($pair in @(
+              @($installedMain.FullName, 'inner/anyray-connect-tray-windows-x64.exe'),
+              @($installedEngine.FullName, 'inner/anyray-connect-engine-windows-x64.exe')
+            )) {
+              if ((Get-FileHash $pair[0] -Algorithm SHA256).Hash -ne (Get-FileHash $pair[1] -Algorithm SHA256).Hash) {
+                throw "MSI changed signed payload: $($pair[0])"
+              }
+            }
             ./scripts/verify-authenticode-windows.ps1 -Path $installedEngine.FullName
             ./scripts/verify-authenticode-windows.ps1 -Path $installedMain.FullName
             $installedVersion = (& $installedEngine.FullName --version | Select-Object -First 1)
@@ -1183,16 +1202,12 @@ jobs:
             if ($runValue.IndexOf($installedMain.FullName, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
               throw "desktop autostart value does not contain installed main path: $runValue"
             }
+            node scripts/verify-desktop-profile.mjs $profileBefore $state $installedEngine.FullName
             Stop-Process -Id $appProcess.Id -Force
             Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
             $appProcess = $null
 
-            $profile = Get-Content -Raw $state | ConvertFrom-Json
-            if ($profile.engineOwner -ne 'app' -or $profile.persistenceOwner -ne 'tray' -or
-                $profile.managedEnrollmentDisabled -ne $true -or $profile.loginRegistrationState -ne 'enabled') {
-              throw 'installed tray did not adopt ownership while preserving enrollment opt-out'
-            }
-            # App ownership is an expected profile change; uninstall must preserve that state.
+            node scripts/verify-desktop-profile.mjs $profileBefore $state $installedEngine.FullName
             $stateBefore = (Get-FileHash $state -Algorithm SHA256).Hash
             if ((Get-FileHash $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
               throw 'running the installed tray changed the existing scheduler sentinel'

@@ -1,3 +1,15 @@
+{{- /* Running WITHOUT the data volume is only lossless once the image keeps the
+       optimizer's runtime config in Postgres (migration 0058, appVersion
+       v1.10.224 — the same floor the gateway's 0057 guard uses). On an older
+       image that config is a file on this volume, so an emptyDir silently
+       discards every admin edit on each pod restart and the optimizer reverts
+       to its image-baked defaults. Refuse to render rather than ship that; both
+       ways out are named, exactly as in gateway.yaml. */}}
+{{- if not .Values.optimizer.persistence.enabled }}
+{{- if not (include "anyray.atLeastAppVersion" (dict "component" "optimizer" "floor" (include "anyray.haFloor" .) "context" .)) }}
+{{- fail (printf "optimizer.persistence.enabled=false needs an optimizer image of %s or newer (this renders %s): older images keep the runtime config as a file on that volume, so running without it discards every admin edit on each restart. Either upgrade the image, or set optimizer.persistence.enabled=true (which also caps optimizer.replicas at 1 and forces a Recreate rollout)." (include "anyray.haFloor" .) (include "anyray.effectiveImageTag" (dict "component" "optimizer" "context" .))) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

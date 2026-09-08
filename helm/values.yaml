@@ -333,7 +333,6 @@ gateway:
   contentMode: encrypted
   allowPlaintext: "false"
   optimizerTimeoutMs: "800"
-  optimizerVisionTimeoutMs: "10000"
   # Target for the `anyray-default` model alias (request names no model). Matches
   # the other deploy artifacts; blank it to fall back to the gateway's own default.
   defaultModel: "anthropic/claude-sonnet-4-5"

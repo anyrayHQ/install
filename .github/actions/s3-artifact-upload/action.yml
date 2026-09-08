@@ -1,0 +1,82 @@
+name: Upload a run artifact to S3
+description: >-
+  Job-to-job handoff through the CI artifacts bucket instead of
+  actions/upload-artifact. GitHub bills Actions storage in GB-hours accrued
+  over the billing period, and the quota is an org-wide fuse: once it blows,
+  EVERY upload in EVERY repo fails ("Artifact storage quota has been hit"),
+  which on 2026-09-08 stopped the release chain outright. S3 has no such fuse,
+  costs ~$0.02/GB-month, and the runners are already inside AWS so the
+  transfer is same-region and free. Objects expire after 7 days by bucket
+  lifecycle, so nothing accumulates.
+
+  Keys are scoped to the run AND the attempt, so a re-run never reads a
+  previous attempt's bytes.
+
+inputs:
+  name:
+    description: Artifact name, the same string the matching download uses.
+    required: true
+  path:
+    description: File or directory to upload.
+    required: true
+  if-no-files-found:
+    description: '"error" (default) or "warn" when the path matches nothing.'
+    required: false
+    default: error
+
+runs:
+  using: composite
+  steps:
+    - name: Upload to S3
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ inputs.name }}
+        ARTIFACT_PATH: ${{ inputs.path }}
+        NO_FILES: ${{ inputs.if-no-files-found }}
+        BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${BUCKET:-}" ]; then
+          echo "::error::CI_ARTIFACTS_BUCKET is unset. Set the repository variable before using this action."
+          exit 1
+        fi
+
+        dest="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${ARTIFACT_NAME}"
+
+        # Mirror upload-artifact's contract: a path matching nothing is an
+        # error by default, because a silently empty handoff surfaces much
+        # later as a confusing "file not found" in the consuming job.
+        # Deliberate word-split + glob: `path` accepts several
+        # whitespace-separated paths, each of which may be a glob, mirroring
+        # upload-artifact's multi-line `path:`. nullglob makes a
+        # non-matching pattern vanish rather than survive literally, so the
+        # emptiness check below is the single place that decides.
+        shopt -s nullglob
+        # shellcheck disable=SC2206 # the split IS the feature, see above
+        matches=( $ARTIFACT_PATH )
+        shopt -u nullglob
+        if [ ${#matches[@]} -eq 0 ]; then
+          if [ "$NO_FILES" = "error" ]; then
+            echo "::error::No files matched '${ARTIFACT_PATH}' for artifact '${ARTIFACT_NAME}'."
+            exit 1
+          fi
+          echo "::warning::No files matched '${ARTIFACT_PATH}' for artifact '${ARTIFACT_NAME}'; uploading nothing."
+          exit 0
+        fi
+
+        for m in "${matches[@]}"; do
+          if [ -d "$m" ]; then
+            aws s3 cp "$m" "${dest}/" --recursive --only-show-errors
+          else
+            aws s3 cp "$m" "${dest}/$(basename "$m")" --only-show-errors
+          fi
+        done
+        echo "Uploaded '${ARTIFACT_NAME}' to ${dest}"
+
+        # These objects are no longer downloadable from the run page, so name
+        # the URI in the summary: a dry run's asset set is meant to be
+        # inspected by a person, and "where did it go" should not require
+        # reading the workflow.
+        # shellcheck disable=SC2016 # backticks are literal markdown here
+        printf '`%s` -> `%s`\n\n' "$ARTIFACT_NAME" "$dest" >> "$GITHUB_STEP_SUMMARY"

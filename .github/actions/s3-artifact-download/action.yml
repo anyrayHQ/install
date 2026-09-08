@@ -1,0 +1,48 @@
+name: Download a run artifact from S3
+description: >-
+  The read half of the S3 job-to-job handoff; pairs with s3-artifact-upload.
+  Reads the same run+attempt scoped key the uploading job wrote.
+
+  Like actions/download-artifact, this does NOT preserve file modes: S3 stores
+  bytes, not the executable bit. Every consumer that runs a downloaded binary
+  must chmod +x it, exactly as it already had to under upload-artifact v4.
+
+inputs:
+  name:
+    description: Artifact name, matching the upload.
+    required: true
+  path:
+    description: Directory to download into (created if absent).
+    required: false
+    default: .
+
+runs:
+  using: composite
+  steps:
+    - name: Download from S3
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ inputs.name }}
+        DEST_PATH: ${{ inputs.path }}
+        BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${BUCKET:-}" ]; then
+          echo "::error::CI_ARTIFACTS_BUCKET is unset. Set the repository variable before using this action."
+          exit 1
+        fi
+
+        src="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${ARTIFACT_NAME}"
+
+        # An empty prefix means the producing job never uploaded. Fail here
+        # rather than let the consumer proceed on an empty directory and
+        # publish a release that is quietly missing a platform's binary.
+        if [ -z "$(aws s3 ls "${src}/" 2>/dev/null | head -1)" ]; then
+          echo "::error::No objects under ${src} — the job that uploads '${ARTIFACT_NAME}' did not run or wrote nothing."
+          exit 1
+        fi
+
+        mkdir -p "$DEST_PATH"
+        aws s3 cp "${src}/" "$DEST_PATH" --recursive --only-show-errors
+        echo "Downloaded '${ARTIFACT_NAME}' from ${src} into ${DEST_PATH}"

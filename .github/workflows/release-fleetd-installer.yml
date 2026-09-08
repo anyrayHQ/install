@@ -111,6 +111,7 @@ jobs:
   # provisioning verbatim — see its comments for the OIDC role and lifecycle.
   provision-mac:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write # assume the fleet-lifecycle role via OIDC
@@ -125,6 +126,7 @@ jobs:
   build-macos:
     needs: provision-mac
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     env:
       # GitHub Actions can't read `secrets.*` in a step `if:` — map them to env
       # so the preflight below can check presence without leaking values.
@@ -410,6 +412,7 @@ jobs:
   # Windows runner the connect binaries already use.
   build-windows:
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     steps:
       - name: Install fleetctl (pinned + checksum-verified)
         shell: pwsh
@@ -513,6 +516,7 @@ jobs:
   sign-windows:
     needs: build-windows
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -557,6 +561,7 @@ jobs:
   verify-windows-signature:
     needs: sign-windows
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
     steps:
@@ -572,6 +577,7 @@ jobs:
   assemble-signed-release:
     needs: [build-macos, sign-windows, verify-windows-signature]
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -632,6 +638,7 @@ jobs:
     needs: build-macos
     if: ${{ always() }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -647,6 +654,7 @@ jobs:
     needs: assemble-signed-release
     if: ${{ !inputs.dry_run }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: write # create the release + upload assets
     steps:

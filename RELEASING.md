@@ -418,16 +418,18 @@ work. **Keep the `anyray-install-runner-win` project**: this workflow no longer
 uses it, but `release-fleetd-installer.yml`'s `build-windows` still does
 (fleetctl shells out to WiX `heat`, which needs a real Windows host).
 
-**Why macOS is on-demand.** Bun-compiled binaries can only be Developer-ID-signed by Apple's
-own `codesign` (the Linux signers rcodesign and quill both mishandle Bun's x64 Mach-O — proven
-by E2E: the signature verifies but the binary won't launch). Apple's codesign needs macOS, and
-CodeBuild only offers macOS via a reserved-capacity EC2 Mac fleet that cannot scale below one
-instance (24-hour-minimum dedicated-host billing, ~$450/mo if left standing). So the release
-allocates a Mac **only for the signing run**: `provision-mac` creates the MAC_ARM fleet + an
-ephemeral runner project, `sign-macos` runs on it, and `teardown-mac` (always) deletes both.
-Net cost is one 24-hour-minimum Mac charge per release (~$15-16), never a standing bill. The
-lifecycle lives in `scripts/mac-fleet.sh` (`up`/`down`); the release workflow drives it via a
-scoped GitHub-OIDC role (`AWS_MAC_FLEET_ROLE_ARN` repo variable → `anyray-install-mac-fleet-ci`).
+**Why macOS is on-demand.** Apple signing requires a Mac. EC2 Mac hosts have a
+24-hour minimum charge; leaving a fleet ACTIVE continues billing beyond it.
+`mac-fleet.sh down` deletes the runner project and requests fleet deletion on
+success or failure. `up` accepts a fleet still usable in PENDING_DELETION, so
+releases may reuse the remaining paid window. It fails if readiness takes more
+than 20 minutes. Cleanup must never be replaced with simply leaving the fleet active.
+
+The Connect CLI, desktop, and fleetd release workflows share the
+`anyray-install-mac-release` concurrency group for their entire runs. This keeps
+one release's teardown from deleting another release's runner. GitHub retains
+one running and one pending run per group; a new dispatch replaces an older
+pending run. Dispatch releases deliberately and do not overlap multiple requests.
 
 **`anyray-install-runner-ubuntu`** exists for the tray lane alone: Tauri links
 against `webkit2gtk-4.1`, which Amazon Linux 2 does not package, and the AL2
@@ -524,6 +526,36 @@ for audit, Linux x64 deb/rpm packages plus the two raw inner executables,
 detached GPG signatures and public key, signed `SHA256SUMS`, and a signed
 `connect-desktop-staging.json` binding them to `version` and `source_sha`.
 
+### Build time and early failure checks
+
+Before starting native runners, a Linux job checks the source SHA/version and
+publication eligibility: duplicate releases, a newer feed, or a feed awaiting
+recovery fail before Mac allocation. `min_version` must not exceed `version`,
+and the release version must fit MSI's `255.255.65535` limits. Dry runs skip
+remote publication checks but still validate the source and version inputs.
+
+Run Corepack from inside `private-source` so it uses the source's pinned pnpm.
+The dependency install selects Connect and the VS Code extension that Connect
+packages, with an isolated node linker so other workspace packages are omitted.
+It keeps the frozen lockfile and disables install scripts. The CLI itself is
+still built from the exact private source commit.
+
+Native jobs download `@tauri-apps/cli@2.11.4` (including its exact-version native
+binary) instead of compiling tauri-cli from Rust four times. Application Rust
+builds use toolchain 1.98.0 and the checked-in Cargo lockfile. The Tauri launcher
+resolves Cargo through rustup, prepends that toolchain directory to the child
+PATH, and checks Cargo/rustc versions before building or bundling; changing the
+rustup default alone does not override a runner-installed standalone Cargo.
+Source and Cargo build output are not cached or uploaded in this public repository. Intermediate
+artifacts last seven days to allow delayed jobs and retries; the final rehearsal
+artifact lasts 14 days.
+Artifact uploads skip redundant compression of installers and binary archives.
+
+Windows steps stop immediately on failed native commands. MSI signatures are
+verified on Windows with `Get-AuthenticodeSignature`, including publisher and
+timestamp, before installation and before release assembly. The Python verifier
+is used only for PE executables, not MSI compound documents.
+
 ### Private source and version contract
 
 Each native job that needs source mints its own short-lived GitHub App token,
@@ -560,6 +592,12 @@ while staging the Tauri external binary:
 | macOS universal | `connect-tray/src-tauri/binaries/anyray-connect-universal-apple-darwin` (Bun arm64 + x64 joined with `lipo`) |
 | Windows x64 | `connect-tray/src-tauri/binaries/anyray-connect-x86_64-pc-windows-msvc.exe` |
 | Linux x64 | `connect-tray/src-tauri/binaries/anyray-connect-x86_64-unknown-linux-gnu` |
+
+The universal macOS build stages its validated universal engine under all three
+externalBin target names: `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+`universal-apple-darwin`. Tauri checks each architecture during compilation and
+the universal name during bundling. Reusing the universal engine for all three
+also avoids needing Rosetta to validate an x64-only sidecar on the ARM runner.
 
 Only the three native Tauri compilation steps receive
 `ANYRAY_CONNECT_DESKTOP_DISTRIBUTION=staging`. Unsigned monorepo CI/local builds

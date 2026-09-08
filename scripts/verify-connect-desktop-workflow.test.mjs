@@ -45,10 +45,10 @@ describe('desktop staging workflow safety contract', () => {
   test('uses isolated read-only private checkouts and never uploads source', () => {
     assert.equal(
       (workflow.match(/actions\/create-github-app-token@/g) ?? []).length,
-      4
+      5
     );
-    assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 4);
-    assert.equal((workflow.match(/fetch-depth: 0/g) ?? []).length, 4);
+    assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 5);
+    assert.equal((workflow.match(/fetch-depth: 0/g) ?? []).length, 5);
     assert.doesNotMatch(workflow, /private-monorepo-source|source-candidate/);
 
     const uploadBlocks = workflow.match(
@@ -112,7 +112,7 @@ describe('desktop staging workflow safety contract', () => {
   });
 
   test('provisions the Mac before the build and releases it after the signed smoke', () => {
-    assert.match(job('provision-mac'), /needs: preflight$/m);
+    assert.match(job('provision-mac'), /needs: \[preflight, validate-source\]/);
     assert.match(job('build-macos-unsigned'), /needs: \[preflight, provision-mac\]/);
     for (const name of ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']) {
       assert.match(job(name), /runs-on: codebuild-anyray-install-runner-mac-/);
@@ -121,8 +121,8 @@ describe('desktop staging workflow safety contract', () => {
       job('sign-macos'),
       /needs: \[preflight, build-macos-unsigned, provision-mac\]/
     );
-    assert.match(job('teardown-mac'), /needs: \[sign-macos, verify-macos-signed\]/);
-    assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) \}\}/);
+    assert.match(job('teardown-mac'), /needs: \[provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed\]/);
+    assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) && needs\.provision-mac\.result != 'skipped' \}\}/);
   });
 
   test('bootstraps pinned Rust and MSVC on both Windows compile jobs', () => {
@@ -150,7 +150,7 @@ describe('desktop staging workflow safety contract', () => {
 
   test('signs Windows inner executables before MSI packaging and the MSI after', () => {
     assert.match(job('bundle-windows-unsigned'), /needs: \[preflight, sign-windows-inner\]/);
-    assert.match(job('bundle-windows-unsigned'), /cargo tauri bundle .*--bundles msi/);
+    assert.match(job('bundle-windows-unsigned'), /tauri\.js" bundle .*--bundles msi/);
     assert.match(job('sign-windows-installer'), /needs: \[preflight, bundle-windows-unsigned\]/);
     assert.match(job('verify-windows-signatures'), /msiexec\.exe/);
   });
@@ -194,17 +194,17 @@ describe('desktop staging workflow safety contract', () => {
     assert.equal(
       (workflow.match(/EXPECTED_VERSION: \$\{\{ needs\.preflight\.outputs\.version \}\}/g) ?? [])
         .length,
-      4
+      5
     );
     assert.equal(
       (workflow.match(/EXPECTED_SOURCE_SHA: \$\{\{ needs\.preflight\.outputs\.source_sha \}\}/g) ?? [])
         .length,
-      4
+      5
     );
     const validators = workflow.match(
       /- name: Gate source SHA,[\s\S]*?(?=\n      - )/g
     );
-    assert.equal(validators?.length, 4);
+    assert.equal(validators?.length, 5);
     for (const validator of validators ?? []) {
       assert.doesNotMatch(validator, /run:[\s\S]*needs\.preflight\.outputs/);
     }
@@ -222,4 +222,29 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(publish, /node scripts\/publish-desktop-feed\.mjs/);
     assert.doesNotMatch(workflow, /connect-update\.json|npm publish|gen-winget|gen-homebrew/);
   });
+});
+
+test('all Mac fleet owners serialize the full workflow, including cleanup', () => {
+  for (const file of ['release-connect-desktop.yml', 'release-connect-binaries.yml', 'release-fleetd-installer.yml']) {
+    const text = readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), 'utf8');
+    assert.match(text, /^concurrency:\n(?:  #[^\n]*\n)*  group: anyray-install-mac-release\n  cancel-in-progress: false/m);
+  }
+});
+
+test('native builds use the source-pinned pnpm before any packaging command', () => {
+  assert.doesNotMatch(workflow, /corepack pnpm -C|corepack enable|cargo install tauri-cli/);
+  for (const name of ['build-macos-unsigned', 'build-linux-unsigned', 'build-windows-unsigned']) {
+    const body = job(name);
+    assert.match(body, /(?:cd|Push-Location) private-source\n(?:            #[^\n]*\n|          try \{\n)?\s*corepack pnpm --filter/);
+    assert.match(body, /--filter 'anyray-vscode\.\.\.'/);
+    assert.match(body, /--config.node-linker=isolated/);
+  }
+  assert.match(job('build-windows-unsigned'), /\$PSNativeCommandUseErrorActionPreference = \$true/);
+  assert.match(job('bundle-windows-unsigned'), /\$PSNativeCommandUseErrorActionPreference = \$true/);
+});
+
+test('MSI verification uses Windows trust rather than the PE-only parser', () => {
+  assert.doesNotMatch(job('sign-windows-installer'), /verify-authenticode\.py/);
+  assert.match(job('verify-windows-signatures'), /\$installers \| ForEach-Object \{\s*\.\/scripts\/verify-authenticode-windows\.ps1/);
+  assert.match(job('assemble-signed-staging'), /- verify-windows-signatures/);
 });

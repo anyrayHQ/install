@@ -568,8 +568,13 @@ jobs:
       # on disk before it can be resolved.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            scripts
           sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -583,6 +588,7 @@ jobs:
       - name: Verify, install, execute, and uninstall without touching CLI state
         run: |
           set -euo pipefail
+          trap 'echo "::error::macOS verification failed at script line $LINENO"' ERR
           tarball="signed/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
           test -s "$tarball" || { echo '::error::signed macOS updater bundle is missing'; exit 1; }
           updater_root="$RUNNER_TEMP/connect-desktop-updater-bundle"
@@ -627,7 +633,7 @@ jobs:
           owns_autostart=true
           printf '%s\n' '{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true}' > "$state"
           printf '%s\n' '<plist><dict><key>Label</key><string>existing-scheduler-sentinel</string></dict></plist>' > "$scheduler"
-          state_before="$(shasum -a 256 "$state")"
+          cp "$state" "$RUNNER_TEMP/connect-desktop-profile-before.json"
           scheduler_before="$(shasum -a 256 "$scheduler")"
           app="$(find "$mountpoint" -maxdepth 1 -type d -name '*.app' -print -quit)"
           [ -n "$app" ] || { echo '::error::signed DMG contains no .app'; exit 1; }
@@ -670,14 +676,21 @@ jobs:
             exit 1
           }
           plutil -lint "$autostart"
-          test "$(plutil -extract Label raw -o - "$autostart")" = 'ai.anyray.connect-tray'
-          plutil -p "$autostart" | grep -Fq "$installed_main"
-          kill -9 "$app_pid"
+          python3 scripts/verify-desktop-launchagent.py "$autostart" "$installed_main"
+          node scripts/verify-desktop-profile.mjs "$RUNNER_TEMP/connect-desktop-profile-before.json" "$state" "$installed_engine"
+          kill -9 "$app_pid" || {
+            echo '::error::macOS tray exited after creating the LaunchAgent'
+            exit 1
+          }
           wait "$app_pid" >/dev/null 2>&1 || true
           app_pid=''
 
-          test "$(shasum -a 256 "$state")" = "$state_before"
-          test "$(shasum -a 256 "$scheduler")" = "$scheduler_before"
+          node scripts/verify-desktop-profile.mjs "$RUNNER_TEMP/connect-desktop-profile-before.json" "$state" "$installed_engine"
+          state_before="$(shasum -a 256 "$state")"
+          test "$(shasum -a 256 "$scheduler")" = "$scheduler_before" || {
+            echo '::error::running the macOS tray changed the existing refresh LaunchAgent'
+            exit 1
+          }
 
           # A DMG install is a copy into Applications; uninstall is removing
           # only that app bundle. The test-owned LaunchAgent is cleaned by the
@@ -685,6 +698,8 @@ jobs:
           # Applications analogue so the smoke does not mutate /Applications.
           rm -rf "$installed_app"
           test ! -e "$installed_app"
+          test "$(shasum -a 256 "$state")" = "$state_before"
+          test "$(shasum -a 256 "$scheduler")" = "$scheduler_before"
 
   teardown-mac:
     needs: [provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed]
@@ -1105,6 +1120,9 @@ jobs:
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -1147,7 +1165,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Split-Path $state),(Split-Path $scheduler) | Out-Null
           Set-Content -NoNewline -Path $state -Value '{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true}'
           Set-Content -NoNewline -Path $scheduler -Value 'existing-scheduler-sentinel'
-          $stateBefore = (Get-FileHash $state -Algorithm SHA256).Hash
+          $profileBefore = Join-Path $env:RUNNER_TEMP 'connect-desktop-profile-before.json'
+          Copy-Item $state $profileBefore
           $schedulerBefore = (Get-FileHash $scheduler -Algorithm SHA256).Hash
           $env:HOME = $existingHome
           $env:USERPROFILE = $existingHome
@@ -1206,13 +1225,13 @@ jobs:
             if ($runValue.IndexOf($installedMain.FullName, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
               throw "desktop autostart value does not contain installed main path: $runValue"
             }
+            node scripts/verify-desktop-profile.mjs $profileBefore $state $installedEngine.FullName
             Stop-Process -Id $appProcess.Id -Force
             Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
             $appProcess = $null
 
-            if ((Get-FileHash $state -Algorithm SHA256).Hash -ne $stateBefore) {
-              throw 'running the installed tray changed existing CLI state'
-            }
+            node scripts/verify-desktop-profile.mjs $profileBefore $state $installedEngine.FullName
+            $stateBefore = (Get-FileHash $state -Algorithm SHA256).Hash
             if ((Get-FileHash $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
               throw 'running the installed tray changed the existing scheduler sentinel'
             }

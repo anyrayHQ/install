@@ -160,11 +160,8 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$updater_app\/Contents\/Info\.plist"\)" = '13\.0'/);
     assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$app\/Contents\/Info\.plist"\)" = '13\.0'/);
     assert.match(mac, /ditto "\$app" "\$installed_app"/);
-    assert.match(mac, /HOME="\$existing_home" "\$installed_main"/);
-    assert.match(mac, /ai\.anyray\.connect-tray\.plist/);
-    assert.match(mac, /plutil -extract Label/);
-    assert.match(mac, /kill -9 "\$app_pid"/);
-    assert.match(mac, /rm -f "\$autostart"/);
+    assert.match(mac, /smoke-connect-desktop-macos.py/);
+    assert.match(mac, /launchctl asuser/);
     assert.match(mac, /rm -rf "\$installed_app"/);
 
     const windows = job('verify-windows-signatures');
@@ -179,11 +176,11 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(linux, /\$SUDO dpkg -i/);
     assert.match(linux, /smoke_installed_tray "\$deb_main"/);
     assert.match(linux, /\$SUDO dpkg -r/);
-    assert.match(linux, /\$SUDO rpm -i/);
+    assert.match(linux, /\$SUDO rpm --dbpath "\$rpm_database" -i/);
     assert.match(linux, /smoke_installed_tray "\$rpm_main"/);
-    assert.match(linux, /\$SUDO rpm -e/);
+    assert.match(linux, /\$SUDO rpm --dbpath "\$rpm_database" -e/);
     assert.match(linux, /ai\.anyray\.connect-tray\.desktop/);
-    assert.match(linux, /setsid dbus-run-session -- xvfb-run -a "\$main"/);
+    assert.match(linux, /dbus-run-session -- xvfb-run -a "\$main"/);
     assert.match(linux, /kill -KILL -- "-\$tray_pid"/);
     assert.match(linux, /rm -f "\$autostart"/);
     assert.match(
@@ -261,4 +258,31 @@ test('every native build and bundle uses the pinned child-process toolchain laun
   const commands = workflow.split('\n').filter((line) => /node .*tauri\.js" (build|bundle)/.test(line));
   assert.equal(commands.length, 5);
   for (const command of commands) assert.match(command, /scripts\/run-desktop-tauri\.mjs/);
+});
+
+
+test('Linux adoption smoke uses a real dedicated account and checks owner state', () => {
+  const linux = job('smoke-linux-installers');
+  assert.match(linux, /useradd/);
+  assert.match(linux, /runuser -u/);
+  assert.match(linux, /engineOwner/);
+  assert.doesNotMatch(linux, /state_before|scheduler-sentinel|existing-scheduler-sentinel/);
+});
+
+
+test('macOS smoke uses a dedicated GUI account and native lifecycle assertions', () => {
+  const mac = job('verify-macos-signed');
+  assert.match(mac, /DESKTOP_MAC_TEST_USER/);
+  assert.match(mac, /launchctl asuser/);
+  assert.match(mac, /smoke-connect-desktop-macos.py/);
+  assert.doesNotMatch(mac, /HOME="\$existing_home"|did not create its LaunchAgent/);
+});
+
+
+test('Linux upgrades exercise an installed CLI package before the desktop replacement', () => {
+  const linux = job('smoke-linux-installers');
+  assert.match(linux, /build-desktop-cli-migration-fixtures.sh/);
+  assert.match(linux, /dpkg -i "\$fixture_root\/cli.deb"/);
+  assert.match(linux, /rpm --dbpath "\$rpm_database" -U --nodeps "\$rpm"/);
+  assert.match(linux, /test ! -e \/etc\/xdg\/autostart\/anyray-connect-managed-enroll.desktop/);
 });

@@ -305,6 +305,16 @@ test('Linux adoption smoke uses a real dedicated account and checks owner state'
   assert.match(linux, /loginRegistrationObservedAt/);
 });
 
+test('every smoke allows exactly the verifier\'s ownership fields to change', () => {
+  const verifier = readFileSync(new URL('./verify-desktop-profile.mjs', import.meta.url), 'utf8');
+  const fields = [...verifier.matchAll(/^  '([A-Za-z]+)',$/gm)].map((m) => m[1]);
+  assert.ok(fields.length >= 11);
+  const python = [...macSmoke.matchAll(/^    '([A-Za-z]+)',$/gm)].map((m) => m[1]);
+  assert.deepEqual(python, fields);
+  const linux = job('smoke-linux-installers').match(/owner_fields=([A-Za-z,]+)$/m)?.[1].split(',');
+  assert.deepEqual(linux, fields);
+});
+
 test('Linux package install and uninstall leave pre-existing CLI state byte-identical', () => {
   const linux = job('smoke-linux-installers');
   assert.match(linux, /existing-scheduler-sentinel/);

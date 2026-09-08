@@ -15,6 +15,21 @@ import sys
 import time
 
 LABEL = 'ai.anyray.connect-tray'
+SCHEDULER_LABEL = 'ai.anyray.connect.refresh'
+# Mirrors ownerFields in verify-desktop-profile.mjs: the only keys adoption may add.
+OWNER_FIELDS = frozenset((
+    'appHandoverMaintenanceAt',
+    'appHandoverState',
+    'engineOwner',
+    'engineOwnerObservedAt',
+    'engineOwnerPath',
+    'legacyTrayRetirementState',
+    'loginRegistrationAttemptedAt',
+    'loginRegistrationObservedAt',
+    'loginRegistrationState',
+    'persistenceOwner',
+    'trayAppPath',
+))
 EXISTING_PROFILE = {
     'name': 'existing-cli-sentinel',
     'managedEnrollmentDisabled': True,
@@ -35,10 +50,10 @@ def rfc3339_utc(value):
 
 
 def check_adopted_profile(profile, app, expected_login):
-    """Every existing field survives; adoption records the installed app and valid timestamps."""
-    for key, value in EXISTING_PROFILE.items():
-        if profile.get(key) != value:
-            raise RuntimeError(f'lost existing profile field {key}')
+    """Only ownership fields may change; adoption records the installed app and valid timestamps."""
+    settings = {key: value for key, value in profile.items() if key not in OWNER_FIELDS}
+    if settings != EXISTING_PROFILE:
+        raise RuntimeError('existing profile settings changed')
     if profile.get('engineOwner') != 'app' or profile.get('persistenceOwner') != 'tray':
         raise RuntimeError('installed app has not adopted ownership')
     if profile.get('loginRegistrationState') != expected_login:
@@ -97,7 +112,7 @@ def main():
         return code == 113
     state_dir = home / '.anyray'
     legacy = home / 'Library/LaunchAgents' / f'{LABEL}.plist'
-    scheduler = home / 'Library/LaunchAgents/ai.anyray.connect.refresh.plist'
+    scheduler = home / 'Library/LaunchAgents' / f'{SCHEDULER_LABEL}.plist'
     foreign_agent = home / 'Library/LaunchAgents/ai.anyray.connect.refresh-sentinel.plist'
 
     def native(action='status'):
@@ -214,11 +229,17 @@ def main():
             lambda: legacy.unlink(missing_ok=True),
             lambda: Path(str(legacy) + '.retiring').unlink(missing_ok=True),
             lambda: foreign_agent.unlink(missing_ok=True),
+            # Absent before the run, so any scheduler here is the candidate's own defect.
+            lambda: run(['/bin/launchctl', 'bootout', f'{domain}/{SCHEDULER_LABEL}'], check=False),
+            lambda: scheduler.unlink(missing_ok=True),
             lambda: shutil.rmtree(state_dir),
         ):
             try:
                 cleanup()
             except Exception:
+                cleanup_failed = True
+        for leftover in (legacy, Path(str(legacy) + '.retiring'), foreign_agent, scheduler, state_dir):
+            if leftover.exists():
                 cleanup_failed = True
         if cleanup_failed:
             print('::error::native smoke cleanup failed; reset the dedicated account', file=sys.stderr)

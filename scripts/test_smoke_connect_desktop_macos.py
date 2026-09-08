@@ -68,8 +68,9 @@ class AdoptedProfileTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             app, profile = self.adopted(directory)
             for field, value, message in (
-                ('name', 'changed', 'existing profile field'),
-                ('managedEnrollmentDisabled', False, 'existing profile field'),
+                ('name', 'changed', 'settings changed'),
+                ('managedEnrollmentDisabled', False, 'settings changed'),
+                ('unexpected', True, 'settings changed'),
                 ('persistenceOwner', 'durable', 'adopted ownership'),
                 ('loginRegistrationState', 'disabled', 'login registration'),
                 ('trayAppPath', directory, 'installed app'),

@@ -4,34 +4,69 @@ import { isDeepStrictEqual } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
 
-const ownerFields = new Set(['engineOwner', 'engineOwnerPath', 'engineOwnerObservedAt']);
+const ownerFields = new Set([
+  'appHandoverMaintenanceAt',
+  'appHandoverState',
+  'engineOwner',
+  'engineOwnerObservedAt',
+  'engineOwnerPath',
+  'legacyTrayRetirementState',
+  'loginRegistrationAttemptedAt',
+  'loginRegistrationObservedAt',
+  'loginRegistrationState',
+  'persistenceOwner',
+  'trayAppPath',
+]);
 const settings = (profile) => Object.fromEntries(Object.entries(profile).filter(([key]) => !ownerFields.has(key)));
 const readProfile = (path) => {
   const profile = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, ''));
   if (!profile || typeof profile !== 'object' || Array.isArray(profile)) throw new Error('profile must be an object');
   return profile;
 };
+const resolvesTo = (value, installed) => {
+  if (typeof value !== 'string' || !isAbsolute(value)) return false;
+  try {
+    return realpathSync.native(value) === realpathSync.native(installed);
+  } catch {
+    return false;
+  }
+};
+const validObservedAt = (value) => {
+  if (typeof value !== 'string') return false;
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z$/.exec(value);
+  if (!match) return false;
+  const milliseconds = (match[2] ?? '').padEnd(3, '0').slice(0, 3);
+  const normalized = `${match[1]}.${milliseconds}Z`;
+  const parsed = new Date(normalized);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === normalized;
+};
 
-export function verifyProfile(beforePath, currentPath, enginePath) {
+export function verifyProfile(beforePath, currentPath, enginePath, appPath) {
   const before = readProfile(beforePath);
   const current = readProfile(currentPath);
   if (!isDeepStrictEqual(settings(before), settings(current))) throw new Error('existing CLI settings changed');
   if (current.engineOwner !== 'app') throw new Error('installed app has not adopted engine ownership');
-  if (typeof current.engineOwnerPath !== 'string' || !isAbsolute(current.engineOwnerPath) ||
-      realpathSync.native(current.engineOwnerPath) !== realpathSync.native(enginePath)) {
+  if (current.persistenceOwner !== 'tray') throw new Error('installed tray has not adopted persistence ownership');
+  if (current.loginRegistrationState !== 'enabled') throw new Error('desktop login registration is not enabled');
+  if (!resolvesTo(current.engineOwnerPath, enginePath)) {
     throw new Error('engine owner path does not resolve to the installed engine');
   }
-  if (typeof current.engineOwnerObservedAt !== 'string' ||
-      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(current.engineOwnerObservedAt) ||
-      !Number.isFinite(Date.parse(current.engineOwnerObservedAt)) ||
-      new Date(current.engineOwnerObservedAt).toISOString() !== current.engineOwnerObservedAt) {
+  if (!validObservedAt(current.engineOwnerObservedAt)) {
     throw new Error('engine ownership timestamp is invalid');
+  }
+  if (!resolvesTo(current.trayAppPath, appPath)) {
+    throw new Error('tray app path does not resolve to the installed app');
+  }
+  if (!validObservedAt(current.loginRegistrationObservedAt)) {
+    throw new Error('login registration timestamp is invalid');
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    if (process.argv.length !== 5) throw new Error('usage: verify-desktop-profile.mjs <before> <current> <installed-engine>');
+    if (process.argv.length !== 6) {
+      throw new Error('usage: verify-desktop-profile.mjs <before> <current> <installed-engine> <installed-app>');
+    }
     const deadline = Date.now() + 30_000;
     for (;;) {
       try {

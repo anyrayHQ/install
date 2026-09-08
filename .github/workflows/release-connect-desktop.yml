@@ -4,8 +4,8 @@ name: Release Anyray Connect desktop (staging only)
 #
 # This workflow is deliberately NOT called by release-connect-binaries.yml and
 # has no push, tag, workflow_run, or repository_dispatch trigger. It never
-# reads npm, never updates releases/latest, and never renders or publishes the
-# CLI's connect manifests, Homebrew cask, or Winget manifests.
+# resolves the CLI from npm or updates releases/latest. It never renders or
+# publishes the CLI's connect manifests, Homebrew cask, or Winget manifests.
 # This lane publishes the desktop update feed as a manifest only, with no updater signatures.
 # A failure here therefore cannot block or downgrade the existing CLI release.
 #
@@ -23,7 +23,7 @@ name: Release Anyray Connect desktop (staging only)
 # floor for every machine that runs the shipped binary, and 24.04's 2.39 would
 # drop the Ubuntu 22.04 and Debian 12 users that 2.35 still covers. macOS
 # compiles, signs, and smokes on the on-demand MAC_ARM fleet, so the Mac is
-# provisioned right after preflight and released after the signed smoke.
+# provisioned after source/publication validation and released after the signed smoke.
 
 on:
   workflow_dispatch:
@@ -51,11 +51,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: connect-desktop-staging-${{ inputs.version }}-${{ inputs.source_sha }}
+  # Shared with the CLI and fleetd releases: all own the same Mac project.
+  group: anyray-install-mac-release
   cancel-in-progress: false
 
 env:
   TAURI_CLI_VERSION: '2.11.4'
+  RUST_TOOLCHAIN: '1.98.0'
   BUN_VERSION: '1.3.14'
   # rustup-init from the versioned archive path, one digest per platform
   # (published at <archive>/<triple>/rustup-init[.exe].sha256). Bump together.
@@ -76,6 +78,7 @@ jobs:
   # an acceptable identity for a distribution signing lane.
   dispatch-main-only:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions: {}
     env:
       DISPATCH_REF: ${{ github.ref }}
@@ -92,6 +95,7 @@ jobs:
   preflight:
     needs: dispatch-main-only
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     outputs:
       version: ${{ steps.inputs.outputs.version }}
       source_sha: ${{ steps.inputs.outputs.source_sha }}
@@ -157,9 +161,57 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "desktop release inputs are explicit and all signing lanes are configured"
 
-  provision-mac:
+  # Read and validate source on Linux before allocating the paid Mac host.
+  validate-source:
     needs: preflight
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Mint a short-lived read-only token for the private monorepo
+        id: monorepo-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.MONOREPO_READ_APP_ID }}
+          private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
+          owner: anyrayHQ
+          repositories: monorepo
+          permission-contents: read
+      - name: Checkout and gate the exact reviewed private source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: anyrayHQ/monorepo
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          token: ${{ steps.monorepo-token.outputs.token }}
+          path: private-source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+      - name: Gate source SHA, origin/main ancestry, versions, and externalBin
+        env:
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        run: >-
+          node scripts/verify-connect-desktop-source.mjs
+          private-source
+          "$EXPECTED_VERSION"
+          "$EXPECTED_SOURCE_SHA"
+      - name: Check publication eligibility before native builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: node scripts/verify-connect-desktop-publication.mjs
+
+  provision-mac:
+    needs: [preflight, validate-source]
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -174,12 +226,20 @@ jobs:
   build-macos-unsigned:
     needs: [preflight, provision-mac]
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
       TARGET_TRIPLE: universal-apple-darwin
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Mint a short-lived read-only token for the private monorepo
@@ -223,9 +283,12 @@ jobs:
       - name: Build the matching self-contained universal engine
         run: |
           set -euo pipefail
-          corepack enable
-          corepack pnpm -C private-source install --frozen-lockfile --ignore-scripts
-          corepack pnpm -C private-source --filter anyray-connect build
+          (
+            cd private-source
+            # Corepack must see this packageManager; -C only affects pnpm afterwards.
+            corepack pnpm --filter 'anyray-connect...' --filter 'anyray-vscode...' install --frozen-lockfile --ignore-scripts --config.node-linker=isolated
+            corepack pnpm --filter anyray-connect build
+          )
           mkdir -p engine
           bun build --compile --minify --compile-exec-argv="--use-system-ca" \
             --target=bun-darwin-arm64 private-source/connect/dist/index.js \
@@ -241,9 +304,14 @@ jobs:
           lipo -archs engine/anyray-connect-universal | grep -q x86_64
           (
             cd private-source
-            node scripts/stage-connect-tray-engine.mjs \
-              "$TARGET_TRIPLE" \
-              "$GITHUB_WORKSPACE/engine/anyray-connect-universal"
+            # tauri-build checks externalBin for each compile target before the
+            # final universal bundle. The universal engine runs on this ARM host
+            # and serves all three names without requiring Rosetta for validation.
+            for sidecar_target in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
+              node scripts/stage-connect-tray-engine.mjs \
+                "$sidecar_target" \
+                "$GITHUB_WORKSPACE/engine/anyray-connect-universal"
+            done
           )
 
       # The fleet image is expected to ship Rust; this only fills the gap if it
@@ -256,7 +324,7 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
             echo "${RUSTUP_INIT_SHA256_DARWIN_ARM64}  rustup-init" | shasum -a 256 -c -
             chmod +x rustup-init
-            ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable
+            ./rustup-init -y --no-modify-path --profile minimal --default-toolchain none
             rm -f rustup-init
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
@@ -266,13 +334,13 @@ jobs:
           ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging
         run: |
           set -euo pipefail
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          cargo install tauri-cli --version "=${TAURI_CLI_VERSION}" --locked
+          npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$TAURI_CLI_VERSION"
           (
             cd private-source/connect-tray/src-tauri
-            cargo tauri build \
+            node "$GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build \
               --target "$TARGET_TRIPLE" \
               --bundles app \
               --ci \
@@ -295,16 +363,19 @@ jobs:
           mkdir -p out
           ditto -c -k --keepParent "$app" out/connect-desktop-unsigned.zip
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-unsigned
           path: out/connect-desktop-unsigned.zip
           if-no-files-found: error
-          retention-days: 7
 
   sign-macos:
     needs: [preflight, build-macos-unsigned, provision-mac]
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 75
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -314,8 +385,20 @@ jobs:
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      # The S3 handoff below is a LOCAL composite action, so the repo must be
+      # on disk before it can be resolved.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-unsigned
           path: unsigned
 
@@ -461,14 +544,12 @@ jobs:
             security delete-keychain "$RUNNER_TEMP/connect-desktop-signing.keychain-db"
           fi
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
-          path: |
-            out/*.dmg
-            out/*.app.tar.gz
+          path: out/*.dmg out/*.app.tar.gz
           if-no-files-found: error
-          retention-days: 7
 
   # Runtime validation is deliberately separate from signing. The signed app
   # and bundled engine execute only after the Apple secrets and throwaway
@@ -476,13 +557,27 @@ jobs:
   verify-macos-signed:
     needs: [preflight, sign-macos]
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      # The S3 handoff below is a LOCAL composite action, so the repo must be
+      # on disk before it can be resolved.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
           path: signed
       - name: Verify, install, execute, and uninstall without touching CLI state
@@ -510,7 +605,7 @@ jobs:
           hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "$dmg"
           install_root="$RUNNER_TEMP/connect-desktop-installed"
           existing_home="$RUNNER_TEMP/connect-desktop-existing-cli-home"
-          state="$existing_home/.anyray/profiles/default.json"
+          state="$existing_home/.anyray/connect.json"
           scheduler="$existing_home/Library/LaunchAgents/ai.anyray.connect.refresh.plist"
           autostart="$existing_home/Library/LaunchAgents/ai.anyray.connect-tray.plist"
           mkdir -p "$install_root" "$(dirname "$state")" "$(dirname "$scheduler")"
@@ -531,7 +626,7 @@ jobs:
             exit 1
           }
           owns_autostart=true
-          printf '%s\n' '{"profile":"existing-cli-sentinel"}' > "$state"
+          printf '%s\n' '{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true}' > "$state"
           printf '%s\n' '<plist><dict><key>Label</key><string>existing-scheduler-sentinel</string></dict></plist>' > "$scheduler"
           state_before="$(shasum -a 256 "$state")"
           scheduler_before="$(shasum -a 256 "$scheduler")"
@@ -594,9 +689,10 @@ jobs:
           test ! -e "$installed_app"
 
   teardown-mac:
-    needs: [sign-macos, verify-macos-signed]
-    if: ${{ always() }}
+    needs: [provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed]
+    if: ${{ always() && needs.provision-mac.result != 'skipped' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -609,13 +705,21 @@ jobs:
       - run: ./scripts/mac-fleet.sh down
 
   build-windows-unsigned:
-    needs: preflight
+    needs: [preflight, validate-source]
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       TARGET_TRIPLE: x86_64-pc-windows-msvc
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Mint a short-lived read-only token for the private monorepo
         id: monorepo-token
@@ -657,9 +761,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          corepack enable
-          corepack pnpm -C private-source install --frozen-lockfile --ignore-scripts
-          corepack pnpm -C private-source --filter anyray-connect build
+          if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
+          $PSNativeCommandUseErrorActionPreference = $true
+          Push-Location private-source
+          try {
+            corepack pnpm --filter 'anyray-connect...' --filter 'anyray-vscode...' install --frozen-lockfile --ignore-scripts --config.node-linker=isolated
+            corepack pnpm --filter anyray-connect build
+          } finally { Pop-Location }
           New-Item -ItemType Directory -Force -Path engine | Out-Null
           bun build --compile --minify '--compile-exec-argv=--use-system-ca' `
             --target=bun-windows-x64 private-source/connect/dist/index.js `
@@ -677,6 +785,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
+          $PSNativeCommandUseErrorActionPreference = $true
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vc = $null
           if (Test-Path $vswhere) {
@@ -698,14 +808,13 @@ jobs:
             Invoke-WebRequest -Uri "https://static.rust-lang.org/rustup/archive/$env:RUSTUP_VERSION/x86_64-pc-windows-msvc/rustup-init.exe" -OutFile $rustupInit
             $got = (Get-FileHash $rustupInit -Algorithm SHA256).Hash.ToLower()
             if ($got -ne $env:RUSTUP_INIT_SHA256_WINDOWS_X64) { throw "rustup-init.exe checksum mismatch: got $got" }
-            & $rustupInit -y --no-modify-path --profile minimal --default-toolchain stable
+            & $rustupInit -y --no-modify-path --profile minimal --default-toolchain none
             if ($LASTEXITCODE -ne 0) { throw "rustup-init.exe exited $LASTEXITCODE" }
             $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
             $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
             $env:Path = "$cargoBin;$env:Path"
           }
           rustup --version
-          cargo --version
 
       - name: Compile the unsigned Windows app executable
         shell: pwsh
@@ -713,12 +822,14 @@ jobs:
           ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging
         run: |
           $ErrorActionPreference = 'Stop'
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
+          if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$env:RUST_TOOLCHAIN"
           rustup target add $env:TARGET_TRIPLE
-          cargo install tauri-cli --version "=$env:TAURI_CLI_VERSION" --locked
+          npm install --prefix "$env:RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$env:TAURI_CLI_VERSION"
           Push-Location private-source/connect-tray/src-tauri
-          cargo tauri build --target $env:TARGET_TRIPLE --no-bundle --ci -- --locked
+          node "$env:GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --target $env:TARGET_TRIPLE --no-bundle --ci -- --locked
           Pop-Location
           $target = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release"
           $main = Join-Path $target 'connect-tray.exe'
@@ -731,16 +842,17 @@ jobs:
           Copy-Item $main out/anyray-connect-tray-windows-x64.exe
           Copy-Item $engine out/anyray-connect-engine-windows-x64.exe
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-unsigned
           path: out/*.exe
           if-no-files-found: error
-          retention-days: 7
 
   sign-windows-inner:
     needs: [preflight, build-windows-unsigned]
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -750,9 +862,15 @@ jobs:
       AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
       AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-unsigned
           path: out
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
@@ -780,21 +898,29 @@ jobs:
               --ca-file "$RUNNER_TEMP/ms-root.pem" \
               --expect-publisher 'Othentic Labs LTD'
           done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-signed
           path: out/*.exe
           if-no-files-found: error
-          retention-days: 7
 
   bundle-windows-unsigned:
     needs: [preflight, sign-windows-inner]
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       TARGET_TRIPLE: x86_64-pc-windows-msvc
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Mint a short-lived read-only token for the private monorepo
         id: monorepo-token
@@ -827,14 +953,17 @@ jobs:
           private-source
           "$env:EXPECTED_VERSION"
           "$env:EXPECTED_SOURCE_SHA"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-signed
           path: signed-inner
       - name: Restore the signed inner executables
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
+          $PSNativeCommandUseErrorActionPreference = $true
           Push-Location private-source
           node scripts/stage-connect-tray-engine.mjs `
             $env:TARGET_TRIPLE `
@@ -854,6 +983,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
+          $PSNativeCommandUseErrorActionPreference = $true
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vc = $null
           if (Test-Path $vswhere) {
@@ -875,26 +1006,27 @@ jobs:
             Invoke-WebRequest -Uri "https://static.rust-lang.org/rustup/archive/$env:RUSTUP_VERSION/x86_64-pc-windows-msvc/rustup-init.exe" -OutFile $rustupInit
             $got = (Get-FileHash $rustupInit -Algorithm SHA256).Hash.ToLower()
             if ($got -ne $env:RUSTUP_INIT_SHA256_WINDOWS_X64) { throw "rustup-init.exe checksum mismatch: got $got" }
-            & $rustupInit -y --no-modify-path --profile minimal --default-toolchain stable
+            & $rustupInit -y --no-modify-path --profile minimal --default-toolchain none
             if ($LASTEXITCODE -ne 0) { throw "rustup-init.exe exited $LASTEXITCODE" }
             $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
             $cargoBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
             $env:Path = "$cargoBin;$env:Path"
           }
           rustup --version
-          cargo --version
 
       - name: Bundle the signed inner executables into an unsigned MSI
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
-          cargo install tauri-cli --version "=$env:TAURI_CLI_VERSION" --locked
+          if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$env:RUST_TOOLCHAIN"
+          npm install --prefix "$env:RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$env:TAURI_CLI_VERSION"
           $main = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release/connect-tray.exe"
           $before = (Get-FileHash $main -Algorithm SHA256).Hash
           Push-Location private-source/connect-tray/src-tauri
-          cargo tauri bundle --target $env:TARGET_TRIPLE --bundles msi `
+          node "$env:GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --target $env:TARGET_TRIPLE --bundles msi `
             --ci --no-sign
           Pop-Location
           $after = (Get-FileHash $main -Algorithm SHA256).Hash
@@ -907,16 +1039,17 @@ jobs:
           Copy-Item $installer.FullName `
             "out/anyray-connect-desktop-$env:VERSION-windows-x64.msi"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-unsigned
           path: out/*.msi
           if-no-files-found: error
-          retention-days: 7
 
   sign-windows-installer:
     needs: [preflight, bundle-windows-unsigned]
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -926,26 +1059,28 @@ jobs:
       AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
       AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-unsigned
           path: out
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
           distribution: temurin
           java-version: '21'
-      - name: Fetch pinned jsign and Microsoft trust anchor
+      - name: Fetch pinned jsign
         run: |
           set -euo pipefail
           curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
             "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
           echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
-          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/ms-root.crt" \
-            'https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt'
-          echo "5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270  $RUNNER_TEMP/ms-root.crt" | sha256sum -c -
-          openssl x509 -inform DER -in "$RUNNER_TEMP/ms-root.crt" -out "$RUNNER_TEMP/ms-root.pem"
-      - name: Authenticode-sign and independently verify the MSI installer
+      - name: Authenticode-sign the MSI installer (verified natively in the next job)
         env:
           JSIGN_JAR: ${{ runner.temp }}/jsign.jar
         run: |
@@ -953,37 +1088,47 @@ jobs:
           installer="$(find out -maxdepth 1 -type f -name '*.msi' -print -quit)"
           [ -n "$installer" ] || { echo '::error::MSI installer is missing'; exit 1; }
           ./scripts/azure-artifact-sign.sh "$installer" 'Anyray Connect Desktop' 'https://anyray.ai'
-          python3 scripts/verify-authenticode.py "$installer" \
-            --ca-file "$RUNNER_TEMP/ms-root.pem" \
-            --expect-publisher 'Othentic Labs LTD'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          # MSI is a compound document, not PE. verify-windows-signatures
+          # requires Windows trust, publisher, and timestamp checks before assembly.
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-signed
           path: out/*.msi
           if-no-files-found: error
-          retention-days: 7
 
   verify-windows-signatures:
     needs: [preflight, sign-windows-inner, sign-windows-installer]
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-signed
           path: inner
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-signed
           path: installer
       - name: Verify, install, execute, and uninstall without touching CLI state
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
+          $PSNativeCommandUseErrorActionPreference = $true
           $inner = @(Get-ChildItem inner -Filter '*.exe')
           $installers = @(Get-ChildItem installer -Filter '*.msi')
           if ($inner.Count -ne 2) { throw "expected two signed inner executables, found $($inner.Count)" }
@@ -999,10 +1144,10 @@ jobs:
           if ($line -ne "anyray-connect $env:VERSION") { throw "signed engine version mismatch: $line" }
 
           $existingHome = Join-Path $env:RUNNER_TEMP 'connect-desktop-existing-cli-home'
-          $state = Join-Path $existingHome '.anyray\profiles\default.json'
+          $state = Join-Path $existingHome '.anyray\connect.json'
           $scheduler = Join-Path $existingHome 'AppData\Roaming\Anyray\anyray-connect-refresh.scheduler-sentinel'
           New-Item -ItemType Directory -Force -Path (Split-Path $state),(Split-Path $scheduler) | Out-Null
-          Set-Content -NoNewline -Path $state -Value '{"profile":"existing-cli-sentinel"}'
+          Set-Content -NoNewline -Path $state -Value '{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true}'
           Set-Content -NoNewline -Path $scheduler -Value 'existing-scheduler-sentinel'
           $stateBefore = (Get-FileHash $state -Algorithm SHA256).Hash
           $schedulerBefore = (Get-FileHash $scheduler -Algorithm SHA256).Hash
@@ -1105,13 +1250,21 @@ jobs:
   # Docker daemon), so Linux compiles on the Ubuntu 22.04 CodeBuild project
   # bound to this repo. It ships no Rust; the pinned rustup-init step fills it.
   build-linux-unsigned:
-    needs: preflight
+    needs: [preflight, validate-source]
     runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       TARGET_TRIPLE: x86_64-unknown-linux-gnu
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Mint a short-lived read-only token for the private monorepo
         id: monorepo-token
@@ -1162,7 +1315,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
           echo "${RUSTUP_INIT_SHA256_LINUX_X64}  rustup-init" | sha256sum -c -
           chmod +x rustup-init
-          ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable
+          ./rustup-init -y --no-modify-path --profile minimal --default-toolchain none
           rm -f rustup-init
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -1171,9 +1324,12 @@ jobs:
       - name: Build and stage the matching Linux engine
         run: |
           set -euo pipefail
-          corepack enable
-          corepack pnpm -C private-source install --frozen-lockfile --ignore-scripts
-          corepack pnpm -C private-source --filter anyray-connect build
+          (
+            cd private-source
+            # Corepack must see this packageManager; -C only affects pnpm afterwards.
+            corepack pnpm --filter 'anyray-connect...' --filter 'anyray-vscode...' install --frozen-lockfile --ignore-scripts --config.node-linker=isolated
+            corepack pnpm --filter anyray-connect build
+          )
           mkdir -p engine
           bun build --compile --minify --compile-exec-argv="--use-system-ca" \
             --target=bun-linux-x64 private-source/connect/dist/index.js \
@@ -1189,13 +1345,13 @@ jobs:
           ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging
         run: |
           set -euo pipefail
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
           rustup target add "$TARGET_TRIPLE"
-          cargo install tauri-cli --version "=${TAURI_CLI_VERSION}" --locked
+          npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$TAURI_CLI_VERSION"
           (
             cd private-source/connect-tray/src-tauri
-            cargo tauri build --target "$TARGET_TRIPLE" --no-bundle --ci -- --locked
+            node "$GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --target "$TARGET_TRIPLE" --no-bundle --ci -- --locked
           )
           target="private-source/connect-tray/src-tauri/target/$TARGET_TRIPLE/release"
           main="$target/connect-tray"
@@ -1215,7 +1371,7 @@ jobs:
           before="$(sha256sum "$main")"
           (
             cd private-source/connect-tray/src-tauri
-            cargo tauri bundle --target "$TARGET_TRIPLE" --bundles deb,rpm \
+            node "$GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --target "$TARGET_TRIPLE" --bundles deb,rpm \
               --ci --no-sign
           )
           after="$(sha256sum "$main")"
@@ -1232,25 +1388,33 @@ jobs:
           cp "$engine" out/anyray-connect-engine-linux-x64
           cp "$deb" "out/anyray-connect-desktop-${VERSION}-linux-x64.deb"
           cp "$rpm" "out/anyray-connect-desktop-${VERSION}-linux-x64.rpm"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-unsigned
           path: out/
           if-no-files-found: error
-          retention-days: 7
 
   sign-linux-artifacts:
     needs: build-linux-unsigned
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-unsigned
           path: out
       - name: GPG-sign Linux inner executables and outer packages
@@ -1261,23 +1425,37 @@ jobs:
           ./scripts/sign-gpg-artifacts.sh out "${linux_artifacts[@]}"
           mv out/anyray-endpoint-signing-key.asc \
             out/anyray-connect-desktop-signing-key.asc
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-signed
           path: out/
           if-no-files-found: error
-          retention-days: 7
 
   smoke-linux-installers:
     needs: [preflight, sign-linux-artifacts]
     runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      # The S3 handoff below is a LOCAL composite action, so the repo must be
+      # on disk before it can be resolved.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-signed
           path: signed
       - name: Install native package runtime and inspection tools
@@ -1305,10 +1483,10 @@ jobs:
           done
 
           existing_home="$RUNNER_TEMP/connect-desktop-existing-cli-home"
-          state="$existing_home/.anyray/profiles/default.json"
-          scheduler="$existing_home/.config/systemd/user/anyray-connect-refresh.service"
+          state="$existing_home/.anyray/connect.json"
+          scheduler="$existing_home/.config/systemd/user/anyray-refresh.service"
           mkdir -p "$(dirname "$state")" "$(dirname "$scheduler")"
-          printf '%s\n' '{"profile":"existing-cli-sentinel"}' > "$state"
+          printf '%s\n' '{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true}' > "$state"
           printf '%s\n' 'existing-scheduler-sentinel' > "$scheduler"
           state_before="$(sha256sum "$state")"
           scheduler_before="$(sha256sum "$scheduler")"
@@ -1415,7 +1593,9 @@ jobs:
       - smoke-linux-installers
       - sign-linux-artifacts
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -1423,21 +1603,30 @@ jobs:
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
           path: platform/macos
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-signed
           path: platform/windows-inner
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-signed
           path: platform/windows-installer
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-signed
           path: platform/linux
       - name: Assemble signed platform outputs
@@ -1506,22 +1695,24 @@ jobs:
             assets/connect-desktop-staging.json
           cat assets/SHA256SUMS
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-staging-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
           path: assets/
           if-no-files-found: error
-          retention-days: 14
 
   publish-staging-prerelease:
     needs: [preflight, assemble-signed-staging]
     if: ${{ !inputs.dry_run }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     # Every run rewrites the one staging feed; serialize across versions.
     concurrency:
       group: connect-desktop-staging-feed
       cancel-in-progress: false
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: write
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -1530,6 +1721,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - name: Install pinned gh CLI
         run: |
           set -euo pipefail
@@ -1541,8 +1737,9 @@ jobs:
           tar -xzf /tmp/gh.tgz -C /tmp
           install -m 0755 "/tmp/gh_${V}_linux_amd64/bin/gh" /usr/local/bin/gh
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-staging-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
           path: assets
       - name: Publish only an explicit staging prerelease and preserve latest

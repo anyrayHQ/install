@@ -402,6 +402,7 @@ jobs:
             out/fleetd.deb
             out/fleetd.rpm
           if-no-files-found: error
+          retention-days: 7
 
   # Windows must build on Windows: fleetctl shells out to WiX `heat`, which
   # segfaults under emulation elsewhere and otherwise demands Docker + Fleet's
@@ -507,6 +508,7 @@ jobs:
           name: fleetd-installer-windows
           path: out/fleetd.msi
           if-no-files-found: error
+          retention-days: 7
 
   sign-windows:
     needs: build-windows
@@ -550,6 +552,7 @@ jobs:
           name: fleetd-installer-windows-signed
           path: out/fleetd.msi
           if-no-files-found: error
+          retention-days: 7
 
   verify-windows-signature:
     needs: sign-windows
@@ -617,6 +620,7 @@ jobs:
           name: fleetd-installer-release-assets
           path: assets
           if-no-files-found: error
+          retention-days: 7
 
   # Always remove the RUNNER, even if the build failed — the webhook is the part
   # a fork actor could otherwise reach. The fleet is left in place on purpose:

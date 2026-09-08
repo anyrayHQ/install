@@ -364,6 +364,7 @@ jobs:
           name: binaries-unsigned
           path: out/
           if-no-files-found: error
+          retention-days: 7
 
   # Developer ID-signs + notarizes the two darwin binaries. The per-step gates
   # below still check the Apple secrets, but `signing-preflight` has already
@@ -854,6 +855,7 @@ jobs:
           name: binaries-darwin
           path: out/anyray-connect-darwin-*
           if-no-files-found: error
+          retention-days: 7
 
       # Keep the package in its own artifact. upload-artifact applies
       # if-no-files-found to the whole path set, not to each pattern, so mixing
@@ -864,6 +866,7 @@ jobs:
           name: binaries-macos-pkg
           path: out/anyray-connect.pkg
           if-no-files-found: error
+          retention-days: 7
 
   # Always remove the RUNNER, even if signing failed — the webhook is the part a
   # fork actor could otherwise reach. The fleet is left in place on purpose: the
@@ -1261,6 +1264,7 @@ jobs:
           name: binaries-windows
           path: out/anyray-connect-windows-x64.exe
           if-no-files-found: error
+          retention-days: 7
 
   # Packages the linux binaries as .deb/.rpm — ADDITIVE assets; the bare
   # binaries keep publishing exactly as before and stay untouched. Once the
@@ -1338,6 +1342,7 @@ jobs:
           name: linux-packages
           path: pkgs/
           if-no-files-found: error
+          retention-days: 7
 
   release:
     needs: [build, sign-macos, sign-windows, package-linux]
@@ -1792,3 +1797,4 @@ jobs:
           name: dry-run-release-assets
           path: assets/
           if-no-files-found: error
+          retention-days: 7

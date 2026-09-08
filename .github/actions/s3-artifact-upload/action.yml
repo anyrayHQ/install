@@ -13,6 +13,11 @@ description: >-
   previous attempt's bytes.
 
 inputs:
+  bucket:
+    description: >-
+      CI artifacts bucket. Passed in by the caller because a composite action
+      cannot read the `vars` context; only the workflow can.
+    required: true
   name:
     description: Artifact name, the same string the matching download uses.
     required: true
@@ -33,12 +38,12 @@ runs:
         ARTIFACT_NAME: ${{ inputs.name }}
         ARTIFACT_PATH: ${{ inputs.path }}
         NO_FILES: ${{ inputs.if-no-files-found }}
-        BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
+        BUCKET: ${{ inputs.bucket }}
       run: |
         set -euo pipefail
 
         if [ -z "${BUCKET:-}" ]; then
-          echo "::error::CI_ARTIFACTS_BUCKET is unset. Set the repository variable before using this action."
+          echo "::error::bucket input is empty. The caller must pass the CI_ARTIFACTS_BUCKET repository variable as the action's bucket input."
           exit 1
         fi
 

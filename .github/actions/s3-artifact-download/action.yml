@@ -8,6 +8,11 @@ description: >-
   must chmod +x it, exactly as it already had to under upload-artifact v4.
 
 inputs:
+  bucket:
+    description: >-
+      CI artifacts bucket. Passed in by the caller because a composite action
+      cannot read the `vars` context; only the workflow can.
+    required: true
   name:
     description: Artifact name, matching the upload.
     required: true
@@ -24,12 +29,12 @@ runs:
       env:
         ARTIFACT_NAME: ${{ inputs.name }}
         DEST_PATH: ${{ inputs.path }}
-        BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
+        BUCKET: ${{ inputs.bucket }}
       run: |
         set -euo pipefail
 
         if [ -z "${BUCKET:-}" ]; then
-          echo "::error::CI_ARTIFACTS_BUCKET is unset. Set the repository variable before using this action."
+          echo "::error::bucket input is empty. The caller must pass the CI_ARTIFACTS_BUCKET repository variable as the action's bucket input."
           exit 1
         fi
 

@@ -236,6 +236,7 @@ jobs:
       - name: Upload tray artifact (workflow artifact ONLY — see job comment)
         uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-tray-linux-unsigned
           path: connect-tray/src-tauri/target/release/connect-tray connect-tray/src-tauri/target/release/BUILD_INFO
           if-no-files-found: error
@@ -380,6 +381,7 @@ jobs:
 
       - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: out/
           if-no-files-found: error
@@ -450,6 +452,7 @@ jobs:
           aws-region: eu-central-1
       - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: out
 
@@ -887,6 +890,7 @@ jobs:
 
       - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-darwin
           path: out/anyray-connect-darwin-*
           if-no-files-found: error
@@ -897,6 +901,7 @@ jobs:
       # pass unnoticed.
       - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-macos-pkg
           path: out/anyray-connect.pkg
           if-no-files-found: error
@@ -1032,6 +1037,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: out
 
@@ -1301,6 +1307,7 @@ jobs:
 
       - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-windows
           path: out/anyray-connect-windows-x64.exe
           if-no-files-found: error
@@ -1330,6 +1337,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: out
 
@@ -1387,6 +1395,7 @@ jobs:
 
       - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: linux-packages
           path: pkgs/
           if-no-files-found: error
@@ -1435,22 +1444,27 @@ jobs:
       # Linux packages are added.
       - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: assets
       - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-darwin
           path: assets
       - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-macos-pkg
           path: assets
       - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-windows
           path: assets
       - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: linux-packages
           path: assets
 
@@ -1847,6 +1861,7 @@ jobs:
         if: ${{ inputs.dry_run }}
         uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: dry-run-release-assets
           path: assets/
           if-no-files-found: error

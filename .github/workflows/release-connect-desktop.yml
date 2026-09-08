@@ -468,6 +468,7 @@ jobs:
             out/*.dmg
             out/*.app.tar.gz
           if-no-files-found: error
+          retention-days: 7
 
   # Runtime validation is deliberately separate from signing. The signed app
   # and bundled engine execute only after the Apple secrets and throwaway
@@ -733,6 +734,7 @@ jobs:
           name: connect-desktop-windows-inner-unsigned
           path: out/*.exe
           if-no-files-found: error
+          retention-days: 7
 
   sign-windows-inner:
     needs: [preflight, build-windows-unsigned]
@@ -781,6 +783,7 @@ jobs:
           name: connect-desktop-windows-inner-signed
           path: out/*.exe
           if-no-files-found: error
+          retention-days: 7
 
   bundle-windows-unsigned:
     needs: [preflight, sign-windows-inner]
@@ -907,6 +910,7 @@ jobs:
           name: connect-desktop-windows-installer-unsigned
           path: out/*.msi
           if-no-files-found: error
+          retention-days: 7
 
   sign-windows-installer:
     needs: [preflight, bundle-windows-unsigned]
@@ -955,6 +959,7 @@ jobs:
           name: connect-desktop-windows-installer-signed
           path: out/*.msi
           if-no-files-found: error
+          retention-days: 7
 
   verify-windows-signatures:
     needs: [preflight, sign-windows-inner, sign-windows-installer]
@@ -1230,6 +1235,7 @@ jobs:
           name: connect-desktop-linux-unsigned
           path: out/
           if-no-files-found: error
+          retention-days: 7
 
   sign-linux-artifacts:
     needs: build-linux-unsigned
@@ -1258,6 +1264,7 @@ jobs:
           name: connect-desktop-linux-signed
           path: out/
           if-no-files-found: error
+          retention-days: 7
 
   smoke-linux-installers:
     needs: [preflight, sign-linux-artifacts]

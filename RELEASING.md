@@ -654,9 +654,15 @@ the real uninstall:
 Each smoke fails if its test-owned autostart artifact pre-exists and removes only
 that exact artifact in its trap/finally cleanup; installer uninstall is not
 claimed to remove per-user autostart state. Every smoke also pre-creates and
-hashes representative Connect profile state plus an existing refresh-scheduler
-sentinel, and requires both hashes to remain unchanged after running and
-uninstalling the desktop app.
+checks representative Connect profile state plus an existing refresh-scheduler
+sentinel. Signed macOS/Windows startup may update only `engineOwner`,
+`engineOwnerPath`, and `engineOwnerObservedAt`: verification requires app ownership,
+the installed engine path, and a valid timestamp while preserving every other
+profile field. It waits up to 30 seconds for ownership adoption before stopping
+the tray. Linux requires an unchanged profile. Scheduler state must remain
+byte-identical everywhere, and uninstall must preserve the validated profile.
+macOS LaunchAgent verification compares executable identity to accept canonical
+paths through runner symlinks.
 
 `SHA256SUMS` is generated only after Apple/Azure signing, because those signers
 rewrite their artifacts. The staging manifest binds every checksum to the
@@ -725,3 +731,13 @@ own README for, because neither channel is self-hosted:
   rolls the tap back). Until the token is set the step skips silently, and the
   cask can be updated by hand: run `scripts/gen-homebrew-cask.sh` and push
   `Casks/anyray-connect.rb`, or `brew bump-cask-pr`.
+
+Windows MSI packaging sets Tauri's bundle-type marker to MSI before Authenticode
+signing. The pinned bundler normally patches that marker while packaging and
+restores its input afterward, which can hide a broken signature inside the MSI
+from a before/after input hash check. The preparation helper requires exactly one
+known marker and rejects already-signed input; the bundle job checks the prepared
+marker without changing the signed file. Tauri may warn that the original UNK
+marker is absent because it is already MSI. Native verification also compares
+both installed executables byte-for-byte with the signed handoff artifacts and
+checks their Authenticode signatures. Revalidate this contract when upgrading Tauri.

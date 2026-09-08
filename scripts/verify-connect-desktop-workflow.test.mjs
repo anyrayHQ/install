@@ -52,11 +52,11 @@ describe('desktop staging workflow safety contract', () => {
     assert.doesNotMatch(workflow, /private-monorepo-source|source-candidate/);
 
     const uploadBlocks = workflow.match(
-      /- uses: actions\/upload-artifact@[\s\S]*?(?=\n      - |\n  [a-z0-9-]+:|$)/g
+      /- uses: (?:actions\/upload-artifact@|\.\/\.github\/actions\/s3-artifact-upload)[\s\S]*?(?=\n      - |\n  [a-z0-9-]+:|$)/g
     );
     assert.ok(uploadBlocks && uploadBlocks.length > 0);
     for (const block of uploadBlocks) {
-      assert.doesNotMatch(block, /private-source|connect-tray\/src|\.git/);
+      assert.doesNotMatch(block.slice(block.indexOf("\n") + 1), /private-source|connect-tray\/src|\.git/);
     }
   });
 
@@ -247,4 +247,16 @@ test('MSI verification uses Windows trust rather than the PE-only parser', () =>
   assert.doesNotMatch(job('sign-windows-installer'), /verify-authenticode\.py/);
   assert.match(job('verify-windows-signatures'), /\$installers \| ForEach-Object \{\s*\.\/scripts\/verify-authenticode-windows\.ps1/);
   assert.match(job('assemble-signed-staging'), /- verify-windows-signatures/);
+});
+
+test('universal builds stage a validated engine for both compile targets and bundling', () => {
+  const body = job('build-macos-unsigned');
+  assert.match(body, /for sidecar_target in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do/);
+  assert.match(body, /stage-connect-tray-engine\.mjs \\\n\s*"\$sidecar_target" \\\n\s*"\$GITHUB_WORKSPACE\/engine\/anyray-connect-universal"/);
+});
+
+test('every native build and bundle uses the pinned child-process toolchain launcher', () => {
+  const commands = workflow.split('\n').filter((line) => /node .*tauri\.js" (build|bundle)/.test(line));
+  assert.equal(commands.length, 5);
+  for (const command of commands) assert.match(command, /scripts\/run-desktop-tauri\.mjs/);
 });

@@ -304,9 +304,14 @@ jobs:
           lipo -archs engine/anyray-connect-universal | grep -q x86_64
           (
             cd private-source
-            node scripts/stage-connect-tray-engine.mjs \
-              "$TARGET_TRIPLE" \
-              "$GITHUB_WORKSPACE/engine/anyray-connect-universal"
+            # tauri-build checks externalBin for each compile target before the
+            # final universal bundle. The universal engine runs on this ARM host
+            # and serves all three names without requiring Rosetta for validation.
+            for sidecar_target in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
+              node scripts/stage-connect-tray-engine.mjs \
+                "$sidecar_target" \
+                "$GITHUB_WORKSPACE/engine/anyray-connect-universal"
+            done
           )
 
       # The fleet image is expected to ship Rust; this only fills the gap if it
@@ -335,7 +340,7 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$TAURI_CLI_VERSION"
           (
             cd private-source/connect-tray/src-tauri
-            node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build \
+            node "$GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build \
               --target "$TARGET_TRIPLE" \
               --bundles app \
               --ci \
@@ -822,7 +827,7 @@ jobs:
           rustup target add $env:TARGET_TRIPLE
           npm install --prefix "$env:RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$env:TAURI_CLI_VERSION"
           Push-Location private-source/connect-tray/src-tauri
-          node "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --target $env:TARGET_TRIPLE --no-bundle --ci -- --locked
+          node "$env:GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --target $env:TARGET_TRIPLE --no-bundle --ci -- --locked
           Pop-Location
           $target = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release"
           $main = Join-Path $target 'connect-tray.exe'
@@ -1019,7 +1024,7 @@ jobs:
           $main = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release/connect-tray.exe"
           $before = (Get-FileHash $main -Algorithm SHA256).Hash
           Push-Location private-source/connect-tray/src-tauri
-          node "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --target $env:TARGET_TRIPLE --bundles msi `
+          node "$env:GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --target $env:TARGET_TRIPLE --bundles msi `
             --ci --no-sign
           Pop-Location
           $after = (Get-FileHash $main -Algorithm SHA256).Hash
@@ -1344,7 +1349,7 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$TAURI_CLI_VERSION"
           (
             cd private-source/connect-tray/src-tauri
-            node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --target "$TARGET_TRIPLE" --no-bundle --ci -- --locked
+            node "$GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --target "$TARGET_TRIPLE" --no-bundle --ci -- --locked
           )
           target="private-source/connect-tray/src-tauri/target/$TARGET_TRIPLE/release"
           main="$target/connect-tray"
@@ -1364,7 +1369,7 @@ jobs:
           before="$(sha256sum "$main")"
           (
             cd private-source/connect-tray/src-tauri
-            node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --target "$TARGET_TRIPLE" --bundles deb,rpm \
+            node "$GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --target "$TARGET_TRIPLE" --bundles deb,rpm \
               --ci --no-sign
           )
           after="$(sha256sum "$main")"

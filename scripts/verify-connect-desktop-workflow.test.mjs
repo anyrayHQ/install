@@ -148,6 +148,16 @@ describe('desktop staging workflow safety contract', () => {
     assert.ok(identifier > 0 && identifier < notarize);
   });
 
+  test('prepares MSI metadata before signing and verifies the installed signed payload', () => {
+    const build = job('build-windows-unsigned');
+    assert.ok(build.indexOf('node scripts/prepare-desktop-msi.mjs $main --prepare') > 0);
+    assert.ok(build.indexOf('--prepare') < build.indexOf('Copy-Item $main out/'));
+    const bundle = job('bundle-windows-unsigned');
+    assert.ok(bundle.indexOf('node scripts/prepare-desktop-msi.mjs $main --check') > 0);
+    assert.ok(bundle.indexOf('--check') < bundle.indexOf('tauri.js" bundle'));
+    assert.match(job('verify-windows-signatures'), /MSI changed signed payload/);
+  });
+
   test('signs Windows inner executables before MSI packaging and the MSI after', () => {
     assert.match(job('bundle-windows-unsigned'), /needs: \[preflight, sign-windows-inner\]/);
     assert.match(job('bundle-windows-unsigned'), /tauri\.js" bundle .*--bundles msi/);
@@ -155,12 +165,27 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(job('verify-windows-signatures'), /msiexec\.exe/);
   });
 
+  test('signed smoke checks ownership before stopping and preserves post-startup state', () => {
+    for (const [name, stop, snapshot] of [
+      ['verify-macos-signed', 'kill -9 "$app_pid" ||', 'state_before="$(shasum'],
+      ['verify-windows-signatures', 'Stop-Process -Id $appProcess.Id -Force', '$stateBefore = (Get-FileHash'],
+    ]) {
+      const body = job(name);
+      assert.match(body, /actions\/setup-node@/);
+      const firstCheck = body.indexOf('node scripts/verify-desktop-profile.mjs');
+      assert.ok(firstCheck > 0);
+      assert.ok(firstCheck < body.indexOf(stop));
+      assert.ok(body.indexOf(snapshot) > firstCheck);
+    }
+    assert.match(job('verify-macos-signed'), /sparse-checkout: \|\n            .github\/actions\n            scripts/);
+  });
+
   test('gates assembly on native install/uninstall smoke tests', () => {
     const mac = job('verify-macos-signed');
     assert.match(mac, /ditto "\$app" "\$installed_app"/);
     assert.match(mac, /HOME="\$existing_home" "\$installed_main"/);
     assert.match(mac, /ai\.anyray\.connect-tray\.plist/);
-    assert.match(mac, /plutil -extract Label/);
+    assert.match(mac, /verify-desktop-launchagent\.py/);
     assert.match(mac, /kill -9 "\$app_pid"/);
     assert.match(mac, /rm -f "\$autostart"/);
     assert.match(mac, /rm -rf "\$installed_app"/);

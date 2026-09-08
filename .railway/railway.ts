@@ -44,7 +44,6 @@ export default defineRailway(() => {
       ANYRAY_OPTIMIZER_URL: "http://optimizer.railway.internal:8088",
       ANYRAY_OPTIMIZER_TOKEN: preserve(), // canonical; optimizer references gateway.env.*
       ANYRAY_OPTIMIZER_TIMEOUT_MS: "800",
-      ANYRAY_OPTIMIZER_VISION_TIMEOUT_MS: "10000",
       ANYRAY_DEFAULT_MODEL: "anthropic/claude-sonnet-4-5",
       ANYRAY_CONTENT_KEY: preserve(),
       ANYRAY_CONTENT_MODE: "encrypted",

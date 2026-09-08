@@ -304,9 +304,17 @@ jobs:
           lipo -archs engine/anyray-connect-universal | grep -q x86_64
           (
             cd private-source
-            node scripts/stage-connect-tray-engine.mjs \
-              "$TARGET_TRIPLE" \
-              "$GITHUB_WORKSPACE/engine/anyray-connect-universal"
+            # Tauri splits universal-apple-darwin into one cargo build per arch,
+            # and tauri-build resolves externalBin against that per-arch triple,
+            # so a sidecar must exist under all three names. The universal
+            # binary is what gets staged at each: it satisfies the per-arch
+            # existence check, stays executable for the script's --version gate
+            # on this arm64 host, and is the file the bundler actually copies.
+            for triple in aarch64-apple-darwin x86_64-apple-darwin "$TARGET_TRIPLE"; do
+              node scripts/stage-connect-tray-engine.mjs \
+                "$triple" \
+                "$GITHUB_WORKSPACE/engine/anyray-connect-universal"
+            done
           )
 
       # The fleet image is expected to ship Rust; this only fills the gap if it
@@ -820,6 +828,21 @@ jobs:
           rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal --no-self-update
           rustup default "$env:RUST_TOOLCHAIN"
           rustup target add $env:TARGET_TRIPLE
+          # The runner image ships its own rustup with an older default
+          # toolchain, and the cargo the Tauri CLI resolved on PATH ignored the
+          # `rustup default` above: run 34213875308 compiled under cargo 1.84.1
+          # and could not parse a locked dependency that requires edition2024.
+          # Pin the shim and put the pinned toolchain's own bin dir first, which
+          # also covers a non-shim cargo earlier on PATH, then assert before the
+          # build so a drifted toolchain names itself here instead of surfacing
+          # as a dependency manifest parse error.
+          $env:RUSTUP_TOOLCHAIN = $env:RUST_TOOLCHAIN
+          $sysroot = (rustup run $env:RUST_TOOLCHAIN rustc --print sysroot)
+          $env:Path = "$(Join-Path $sysroot 'bin');$env:Path"
+          $cargoVersion = (cargo --version)
+          if ($cargoVersion -notmatch "\s$([regex]::Escape($env:RUST_TOOLCHAIN))\s") {
+            throw "cargo is not the pinned $env:RUST_TOOLCHAIN toolchain: $cargoVersion"
+          }
           npm install --prefix "$env:RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$env:TAURI_CLI_VERSION"
           Push-Location private-source/connect-tray/src-tauri
           node "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --target $env:TARGET_TRIPLE --no-bundle --ci -- --locked
@@ -1015,6 +1038,21 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal --no-self-update
           rustup default "$env:RUST_TOOLCHAIN"
+          # The runner image ships its own rustup with an older default
+          # toolchain, and the cargo the Tauri CLI resolved on PATH ignored the
+          # `rustup default` above: run 34213875308 compiled under cargo 1.84.1
+          # and could not parse a locked dependency that requires edition2024.
+          # Pin the shim and put the pinned toolchain's own bin dir first, which
+          # also covers a non-shim cargo earlier on PATH, then assert before the
+          # build so a drifted toolchain names itself here instead of surfacing
+          # as a dependency manifest parse error.
+          $env:RUSTUP_TOOLCHAIN = $env:RUST_TOOLCHAIN
+          $sysroot = (rustup run $env:RUST_TOOLCHAIN rustc --print sysroot)
+          $env:Path = "$(Join-Path $sysroot 'bin');$env:Path"
+          $cargoVersion = (cargo --version)
+          if ($cargoVersion -notmatch "\s$([regex]::Escape($env:RUST_TOOLCHAIN))\s") {
+            throw "cargo is not the pinned $env:RUST_TOOLCHAIN toolchain: $cargoVersion"
+          }
           npm install --prefix "$env:RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$env:TAURI_CLI_VERSION"
           $main = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release/connect-tray.exe"
           $before = (Get-FileHash $main -Algorithm SHA256).Hash

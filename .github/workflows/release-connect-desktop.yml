@@ -1151,7 +1151,22 @@ jobs:
           $log = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi.log'
           $installed = $false
           $appProcess = $null
+          $createdRunKey = $false
           try {
+            # auto-launch opens this standard desktop key; it does not create it.
+            # Minimal Windows runner profiles may not have an Explorer Run key.
+            $runKeyExisted = Test-Path -LiteralPath $runKey
+            Write-Host "Windows startup prerequisite: HKCU Run key existed=$runKeyExisted"
+            if (-not $runKeyExisted) {
+              New-Item -Path $runKey -Force | Out-Null
+              $createdRunKey = $true
+            }
+            # Fail before launching if the runner cannot open the key for writes.
+            $runHandle = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+              'Software\Microsoft\Windows\CurrentVersion\Run', $true
+            )
+            if ($null -eq $runHandle) { throw 'Windows runner cannot open HKCU Run for autostart' }
+            $runHandle.Dispose()
             $proc = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
               '/i', "`"$msi`"", '/qn', '/norestart',
               "INSTALLDIR=`"$installDir`"", "/L*v", "`"$log`""
@@ -1178,12 +1193,16 @@ jobs:
             }
             ./scripts/verify-authenticode-windows.ps1 -Path $installedEngine.FullName
             ./scripts/verify-authenticode-windows.ps1 -Path $installedMain.FullName
+            $engineTimer = [Diagnostics.Stopwatch]::StartNew()
             $installedVersion = (& $installedEngine.FullName --version | Select-Object -First 1)
+            $engineTimer.Stop()
+            Write-Host "Installed engine version probe took $($engineTimer.ElapsedMilliseconds) ms; tray startup allows 5000 ms"
             if ($installedVersion -ne "anyray-connect $env:VERSION") {
               throw "installed engine version mismatch: $installedVersion"
             }
 
             $appProcess = Start-Process -FilePath $installedMain.FullName -PassThru
+            Write-Host "Windows tray process: pid=$($appProcess.Id), session=$($appProcess.SessionId)"
             $runValue = $null
             foreach ($attempt in 1..30) {
               if ($appProcess.HasExited) {
@@ -1197,6 +1216,9 @@ jobs:
               $appProcess.Refresh()
             }
             if ($null -eq $runValue) {
+              $appProcess.Refresh()
+              $keyPresent = Test-Path -LiteralPath $runKey
+              Write-Host "Windows startup timeout: exited=$($appProcess.HasExited), HKCU Run present=$keyPresent"
               throw 'installed Windows tray did not create its HKCU Run value within 30 seconds'
             }
             if ($runValue.IndexOf($installedMain.FullName, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
@@ -1221,6 +1243,12 @@ jobs:
             # The tray owns this exact test-created Run value; MSI uninstall
             # is not expected to remove per-user autostart state.
             Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+            if ($createdRunKey) {
+              $remaining = Get-Item -LiteralPath $runKey -ErrorAction SilentlyContinue
+              if ($null -ne $remaining -and $remaining.ValueCount -eq 0 -and $remaining.SubKeyCount -eq 0) {
+                Remove-Item -LiteralPath $runKey
+              }
+            }
             if ($installed) {
               $remove = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
                 '/x', "`"$msi`"", '/qn', '/norestart'

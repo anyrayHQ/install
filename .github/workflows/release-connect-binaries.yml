@@ -173,12 +173,18 @@ jobs:
     runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 60
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       RUST_TOOLCHAIN: '1.98.0'
       RUSTUP_VERSION: '1.29.0'
       RUSTUP_INIT_SHA256: '4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10'
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - name: Mint a monorepo read token (1h, contents:read, one repo)
         id: monorepo-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -233,22 +239,34 @@ jobs:
           printf 'monorepo_sha=%s\n' "$(git rev-parse HEAD)" > target/release/BUILD_INFO
 
       - name: Upload tray artifact (workflow artifact ONLY — see job comment)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-tray-linux-unsigned
-          path: |
-            connect-tray/src-tauri/target/release/connect-tray
-            connect-tray/src-tauri/target/release/BUILD_INFO
+          path: connect-tray/src-tauri/target/release/connect-tray connect-tray/src-tauri/target/release/BUILD_INFO
           if-no-files-found: error
-          retention-days: 7
 
   build:
     needs: signing-preflight
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     outputs:
       version: ${{ steps.pkg.outputs.version }}
     steps:
+      # The S3 handoff below is a LOCAL composite action, so the repo must be
+      # on disk before it can be resolved.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           # >= 1.3.6. On 1.3.5 `--compile-exec-argv` (added below by #335 for
@@ -366,12 +384,12 @@ jobs:
           # would not match the released bytes.
           ls -lh out
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: out/
           if-no-files-found: error
-          retention-days: 7
 
   # Developer ID-signs + notarizes the two darwin binaries. The per-step gates
   # below still check the Apple secrets, but `signing-preflight` has already
@@ -411,6 +429,9 @@ jobs:
     needs: [build, provision-mac]
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     env:
       VERSION: ${{ needs.build.outputs.version }}
       # GitHub Actions can't read `secrets.*` in a step `if:` — map the secrets
@@ -423,8 +444,20 @@ jobs:
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
       APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      # The S3 handoff below is a LOCAL composite action, so the repo must be
+      # on disk before it can be resolved.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: out
 
@@ -701,10 +734,11 @@ jobs:
           </dict>
           </plist>
           PLIST
-          # Artifact transfer strips file modes (actions/upload-artifact v4
-          # documents this) — the post-sign smoke run below would otherwise die
-          # with "Permission denied". Harmless for the published assets: both
-          # consumers (connect.sh, selfUpdate.ts) chmod after download.
+          # Artifact transfer strips file modes — S3 stores bytes, not the
+          # executable bit, exactly as actions/upload-artifact v4 did before it.
+          # The post-sign smoke run below would otherwise die with "Permission
+          # denied". Harmless for the published assets: both consumers
+          # (connect.sh, selfUpdate.ts) chmod after download.
           chmod +x out/anyray-connect-darwin-*
           for bin in out/anyray-connect-darwin-*; do
             codesign --force --options runtime --timestamp \
@@ -859,23 +893,23 @@ jobs:
             security delete-keychain "$RUNNER_TEMP/anyray-signing.keychain-db"
           fi
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-darwin
           path: out/anyray-connect-darwin-*
           if-no-files-found: error
-          retention-days: 7
 
       # Keep the package in its own artifact. upload-artifact applies
       # if-no-files-found to the whole path set, not to each pattern, so mixing
       # the package with always-present darwin binaries would let a missing pkg
       # pass unnoticed.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-macos-pkg
           path: out/anyray-connect.pkg
           if-no-files-found: error
-          retention-days: 7
 
   # Always remove the RUNNER, even if signing failed — the webhook is the part a
   # fork actor could otherwise reach. The fleet is left in place on purpose: the
@@ -997,12 +1031,18 @@ jobs:
       JSIGN_VERSION: '7.5'
       JSIGN_SHA256: 602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       # For scripts/verify-authenticode.py. This job did not check out the repo
       # before, because the old verify step shelled out to a package it
       # (incorrectly) expected to install.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: out
 
@@ -1270,12 +1310,12 @@ jobs:
         if: ${{ always() }}
         run: rm -f "$RUNNER_TEMP/azure-signing.token" "$RUNNER_TEMP/gh-oidc.jwt"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-windows
           path: out/anyray-connect-windows-x64.exe
           if-no-files-found: error
-          retention-days: 7
 
   # Packages the linux binaries as .deb/.rpm — ADDITIVE assets; the bare
   # binaries keep publishing exactly as before and stay untouched. Once the
@@ -1285,15 +1325,24 @@ jobs:
     needs: build
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     env:
       # Same pattern as sign-macos: secrets into env, gate on `env.X != ''`.
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       # For ci/nfpm.yaml.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: out
 
@@ -1349,12 +1398,12 @@ jobs:
         if: always()
         run: rm -rf "$RUNNER_TEMP/gnupg"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: linux-packages
           path: pkgs/
           if-no-files-found: error
-          retention-days: 7
 
   release:
     needs: [build, sign-macos, sign-windows, package-linux]
@@ -1373,6 +1422,11 @@ jobs:
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       # The CodeBuild AL2 runner image ships no gh CLI (hosted ubuntu does) —
       # install it pinned by version + sha256, same discipline as nfpm below.
       - name: Install gh CLI
@@ -1393,24 +1447,29 @@ jobs:
       # darwin/windows binaries overwrite their unsigned copies, the signed and
       # stapled macOS package arrives as its own required artifact, then the
       # Linux packages are added.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-unsigned
           path: assets
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-darwin
           path: assets
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-macos-pkg
           path: assets
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-windows
           path: assets
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: linux-packages
           path: assets
 
@@ -1805,9 +1864,9 @@ jobs:
       # customer-facing release. The signed, checksummed asset set is inspectable.
       - name: Upload assembled assets (dry run — not published)
         if: ${{ inputs.dry_run }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: dry-run-release-assets
           path: assets/
           if-no-files-found: error
-          retention-days: 7

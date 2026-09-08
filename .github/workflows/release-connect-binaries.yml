@@ -97,6 +97,7 @@ jobs:
   # it listed and unset, which is how this trap re-arms.
   signing-preflight:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     env:
       # A step `if:` cannot read `secrets.*`, and neither can a job-level `if:` —
       # so the values are mapped into env and checked in a `run:` block, the same
@@ -239,6 +240,7 @@ jobs:
   build:
     needs: signing-preflight
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     outputs:
       version: ${{ steps.pkg.outputs.version }}
     steps:
@@ -383,6 +385,7 @@ jobs:
   provision-mac:
     needs: build
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write # assume the fleet-lifecycle role via OIDC
@@ -402,6 +405,7 @@ jobs:
   sign-macos:
     needs: [build, provision-mac]
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     env:
       VERSION: ${{ needs.build.outputs.version }}
       # GitHub Actions can't read `secrets.*` in a step `if:` — map the secrets
@@ -878,6 +882,7 @@ jobs:
     needs: sign-macos
     if: ${{ always() }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -960,6 +965,7 @@ jobs:
   sign-windows:
     needs: build
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: read
       # Federated (OIDC) auth to Entra, so there is no client secret to store or
@@ -1273,6 +1279,7 @@ jobs:
   package-linux:
     needs: build
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     env:
       # Same pattern as sign-macos: secrets into env, gate on `env.X != ''`.
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
@@ -1347,6 +1354,7 @@ jobs:
   release:
     needs: [build, sign-macos, sign-windows, package-linux]
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
     permissions:
       contents: write # create the release + upload assets
       id-token: write # attest-build-provenance: mint the short-lived Sigstore signing certificate

@@ -78,7 +78,7 @@ jobs:
   # an acceptable identity for a distribution signing lane.
   dispatch-main-only:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions: {}
     env:
       DISPATCH_REF: ${{ github.ref }}
@@ -95,7 +95,7 @@ jobs:
   preflight:
     needs: dispatch-main-only
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     outputs:
       version: ${{ steps.inputs.outputs.version }}
       source_sha: ${{ steps.inputs.outputs.source_sha }}
@@ -211,7 +211,7 @@ jobs:
   provision-mac:
     needs: [preflight, validate-source]
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -533,7 +533,7 @@ jobs:
   verify-macos-signed:
     needs: [preflight, sign-macos]
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -653,7 +653,7 @@ jobs:
     needs: [provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed]
     if: ${{ always() && needs.provision-mac.result != 'skipped' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -806,7 +806,7 @@ jobs:
   sign-windows-inner:
     needs: [preflight, build-windows-unsigned]
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -990,7 +990,7 @@ jobs:
   sign-windows-installer:
     needs: [preflight, bundle-windows-unsigned]
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
@@ -1036,7 +1036,7 @@ jobs:
   verify-windows-signatures:
     needs: [preflight, sign-windows-inner, sign-windows-installer]
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -1319,7 +1319,7 @@ jobs:
   sign-linux-artifacts:
     needs: build-linux-unsigned
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -1350,7 +1350,7 @@ jobs:
   smoke-linux-installers:
     needs: [preflight, sign-linux-artifacts]
     runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -1495,7 +1495,7 @@ jobs:
       - smoke-linux-installers
       - sign-linux-artifacts
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -1599,7 +1599,7 @@ jobs:
     needs: [preflight, assemble-signed-staging]
     if: ${{ !inputs.dry_run }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     # Every run rewrites the one staging feed; serialize across versions.
     concurrency:
       group: connect-desktop-staging-feed

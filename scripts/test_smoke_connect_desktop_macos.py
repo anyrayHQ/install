@@ -47,5 +47,17 @@ class AccountBoundaryTest(unittest.TestCase):
                 self.assertFalse((Path(directory) / '.anyray').exists())
 
 
+class RestartBoundaryTest(unittest.TestCase):
+    def test_registration_alone_does_not_prove_restart(self):
+        with patch.object(smoke.time, 'monotonic', side_effect=[0, 0, 31]), \
+                patch.object(smoke.time, 'sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'restart'):
+                smoke.wait_for_restart(lambda: [], 101)
+
+    def test_restart_requires_the_launched_tray_and_engine(self):
+        with patch.object(smoke.time, 'monotonic', return_value=0):
+            smoke.wait_for_restart(lambda: [101, 102], 101)
+
+
 if __name__ == '__main__':
     unittest.main()

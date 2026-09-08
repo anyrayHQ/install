@@ -20,6 +20,16 @@ def run(args, check=True):
                           stderr=subprocess.DEVNULL, text=True, timeout=30)
 
 
+def wait_for_restart(processes, tray_pid, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        running = processes()
+        if tray_pid in running and len(running) == 2:
+            return
+        time.sleep(0.25)
+    raise RuntimeError('restart did not produce the tray and resident engine')
+
+
 def main():
     app = Path(sys.argv[1]).resolve(strict=True)
     account = pwd.getpwuid(os.getuid())
@@ -89,8 +99,8 @@ def main():
 
     # This directory is exclusively created by this smoke; cleanup never removes prior state.
     state_dir.mkdir(mode=0o700)
-    legacy.parent.mkdir(parents=True, exist_ok=True)
     try:
+        legacy.parent.mkdir(parents=True, exist_ok=True)
         for scenario in ('fresh', 'legacy-enabled', 'legacy-disabled'):
             state = state_dir / 'connect.json'
             state.write_text(json.dumps({
@@ -137,12 +147,12 @@ def main():
             if profile.get('managedEnrollmentDisabled') is not True:
                 raise RuntimeError(f'{scenario}: lost enrollment opt-out')
             stop()
-            # Quit must retain registration; restarting must preserve observed consent.
+            # Process exit must retain registration; restarting must preserve consent.
             if native() != observed:
-                raise RuntimeError(f'{scenario}: Quit changed native registration')
-            subprocess.Popen([str(binary)], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
-            time.sleep(5)
+                raise RuntimeError(f'{scenario}: process exit changed native registration')
+            restarted = subprocess.Popen([str(binary)], stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL, start_new_session=True)
+            wait_for_restart(processes, restarted.pid)
             if native() != observed:
                 raise RuntimeError(f'{scenario}: restart changed native registration')
             stop()

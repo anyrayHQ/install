@@ -536,7 +536,9 @@ requires all of the following before source-controlled build code executes:
 - that commit is an ancestor of the fetched `refs/remotes/origin/main`;
 - `connect/package.json`, the tray's `Cargo.toml`, `Cargo.lock`, and
   `tauri.conf.json` all equal `version`;
-- Tauri's `bundle.externalBin` is exactly `binaries/anyray-connect`.
+- Tauri's `bundle.externalBin` is exactly `binaries/anyray-connect`;
+- Tauri's macOS minimum is `13.0`. Signed DMG and updater bundle verification
+  also checks the generated `LSMinimumSystemVersion`.
 
 The private checkout is local to that native job and is **never uploaded**.
 Only compiled executables and packages cross a job boundary. Provision a GitHub

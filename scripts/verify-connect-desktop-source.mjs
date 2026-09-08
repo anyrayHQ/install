@@ -46,6 +46,10 @@ export const readDesktopVersions = (sourceDir) => {
   const lock = read(lockPath);
   const tauri = JSON.parse(read(tauriPath));
 
+  if (tauri.bundle?.macOS?.minimumSystemVersion !== '13.0') {
+    throw new Error(`${tauriPath}: bundle.macOS.minimumSystemVersion must be 13.0`);
+  }
+
   const externalBin = tauri.bundle?.externalBin;
   if (
     !Array.isArray(externalBin) ||

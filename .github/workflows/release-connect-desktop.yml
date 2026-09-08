@@ -625,7 +625,7 @@ jobs:
           mountpoint="$RUNNER_TEMP/connect-desktop-mounted"
           mkdir -p "$mountpoint"
           hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "$dmg"
-          installed_app="$test_home/Applications/Anyray Connect Tray.app"
+          installed_app="$test_home/Applications/Anyray Connect.app"
           owns_app=false
           cleanup() {
             if [ "$owns_app" = true ]; then sudo rm -rf "$installed_app"; fi

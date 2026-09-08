@@ -40,7 +40,9 @@ def main():
         raise RuntimeError('redirected HOME does not isolate native login items')
     with (app / 'Contents/Info.plist').open('rb') as source:
         info = plistlib.load(source)
-    if info['CFBundleIdentifier'] != LABEL or info['LSMinimumSystemVersion'] != '13.0':
+    if (info['CFBundleIdentifier'] != LABEL or info['LSMinimumSystemVersion'] != '13.0'
+            or info.get('CFBundleName') != 'Anyray Connect'
+            or info.get('CFBundleDisplayName', 'Anyray Connect') != 'Anyray Connect'):
         raise RuntimeError('unexpected desktop identity or macOS floor')
     binary = app / 'Contents/MacOS' / info['CFBundleExecutable']
     engine = app / 'Contents/MacOS/anyray-connect'

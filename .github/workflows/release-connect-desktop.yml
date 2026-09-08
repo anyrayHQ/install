@@ -1237,7 +1237,7 @@ jobs:
             }
 
             $appProcess = Start-Process -FilePath $installedMain.FullName -PassThru
-            Write-Host "Windows tray process: pid=$($appProcess.Id), session=$($appProcess.SessionId)
+            Write-Host "Windows tray process: pid=$($appProcess.Id), session=$($appProcess.SessionId)"
             $runValue = $null
             foreach ($attempt in 1..30) {
               if ($appProcess.HasExited) {

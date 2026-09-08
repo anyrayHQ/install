@@ -23,3 +23,9 @@ These fixtures are test inputs, never release artifacts.
 
 Run `npm run test:desktop-release` for workflow and account-isolation regressions.
 Do not run the native smoke scripts on a developer account.
+
+The displayed product name is **Anyray Connect**. The macOS smoke checks the signed
+bundle name and installs `Anyray Connect.app`. Technical bundle, package and executable
+identifiers remain stable for updates and migration. macOS publisher disclosures come
+from the Apple Developer ID certificate; changing the app name cannot change the legal
+certificate holder shown by the OS. Verify that publisher separately on the signed candidate.

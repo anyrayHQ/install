@@ -6,6 +6,10 @@ const workflow = readFileSync(
   new URL('../.github/workflows/release-connect-desktop.yml', import.meta.url),
   'utf8'
 );
+const macSmoke = readFileSync(
+  new URL('./smoke-connect-desktop-macos.py', import.meta.url),
+  'utf8'
+);
 
 const job = (name) => {
   const marker = `  ${name}:\n`;
@@ -166,28 +170,32 @@ describe('desktop staging workflow safety contract', () => {
   });
 
   test('signed smoke checks ownership before stopping and preserves post-startup state', () => {
-    for (const [name, stop, snapshot] of [
-      ['verify-macos-signed', 'kill -9 "$app_pid" ||', 'state_before="$(shasum'],
-      ['verify-windows-signatures', 'Stop-Process -Id $appProcess.Id -Force', '$stateBefore = (Get-FileHash'],
-    ]) {
-      const body = job(name);
-      assert.match(body, /actions\/setup-node@/);
-      const firstCheck = body.indexOf('node scripts/verify-desktop-profile.mjs');
-      assert.ok(firstCheck > 0);
-      assert.ok(firstCheck < body.indexOf(stop));
-      assert.ok(body.indexOf(snapshot) > firstCheck);
-    }
-    assert.match(job('verify-macos-signed'), /sparse-checkout: \|\n            .github\/actions\n            scripts/);
+    const mac = job('verify-macos-signed');
+    assert.match(mac, /actions\/setup-node@/);
+    assert.match(mac, /sparse-checkout: \|\n            .github\/actions\n            scripts/);
+    assert.ok(mac.indexOf('smoke-connect-desktop-macos.py') < mac.lastIndexOf('sudo rm -rf "$installed_app"'));
+    const macOwnership = macSmoke.indexOf("profile.get('engineOwner') == 'app'");
+    const macStop = macSmoke.indexOf('            stop()', macOwnership);
+    assert.ok(macOwnership > 0 && macOwnership < macStop);
+    assert.ok(macSmoke.indexOf("if native() != observed:", macStop) > macStop);
+
+    const windows = job('verify-windows-signatures');
+    assert.match(windows, /actions\/setup-node@/);
+    const firstCheck = windows.indexOf('node scripts/verify-desktop-profile.mjs');
+    assert.ok(firstCheck > 0);
+    assert.match(windows, /verify-desktop-profile\.mjs \$profileBefore \$state \$installedEngine\.FullName \$installedMain\.DirectoryName/);
+    assert.match(windows, /try \{ \$observedProfile = Get-Content -Raw \$state \| ConvertFrom-Json \}/);
+    assert.ok(firstCheck < windows.indexOf('Stop-Process -Id $appProcess.Id -Force'));
+    assert.ok(windows.indexOf('$stateBefore = (Get-FileHash') > firstCheck);
   });
 
   test('gates assembly on native install/uninstall smoke tests', () => {
     const mac = job('verify-macos-signed');
+    assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$updater_app\/Contents\/Info\.plist"\)" = '13\.0'/);
+    assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$app\/Contents\/Info\.plist"\)" = '13\.0'/);
     assert.match(mac, /ditto "\$app" "\$installed_app"/);
-    assert.match(mac, /HOME="\$existing_home" "\$installed_main"/);
-    assert.match(mac, /ai\.anyray\.connect-tray\.plist/);
-    assert.match(mac, /verify-desktop-launchagent\.py/);
-    assert.match(mac, /kill -9 "\$app_pid"/);
-    assert.match(mac, /rm -f "\$autostart"/);
+    assert.match(mac, /smoke-connect-desktop-macos.py/);
+    assert.match(mac, /launchctl asuser/);
     assert.match(mac, /rm -rf "\$installed_app"/);
 
     const windows = job('verify-windows-signatures');
@@ -202,11 +210,11 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(linux, /\$SUDO dpkg -i/);
     assert.match(linux, /smoke_installed_tray "\$deb_main"/);
     assert.match(linux, /\$SUDO dpkg -r/);
-    assert.match(linux, /\$SUDO rpm -i/);
+    assert.match(linux, /\$SUDO rpm --dbpath "\$rpm_database" -i/);
     assert.match(linux, /smoke_installed_tray "\$rpm_main"/);
-    assert.match(linux, /\$SUDO rpm -e/);
+    assert.match(linux, /\$SUDO rpm --dbpath "\$rpm_database" -e/);
     assert.match(linux, /ai\.anyray\.connect-tray\.desktop/);
-    assert.match(linux, /setsid dbus-run-session -- xvfb-run -a "\$main"/);
+    assert.match(linux, /dbus-run-session -- xvfb-run -a "\$main"/);
     assert.match(linux, /kill -KILL -- "-\$tray_pid"/);
     assert.match(linux, /rm -f "\$autostart"/);
     assert.match(
@@ -284,4 +292,77 @@ test('every native build and bundle uses the pinned child-process toolchain laun
   const commands = workflow.split('\n').filter((line) => /node .*tauri\.js" (build|bundle)/.test(line));
   assert.equal(commands.length, 5);
   for (const command of commands) assert.match(command, /scripts\/run-desktop-tauri\.mjs/);
+});
+
+
+test('Linux adoption smoke uses a real dedicated account and checks owner state', () => {
+  const linux = job('smoke-linux-installers');
+  assert.match(linux, /useradd/);
+  assert.match(linux, /runuser -u/);
+  assert.match(linux, /runuser -u "\$account" -- env \\\n+              HOME="\$existing_home" \\\n+              XDG_CONFIG_HOME="\$existing_home\/\.config" \\\n+              XDG_DATA_HOME="\$existing_home\/\.local\/share" \\\n+              XDG_RUNTIME_DIR="\$existing_home\/\.runtime"/);
+  assert.match(linux, /engineOwner/);
+  assert.match(linux, /trayAppPath/);
+  assert.match(linux, /loginRegistrationObservedAt/);
+});
+
+test('every smoke allows exactly the verifier\'s ownership fields to change', () => {
+  const verifier = readFileSync(new URL('./verify-desktop-profile.mjs', import.meta.url), 'utf8');
+  const fields = [...verifier.matchAll(/^  '([A-Za-z]+)',$/gm)].map((m) => m[1]);
+  assert.ok(fields.length >= 11);
+  const python = [...macSmoke.matchAll(/^    '([A-Za-z]+)',$/gm)].map((m) => m[1]);
+  assert.deepEqual(python, fields);
+  const linux = job('smoke-linux-installers').match(/owner_fields=([A-Za-z,]+)$/m)?.[1].split(',');
+  assert.deepEqual(linux, fields);
+});
+
+test('Linux package install and uninstall leave pre-existing CLI state byte-identical', () => {
+  const linux = job('smoke-linux-installers');
+  assert.match(linux, /existing-scheduler-sentinel/);
+  assert.match(linux, /existing-cli-sentinel/);
+  const checkpoints = linux.match(/^\s*assert_existing_state_untouched$/gm) ?? [];
+  assert.equal(checkpoints.length, 6);
+  let at = linux.indexOf('build-desktop-cli-migration-fixtures.sh');
+  for (const step of [
+    '$SUDO dpkg -i "$cli_deb"',
+    'apt-get install -y "$PWD/$deb"',
+    '$SUDO dpkg -r "$deb_name"',
+    'rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"',
+    'rpm --dbpath "$rpm_database" -U --nodeps "$rpm"',
+    'rpm --dbpath "$rpm_database" -e "$rpm_name"',
+  ]) {
+    at = linux.indexOf(step, at);
+    assert.ok(at > 0, step);
+    const next = linux.indexOf('\n          assert_existing_state_untouched\n', at);
+    assert.ok(next > at && next - at < 400, `no checkpoint after ${step}`);
+    at = next;
+  }
+});
+
+
+test('macOS smoke uses a dedicated GUI account and native lifecycle assertions', () => {
+  const mac = job('verify-macos-signed');
+  assert.match(mac, /DESKTOP_MAC_TEST_USER/);
+  assert.match(mac, /launchctl asuser/);
+  assert.match(mac, /smoke-connect-desktop-macos.py/);
+  assert.doesNotMatch(mac, /HOME="\$existing_home"|did not create its LaunchAgent/);
+  assert.match(macSmoke, /existing-scheduler-sentinel/);
+  assert.match(macSmoke, /check_adopted_profile\(profile, app, expected\)/);
+  assert.ok(macSmoke.indexOf('foreign_before = ') < macSmoke.indexOf("for scenario in ("));
+  assert.ok(macSmoke.indexOf('!= foreign_before') > macSmoke.indexOf("native('unregister')"));
+  assert.match(macSmoke, /created a refresh scheduler/);
+});
+
+
+test('Linux upgrades exercise an installed CLI package before the desktop replacement', () => {
+  const linux = job('smoke-linux-installers');
+  const fixtures = linux.indexOf('build-desktop-cli-migration-fixtures.sh');
+  const cliDeb = linux.indexOf('$SUDO dpkg -i "$cli_deb"');
+  const deb = linux.indexOf('apt-get install -y "$PWD/$deb"');
+  const cliRpm = linux.indexOf('rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"');
+  const rpm = linux.indexOf('rpm --dbpath "$rpm_database" -U --nodeps "$rpm"');
+  assert.ok(fixtures > 0 && fixtures < cliDeb && cliDeb < deb);
+  assert.ok(deb < cliRpm && cliRpm < rpm);
+  const bootstrapGone = 'test ! -e /etc/xdg/autostart/anyray-connect-managed-enroll.desktop';
+  assert.ok(linux.indexOf(bootstrapGone, deb) < cliRpm);
+  assert.ok(linux.indexOf(bootstrapGone, rpm) > rpm);
 });

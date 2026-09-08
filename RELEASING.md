@@ -568,7 +568,9 @@ requires all of the following before source-controlled build code executes:
 - that commit is an ancestor of the fetched `refs/remotes/origin/main`;
 - `connect/package.json`, the tray's `Cargo.toml`, `Cargo.lock`, and
   `tauri.conf.json` all equal `version`;
-- Tauri's `bundle.externalBin` is exactly `binaries/anyray-connect`.
+- Tauri's `bundle.externalBin` is exactly `binaries/anyray-connect`;
+- Tauri's macOS minimum is `13.0`. Signed DMG and updater bundle verification
+  also checks the generated `LSMinimumSystemVersion`.
 
 The private checkout is local to that native job and is **never uploaded**.
 Only compiled executables and packages cross a job boundary. Provision a GitHub
@@ -642,27 +644,44 @@ points at the installed main executable, force-kills the tray, and then performs
 the real uninstall:
 
 - macOS copies the app from the DMG into a temporary Applications analogue and
-  validates `$HOME/Library/LaunchAgents/ai.anyray.connect-tray.plist`, including
-  its `Label` and installed executable path;
+  runs `scripts/smoke-connect-desktop-macos.py` in a dedicated GUI account: fresh
+  native login registration, migration from the legacy LaunchAgent, preserved
+  disabled consent, stop/restart, and unregister. The Mac runner needs the
+  repository variable `DESKTOP_MAC_TEST_USER` naming a dedicated non-root
+  account that is logged in with a real GUI session and holds no Anyray
+  profile, process, or login registration; the smoke fails if that account
+  does not own the console. Changing `HOME` is not isolation for Service
+  Management, so never run the smoke on a developer account. It does not cover
+  the UI Quit action, a real logout/login, enrollment, key renewal, or an EDR
+  policy; record those in the monorepo's `connect-tray/ACCEPTANCE.md` against
+  the exact candidate;
 - Windows silently installs the MSI into a temporary `INSTALLDIR` and validates
   the `ai.anyray.connect-tray` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
-- Ubuntu installs and tests both the deb and rpm under Xvfb/DBus and validates
+- Ubuntu creates a throwaway Unix account, installs synthetic legacy CLI
+  deb/rpm packages built from `ci/nfpm.yaml` around the candidate engine
+  (test inputs, never release artifacts), replaces them with the desktop
+  package through the package manager, and validates
   `$HOME/.config/autostart/ai.anyray.connect-tray.desktop`, including its
-  `[Desktop Entry]` header and installed executable path.
+  `[Desktop Entry]` header and installed executable path, plus removal of the
+  CLI bootstrap files.
+
+`npm run test:desktop-release` covers the workflow-shape and account-isolation
+regressions for these smokes.
 
 Each smoke fails if its test-owned autostart artifact pre-exists and removes only
 that exact artifact in its trap/finally cleanup; installer uninstall is not
 claimed to remove per-user autostart state. Every smoke also pre-creates and
 checks representative Connect profile state plus an existing refresh-scheduler
-sentinel. Signed macOS/Windows startup may update only `engineOwner`,
-`engineOwnerPath`, and `engineOwnerObservedAt`: verification requires app ownership,
-the installed engine path, and a valid timestamp while preserving every other
-profile field. It waits up to 30 seconds for ownership adoption before stopping
-the tray. Linux requires an unchanged profile. Scheduler state must remain
-byte-identical everywhere, and uninstall must preserve the validated profile.
-macOS LaunchAgent verification compares executable identity to accept canonical
-paths through runner symlinks.
+sentinel. Startup may update only the ownership fields (`engineOwner`,
+`engineOwnerPath`, `engineOwnerObservedAt`, `persistenceOwner`, `trayAppPath`,
+and the login-registration fields): verification requires app ownership, an
+engine path and tray app path that resolve to the installed app, and valid
+RFC 3339 timestamps, while preserving every other profile field. It waits up to
+30 seconds for ownership adoption before stopping the tray. Scheduler state must
+remain byte-identical everywhere, and package install and uninstall must leave
+the pre-existing profile byte-identical. Path checks compare canonical paths to
+accept runner symlinks.
 
 `SHA256SUMS` is generated only after Apple/Azure signing, because those signers
 rewrite their artifacts. The staging manifest binds every checksum to the

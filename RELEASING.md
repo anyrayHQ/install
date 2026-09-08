@@ -646,13 +646,28 @@ the real uninstall:
 - macOS copies the app from the DMG into a temporary Applications analogue and
   runs `scripts/smoke-connect-desktop-macos.py` in a dedicated GUI account: fresh
   native login registration, migration from the legacy LaunchAgent, preserved
-  disabled consent, stop/restart, and unregister (`scripts/desktop-lifecycle-testing.md`);
+  disabled consent, stop/restart, and unregister. The Mac runner needs the
+  repository variable `DESKTOP_MAC_TEST_USER` naming a dedicated non-root
+  account that is logged in with a real GUI session and holds no Anyray
+  profile, process, or login registration; the smoke fails if that account
+  does not own the console. Changing `HOME` is not isolation for Service
+  Management, so never run the smoke on a developer account. It does not cover
+  the UI Quit action, a real logout/login, enrollment, key renewal, or an EDR
+  policy; record those in the monorepo's `connect-tray/ACCEPTANCE.md` against
+  the exact candidate;
 - Windows silently installs the MSI into a temporary `INSTALLDIR` and validates
   the `ai.anyray.connect-tray` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
-- Ubuntu installs and tests both the deb and rpm under Xvfb/DBus and validates
+- Ubuntu creates a throwaway Unix account, installs synthetic legacy CLI
+  deb/rpm packages built from `ci/nfpm.yaml` around the candidate engine
+  (test inputs, never release artifacts), replaces them with the desktop
+  package through the package manager, and validates
   `$HOME/.config/autostart/ai.anyray.connect-tray.desktop`, including its
-  `[Desktop Entry]` header and installed executable path.
+  `[Desktop Entry]` header and installed executable path, plus removal of the
+  CLI bootstrap files.
+
+`npm run test:desktop-release` covers the workflow-shape and account-isolation
+regressions for these smokes.
 
 Each smoke fails if its test-owned autostart artifact pre-exists and removes only
 that exact artifact in its trap/finally cleanup; installer uninstall is not

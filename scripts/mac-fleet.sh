@@ -37,15 +37,6 @@ PROJECT="anyray-install-runner-mac"
 # GitHub's 24h ceiling kills it. That is exactly how monorepo run 34100865742
 # sat 23h and how sign-macos logged a 1440.0-minute "runtime" (2026-09-08).
 PEER_PROJECTS="anyray-gha-runner-mac"
-# The monorepo's macOS runner project shares THIS fleet but lives in another
-# repo, so nothing else repoints it when the fleet is recreated. A CodeBuild
-# project stores the fleet's full ARN, UUID included, and `up` mints a NEW uuid
-# every time the previous fleet has been reclaimed — so the peer is left
-# pointing at a fleet that no longer exists. It does not error: the webhook
-# still fires, CodeBuild cannot place the build, and the job sits queued until
-# GitHub's 24h ceiling kills it. That is exactly how monorepo run 34100865742
-# sat 23h and how sign-macos logged a 1440.0-minute "runtime" (2026-09-08).
-PEER_PROJECTS="anyray-gha-runner-mac"
 FLEET_SERVICE_ROLE="arn:aws:iam::${ACCOUNT}:role/anyray-mac-fleet-service"
 RUNNER_SERVICE_ROLE="arn:aws:iam::${ACCOUNT}:role/anyray-gha-runner-codebuild"
 CODECONNECTION="arn:aws:codeconnections:${REGION}:${ACCOUNT}:connection/f9f248ff-57a1-4de0-8f46-52349e85eae9"
@@ -113,23 +104,6 @@ up() {
     aws codebuild create-webhook --region "$REGION" --project-name "$PROJECT" \
       --filter-groups "[[{\"type\":\"EVENT\",\"pattern\":\"WORKFLOW_JOB_QUEUED\"},{\"type\":\"ACTOR_ACCOUNT_ID\",\"pattern\":\"^${ACTOR_ACCOUNT_ID}$\"}]]" >/dev/null
   fi
-  # Same fleet, different repo: repoint every peer project too, or the next
-  # release silently strands them (see PEER_PROJECTS above). Best-effort by
-  # design — a peer that has been retired must not fail this release.
-  for peer in $PEER_PROJECTS; do
-    if aws codebuild batch-get-projects --region "$REGION" --names "$peer" \
-         --query 'projects[0].name' --output text 2>/dev/null | grep -q "$peer"; then
-      if aws codebuild update-project --region "$REGION" --name "$peer" \
-           --environment "type=MAC_ARM,image=aws/codebuild/macos-arm-base:14,computeType=BUILD_GENERAL1_MEDIUM,fleet={fleetArn=$arn}" >/dev/null; then
-        echo "repointed peer project $peer -> fleet $arn"
-      else
-        echo "::warning::could not repoint peer project $peer; its macOS jobs will queue until it is repointed"
-      fi
-    else
-      echo "peer project $peer not present; skipping"
-    fi
-  done
-
   # Same fleet, different repo: repoint every peer project too, or the next
   # release silently strands them (see PEER_PROJECTS above). Best-effort by
   # design — a peer that has been retired must not fail this release.

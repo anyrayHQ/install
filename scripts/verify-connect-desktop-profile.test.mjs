@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { verifyProfile } from './verify-desktop-profile.mjs';
 
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'desktop-profile-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const engine = join(dir, 'engine');
+  const app = join(dir, 'app');
+  mkdirSync(app);
+  const engine = join(app, 'engine');
   writeFileSync(engine, 'synthetic engine');
   const before = join(dir, 'before.json');
   const current = join(dir, 'current.json');
@@ -17,16 +19,16 @@ function fixture(t) {
   const adopted = {
     ...profile,
     persistenceOwner: 'tray',
-    trayAppPath: dir,
+    trayAppPath: app,
     engineOwner: 'app',
     engineOwnerPath: engine,
     engineOwnerObservedAt: '2026-09-08T11:10:50.343Z',
     loginRegistrationState: 'enabled',
     loginRegistrationObservedAt: '2026-09-08T11:10:50.343Z',
   };
-  return { engine, before, current, adopted, check(value = adopted) {
+  return { app, engine, before, current, adopted, check(value = adopted) {
     writeFileSync(current, JSON.stringify(value));
-    verifyProfile(before, current, engine);
+    verifyProfile(before, current, engine, app);
   } };
 }
 
@@ -34,7 +36,9 @@ test('allows only app ownership adoption and canonical executable aliases', (t) 
   const f = fixture(t);
   const alias = `${f.engine}-alias`;
   symlinkSync(f.engine, alias);
-  f.check({ ...f.adopted, engineOwnerPath: alias });
+  const appAlias = `${f.app}-alias`;
+  symlinkSync(f.app, appAlias);
+  f.check({ ...f.adopted, engineOwnerPath: alias, trayAppPath: appAlias });
 });
 for (const [field, value, message] of [
   ['name', 'changed', /settings changed/],
@@ -57,6 +61,14 @@ for (const [field, value, message] of [
 test('rejects a different existing engine', (t) => {
   const f = fixture(t);
   assert.throws(() => f.check({ ...f.adopted, engineOwnerPath: f.before }), /owner path/);
+});
+test('rejects a tray app path outside the installed app', (t) => {
+  const f = fixture(t);
+  assert.throws(() => f.check({ ...f.adopted, trayAppPath: dirname(f.app) }), /tray app path/);
+});
+test('rejects a tray app path that no longer exists', (t) => {
+  const f = fixture(t);
+  assert.throws(() => f.check({ ...f.adopted, trayAppPath: join(f.app, 'gone') }), /tray app path/);
 });
 
 for (const timestamp of ['2026-02-30T11:10:50.343Z', '2026-02-29T11:10:50.343Z', '2026-09-08T24:00:00.000Z']) {

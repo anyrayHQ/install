@@ -1210,7 +1210,9 @@ jobs:
               }
               $runValue = Get-ItemPropertyValue -Path $runKey -Name $runName `
                 -ErrorAction SilentlyContinue
-              $observedProfile = Get-Content -Raw $state | ConvertFrom-Json
+              # The tray may be mid-write; a torn read means "not yet", not failure.
+              try { $observedProfile = Get-Content -Raw $state | ConvertFrom-Json }
+              catch { $observedProfile = $null }
               if ($null -ne $runValue -and $observedProfile.loginRegistrationState -eq 'enabled') { break }
               Start-Sleep -Seconds 1
               $appProcess.Refresh()
@@ -1224,12 +1226,12 @@ jobs:
             if ($runValue.IndexOf($installedMain.FullName, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
               throw "desktop autostart value does not contain installed main path: $runValue"
             }
-            node scripts/verify-desktop-profile.mjs $profileBefore $state $installedEngine.FullName
+            node scripts/verify-desktop-profile.mjs $profileBefore $state $installedEngine.FullName $installedMain.DirectoryName
             Stop-Process -Id $appProcess.Id -Force
             Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
             $appProcess = $null
 
-            node scripts/verify-desktop-profile.mjs $profileBefore $state $installedEngine.FullName
+            node scripts/verify-desktop-profile.mjs $profileBefore $state $installedEngine.FullName $installedMain.DirectoryName
             $stateBefore = (Get-FileHash $state -Algorithm SHA256).Hash
             if ((Get-FileHash $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
               throw 'running the installed tray changed the existing scheduler sentinel'
@@ -1491,7 +1493,7 @@ jobs:
           $SUDO apt-get update
           $SUDO apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
-            rpm xvfb xauth dbus-x11 procps passwd python3
+            rpm xvfb xauth dbus-x11 procps passwd python3 curl ca-certificates
       - name: Verify signatures, install/uninstall deb and rpm, preserve CLI state
         run: |
           set -euo pipefail
@@ -1513,6 +1515,8 @@ jobs:
           account="anyray-smoke-$(id -u)-$$"
           existing_home="$(mktemp -d /tmp/anyray-desktop-smoke.XXXXXX)"
           state="$existing_home/.anyray/connect.json"
+          # A foreign unit beside connect's own (which a correct adopt may remove): nothing may touch it.
+          scheduler="$existing_home/.config/systemd/user/anyray-refresh-sentinel.service"
           autostart="$existing_home/.config/autostart/ai.anyray.connect-tray.desktop"
 
           deb="$(find signed -maxdepth 1 -type f -name '*.deb' -print -quit)"
@@ -1541,10 +1545,23 @@ jobs:
           $SUDO useradd --no-create-home --home-dir "$existing_home" --shell /bin/bash "$account"
           account_created=true
           $SUDO chown "$account" "$existing_home"
+          $SUDO runuser -u "$account" -- mkdir -p "$(dirname "$scheduler")" "$(dirname "$state")"
+          printf '%s\n' 'existing-scheduler-sentinel' | $SUDO runuser -u "$account" -- tee "$scheduler" >/dev/null
+          # An unenrolled, opted-out CLI profile exercises native adoption without credentials.
+          existing_profile='{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true,"refreshSchedulerEnabled":false}'
+          printf '%s\n' "$existing_profile" | $SUDO runuser -u "$account" -- tee "$state" >/dev/null
+          scheduler_before="$($SUDO sha256sum "$scheduler")"
+          state_before="$($SUDO sha256sum "$state")"
+          # Pre-existing CLI state a package (un)install must leave byte-identical.
+          assert_existing_state_untouched() {
+            test "$($SUDO sha256sum "$scheduler")" = "$scheduler_before"
+            test "$($SUDO sha256sum "$state")" = "$state_before"
+          }
 
           smoke_installed_tray() (
             set -euo pipefail
             main="$1"
+            engine="$2"
             tray_pid=''
             owns_autostart=false
             # Invoked by the subshell EXIT trap.
@@ -1567,9 +1584,7 @@ jobs:
               "$(dirname "$autostart")" "$(dirname "$state")" \
               "$existing_home/.local/share" "$existing_home/.runtime"
             $SUDO runuser -u "$account" -- chmod 700 "$existing_home/.runtime"
-            # An unenrolled, opted-out account exercises native adoption without credentials.
-            printf '%s\n' '{"managedEnrollmentDisabled":true,"refreshSchedulerEnabled":false}' | \
-              $SUDO runuser -u "$account" -- tee "$state" >/dev/null
+            printf '%s\n' "$existing_profile" | $SUDO runuser -u "$account" -- tee "$state" >/dev/null
             owns_autostart=true
             setsid $SUDO runuser -u "$account" -- env \
               HOME="$existing_home" \
@@ -1580,9 +1595,8 @@ jobs:
               > "$RUNNER_TEMP/connect-desktop-linux-main.log" 2>&1 &
             tray_pid=$!
             for _ in $(seq 1 30); do
-              if $SUDO test -f "$autostart" && $SUDO python3 -c \
-                'import json,sys; p=json.load(open(sys.argv[1])); sys.exit(0 if p.get("loginRegistrationState")=="enabled" and p.get("engineOwner")=="app" else 1)' \
-                "$state"; then break; fi
+              # Cheap readiness probe on the pretty-printed profile; the exact shape is asserted once below.
+              if $SUDO test -f "$autostart" && $SUDO grep -Eq '"loginRegistrationState": *"enabled"' "$state"; then break; fi
               kill -0 "$tray_pid" >/dev/null 2>&1 || {
                 echo '::error::installed Linux tray exited before creating autostart state'
                 exit 1
@@ -1600,27 +1614,42 @@ jobs:
             tray_pid=''
             $SUDO pkill -KILL -u "$account" >/dev/null 2>&1 || true
 
-            $SUDO python3 - "$state" <<'PYPROFILE'
-          import json, sys
+            $SUDO python3 - "$state" "$engine" <<'PYPROFILE'
+          import json, os, re, sys
+          from datetime import datetime
           with open(sys.argv[1]) as source:
               profile = json.load(source)
+          engine = os.path.realpath(sys.argv[2])
+          assert profile['name'] == 'existing-cli-sentinel'
+          assert profile['managedEnrollmentDisabled'] is True
+          assert profile['refreshSchedulerEnabled'] is False
           assert profile['engineOwner'] == 'app'
           assert profile['persistenceOwner'] == 'tray'
-          assert profile['managedEnrollmentDisabled'] is True
           assert profile['loginRegistrationState'] == 'enabled'
+          assert os.path.realpath(profile['engineOwnerPath']) == engine
+          # connect resolves the sidecar as <trayAppPath>/anyray-connect on Linux.
+          assert os.path.realpath(profile['trayAppPath']) == os.path.dirname(engine)
+          for field in ('engineOwnerObservedAt', 'loginRegistrationObservedAt'):
+              stamp = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d{1,9})?Z', profile[field])
+              assert stamp and datetime.strptime(stamp.group(1), '%Y-%m-%dT%H:%M:%S')
           PYPROFILE
+            test "$($SUDO sha256sum "$scheduler")" = "$scheduler_before"
           )
 
           fixture_root="$RUNNER_TEMP/connect-desktop-cli-fixtures"
           chmod +x signed/anyray-connect-engine-linux-x64
           bash scripts/build-desktop-cli-migration-fixtures.sh \
             "$fixture_root" "$PWD/signed/anyray-connect-engine-linux-x64"
-          $SUDO dpkg -i "$fixture_root/cli.deb"
+          cli_deb="$(find "$fixture_root/pkgs" -name '*.deb' -print -quit)"
+          test -n "$cli_deb"
+          $SUDO dpkg -i "$cli_deb"
           cli_deb_installed=true
+          assert_existing_state_untouched
           # apt performs the declared Conflicts/Replaces transaction, retaining the CLI command.
           $SUDO apt-get install -y "$PWD/$deb"
           deb_installed=true
           cli_deb_installed=false
+          assert_existing_state_untouched
           test ! -e /etc/xdg/autostart/anyray-connect-managed-enroll.desktop
           test ! -e /usr/lib/systemd/user/anyray-connect-managed-enroll.service
           deb_engine="$(dpkg -L "$deb_name" | grep -E '/anyray-connect$' | head -1)"
@@ -1628,19 +1657,23 @@ jobs:
           test -x "$deb_engine"
           test -x "$deb_main"
           test "$($SUDO runuser -u "$account" -- "$deb_engine" --version | head -1)" = "anyray-connect $VERSION"
-          smoke_installed_tray "$deb_main"
+          smoke_installed_tray "$deb_main" "$deb_engine"
+          state_before="$($SUDO sha256sum "$state")"
           $SUDO dpkg -r "$deb_name"
           deb_installed=false
           test ! -e "$deb_engine"
           test ! -e "$deb_main"
+          assert_existing_state_untouched
 
-          cli_rpm="$(find "$fixture_root/rpm/RPMS" -name '*.rpm' -print -quit)"
+          cli_rpm="$(find "$fixture_root/pkgs" -name '*.rpm' -print -quit)"
           test -n "$cli_rpm"
           $SUDO rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"
           cli_rpm_installed=true
+          assert_existing_state_untouched
           $SUDO rpm --dbpath "$rpm_database" -U --nodeps "$rpm"
           rpm_installed=true
           cli_rpm_installed=false
+          assert_existing_state_untouched
           test ! -e /etc/xdg/autostart/anyray-connect-managed-enroll.desktop
           test ! -e /usr/lib/systemd/user/anyray-connect-managed-enroll.service
           rpm_engine="$(rpm --dbpath "$rpm_database" -ql "$rpm_name" | grep -E '/anyray-connect$' | head -1)"
@@ -1648,11 +1681,13 @@ jobs:
           test -x "$rpm_engine"
           test -x "$rpm_main"
           test "$($SUDO runuser -u "$account" -- "$rpm_engine" --version | head -1)" = "anyray-connect $VERSION"
-          smoke_installed_tray "$rpm_main"
+          smoke_installed_tray "$rpm_main" "$rpm_engine"
+          state_before="$($SUDO sha256sum "$state")"
           $SUDO rpm --dbpath "$rpm_database" -e "$rpm_name"
           rpm_installed=false
           test ! -e "$rpm_engine"
           test ! -e "$rpm_main"
+          assert_existing_state_untouched
 
 
   assemble-signed-staging:

@@ -183,6 +183,8 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(windows, /actions\/setup-node@/);
     const firstCheck = windows.indexOf('node scripts/verify-desktop-profile.mjs');
     assert.ok(firstCheck > 0);
+    assert.match(windows, /verify-desktop-profile\.mjs \$profileBefore \$state \$installedEngine\.FullName \$installedMain\.DirectoryName/);
+    assert.match(windows, /try \{ \$observedProfile = Get-Content -Raw \$state \| ConvertFrom-Json \}/);
     assert.ok(firstCheck < windows.indexOf('Stop-Process -Id $appProcess.Id -Force'));
     assert.ok(windows.indexOf('$stateBefore = (Get-FileHash') > firstCheck);
   });
@@ -299,7 +301,31 @@ test('Linux adoption smoke uses a real dedicated account and checks owner state'
   assert.match(linux, /runuser -u/);
   assert.match(linux, /runuser -u "\$account" -- env \\\n+              HOME="\$existing_home" \\\n+              XDG_CONFIG_HOME="\$existing_home\/\.config" \\\n+              XDG_DATA_HOME="\$existing_home\/\.local\/share" \\\n+              XDG_RUNTIME_DIR="\$existing_home\/\.runtime"/);
   assert.match(linux, /engineOwner/);
-  assert.doesNotMatch(linux, /state_before|scheduler-sentinel|existing-scheduler-sentinel/);
+  assert.match(linux, /trayAppPath/);
+  assert.match(linux, /loginRegistrationObservedAt/);
+});
+
+test('Linux package install and uninstall leave pre-existing CLI state byte-identical', () => {
+  const linux = job('smoke-linux-installers');
+  assert.match(linux, /existing-scheduler-sentinel/);
+  assert.match(linux, /existing-cli-sentinel/);
+  const checkpoints = linux.match(/^\s*assert_existing_state_untouched$/gm) ?? [];
+  assert.equal(checkpoints.length, 6);
+  let at = linux.indexOf('build-desktop-cli-migration-fixtures.sh');
+  for (const step of [
+    '$SUDO dpkg -i "$cli_deb"',
+    'apt-get install -y "$PWD/$deb"',
+    '$SUDO dpkg -r "$deb_name"',
+    'rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"',
+    'rpm --dbpath "$rpm_database" -U --nodeps "$rpm"',
+    'rpm --dbpath "$rpm_database" -e "$rpm_name"',
+  ]) {
+    at = linux.indexOf(step, at);
+    assert.ok(at > 0, step);
+    const next = linux.indexOf('\n          assert_existing_state_untouched\n', at);
+    assert.ok(next > at && next - at < 400, `no checkpoint after ${step}`);
+    at = next;
+  }
 });
 
 
@@ -309,13 +335,24 @@ test('macOS smoke uses a dedicated GUI account and native lifecycle assertions',
   assert.match(mac, /launchctl asuser/);
   assert.match(mac, /smoke-connect-desktop-macos.py/);
   assert.doesNotMatch(mac, /HOME="\$existing_home"|did not create its LaunchAgent/);
+  assert.match(macSmoke, /existing-scheduler-sentinel/);
+  assert.match(macSmoke, /check_adopted_profile\(profile, app, expected\)/);
+  assert.ok(macSmoke.indexOf('foreign_before = ') < macSmoke.indexOf("for scenario in ("));
+  assert.ok(macSmoke.indexOf('!= foreign_before') > macSmoke.indexOf("native('unregister')"));
+  assert.match(macSmoke, /created a refresh scheduler/);
 });
 
 
 test('Linux upgrades exercise an installed CLI package before the desktop replacement', () => {
   const linux = job('smoke-linux-installers');
-  assert.match(linux, /build-desktop-cli-migration-fixtures.sh/);
-  assert.match(linux, /dpkg -i "\$fixture_root\/cli.deb"/);
-  assert.match(linux, /rpm --dbpath "\$rpm_database" -U --nodeps "\$rpm"/);
-  assert.match(linux, /test ! -e \/etc\/xdg\/autostart\/anyray-connect-managed-enroll.desktop/);
+  const fixtures = linux.indexOf('build-desktop-cli-migration-fixtures.sh');
+  const cliDeb = linux.indexOf('$SUDO dpkg -i "$cli_deb"');
+  const deb = linux.indexOf('apt-get install -y "$PWD/$deb"');
+  const cliRpm = linux.indexOf('rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"');
+  const rpm = linux.indexOf('rpm --dbpath "$rpm_database" -U --nodeps "$rpm"');
+  assert.ok(fixtures > 0 && fixtures < cliDeb && cliDeb < deb);
+  assert.ok(deb < cliRpm && cliRpm < rpm);
+  const bootstrapGone = 'test ! -e /etc/xdg/autostart/anyray-connect-managed-enroll.desktop';
+  assert.ok(linux.indexOf(bootstrapGone, deb) < cliRpm);
+  assert.ok(linux.indexOf(bootstrapGone, rpm) > rpm);
 });

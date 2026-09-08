@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Signed native lifecycle smoke. Run only in a dedicated, logged-in test account."""
+from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +15,44 @@ import sys
 import time
 
 LABEL = 'ai.anyray.connect-tray'
+EXISTING_PROFILE = {
+    'name': 'existing-cli-sentinel',
+    'managedEnrollmentDisabled': True,
+    'refreshSchedulerEnabled': False,
+}
+
+
+def rfc3339_utc(value):
+    # Same shape verify-desktop-profile.mjs accepts: seconds plus 1 to 9 fractional digits.
+    match = isinstance(value, str) and re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d{1,9})?Z', value)
+    if not match:
+        return False
+    try:
+        datetime.strptime(match.group(1), '%Y-%m-%dT%H:%M:%S')
+    except ValueError:
+        return False
+    return True
+
+
+def check_adopted_profile(profile, app, expected_login):
+    """Every existing field survives; adoption records the installed app and valid timestamps."""
+    for key, value in EXISTING_PROFILE.items():
+        if profile.get(key) != value:
+            raise RuntimeError(f'lost existing profile field {key}')
+    if profile.get('engineOwner') != 'app' or profile.get('persistenceOwner') != 'tray':
+        raise RuntimeError('installed app has not adopted ownership')
+    if profile.get('loginRegistrationState') != expected_login:
+        raise RuntimeError('unexpected recorded login registration state')
+    engine = app / 'Contents/MacOS/anyray-connect'
+    for key, installed in (('trayAppPath', app), ('engineOwnerPath', engine)):
+        recorded = profile.get(key)
+        if not isinstance(recorded, str) or not os.path.isabs(recorded):
+            raise RuntimeError(f'{key} is not an absolute path')
+        if Path(recorded).resolve() != installed.resolve():
+            raise RuntimeError(f'{key} does not resolve to the installed app')
+    for key in ('engineOwnerObservedAt', 'loginRegistrationObservedAt'):
+        if not rfc3339_utc(profile.get(key)):
+            raise RuntimeError(f'{key} is not an RFC 3339 UTC timestamp')
 
 
 def run(args, check=True):
@@ -58,6 +98,7 @@ def main():
     state_dir = home / '.anyray'
     legacy = home / 'Library/LaunchAgents' / f'{LABEL}.plist'
     scheduler = home / 'Library/LaunchAgents/ai.anyray.connect.refresh.plist'
+    foreign_agent = home / 'Library/LaunchAgents/ai.anyray.connect.refresh-sentinel.plist'
 
     def native(action='status'):
         result = run([str(binary), 'login-item', action, '--json'])
@@ -89,7 +130,7 @@ def main():
                 pass
 
     if (state_dir.exists() or legacy.exists() or Path(str(legacy) + '.retiring').exists()
-            or scheduler.exists() or processes()):
+            or scheduler.exists() or foreign_agent.exists() or processes()):
         raise RuntimeError('test account already contains Anyray state')
     if not missing_job(target):
         raise RuntimeError('test account already contains the legacy login job')
@@ -103,12 +144,12 @@ def main():
     state_dir.mkdir(mode=0o700)
     try:
         legacy.parent.mkdir(parents=True, exist_ok=True)
+        # A foreign LaunchAgent beside connect's own (which a correct adopt may remove): nothing may touch it.
+        foreign_agent.write_bytes(b'<plist><dict><key>Label</key><string>existing-scheduler-sentinel</string></dict></plist>\n')
+        foreign_before = hashlib.sha256(foreign_agent.read_bytes()).hexdigest()
         for scenario in ('fresh', 'legacy-enabled', 'legacy-disabled'):
             state = state_dir / 'connect.json'
-            state.write_text(json.dumps({
-                'managedEnrollmentDisabled': True,
-                'refreshSchedulerEnabled': False,
-            }))
+            state.write_text(json.dumps(EXISTING_PROFILE))
             state.chmod(0o600)
             if scenario != 'fresh':
                 with legacy.open('wb') as output:
@@ -146,8 +187,7 @@ def main():
                 raise RuntimeError(f'{scenario}: unexpected native login state')
             if scheduler.exists():
                 raise RuntimeError(f'{scenario}: created a refresh scheduler')
-            if profile.get('managedEnrollmentDisabled') is not True:
-                raise RuntimeError(f'{scenario}: lost enrollment opt-out')
+            check_adopted_profile(profile, app, expected)
             stop()
             # Process exit must retain registration; restarting must preserve consent.
             if native() != observed:
@@ -160,6 +200,8 @@ def main():
             stop()
             if native('unregister') != 'not-registered':
                 raise RuntimeError(f'{scenario}: native unregister failed')
+            if hashlib.sha256(foreign_agent.read_bytes()).hexdigest() != foreign_before:
+                raise RuntimeError(f'{scenario}: changed a LaunchAgent it does not own')
             print(json.dumps({'scenario': scenario, 'result': 'passed'}), flush=True)
     finally:
         cleanup_failed = False
@@ -171,6 +213,7 @@ def main():
             lambda: run(['/bin/launchctl', 'enable', target]),
             lambda: legacy.unlink(missing_ok=True),
             lambda: Path(str(legacy) + '.retiring').unlink(missing_ok=True),
+            lambda: foreign_agent.unlink(missing_ok=True),
             lambda: shutil.rmtree(state_dir),
         ):
             try:

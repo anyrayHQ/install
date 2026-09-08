@@ -547,6 +547,8 @@ jobs:
           shellcheck -S error "$@"
       - name: agent install claim keeps deployment credentials out of output and argv
         run: npm run test:agent-install
+      - name: Desktop release workflow and toolchain regression tests
+        run: npm run test:desktop-release
 
   connect-binary-system-ca:
     # The release binaries compile with `--compile-exec-argv="--use-system-ca"`

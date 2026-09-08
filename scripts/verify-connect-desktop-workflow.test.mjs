@@ -6,6 +6,10 @@ const workflow = readFileSync(
   new URL('../.github/workflows/release-connect-desktop.yml', import.meta.url),
   'utf8'
 );
+const macSmoke = readFileSync(
+  new URL('./smoke-connect-desktop-macos.py', import.meta.url),
+  'utf8'
+);
 
 const job = (name) => {
   const marker = `  ${name}:\n`;
@@ -148,11 +152,39 @@ describe('desktop staging workflow safety contract', () => {
     assert.ok(identifier > 0 && identifier < notarize);
   });
 
+  test('prepares MSI metadata before signing and verifies the installed signed payload', () => {
+    const build = job('build-windows-unsigned');
+    assert.ok(build.indexOf('node scripts/prepare-desktop-msi.mjs $main --prepare') > 0);
+    assert.ok(build.indexOf('--prepare') < build.indexOf('Copy-Item $main out/'));
+    const bundle = job('bundle-windows-unsigned');
+    assert.ok(bundle.indexOf('node scripts/prepare-desktop-msi.mjs $main --check') > 0);
+    assert.ok(bundle.indexOf('--check') < bundle.indexOf('tauri.js" bundle'));
+    assert.match(job('verify-windows-signatures'), /MSI changed signed payload/);
+  });
+
   test('signs Windows inner executables before MSI packaging and the MSI after', () => {
     assert.match(job('bundle-windows-unsigned'), /needs: \[preflight, sign-windows-inner\]/);
     assert.match(job('bundle-windows-unsigned'), /tauri\.js" bundle .*--bundles msi/);
     assert.match(job('sign-windows-installer'), /needs: \[preflight, bundle-windows-unsigned\]/);
     assert.match(job('verify-windows-signatures'), /msiexec\.exe/);
+  });
+
+  test('signed smoke checks ownership before stopping and preserves post-startup state', () => {
+    const mac = job('verify-macos-signed');
+    assert.match(mac, /actions\/setup-node@/);
+    assert.match(mac, /sparse-checkout: \|\n            .github\/actions\n            scripts/);
+    assert.ok(mac.indexOf('smoke-connect-desktop-macos.py') < mac.lastIndexOf('sudo rm -rf "$installed_app"'));
+    const macOwnership = macSmoke.indexOf("profile.get('engineOwner') == 'app'");
+    const macStop = macSmoke.indexOf('            stop()', macOwnership);
+    assert.ok(macOwnership > 0 && macOwnership < macStop);
+    assert.ok(macSmoke.indexOf("if native() != observed:", macStop) > macStop);
+
+    const windows = job('verify-windows-signatures');
+    assert.match(windows, /actions\/setup-node@/);
+    const firstCheck = windows.indexOf('node scripts/verify-desktop-profile.mjs');
+    assert.ok(firstCheck > 0);
+    assert.ok(firstCheck < windows.indexOf('Stop-Process -Id $appProcess.Id -Force'));
+    assert.ok(windows.indexOf('$stateBefore = (Get-FileHash') > firstCheck);
   });
 
   test('gates assembly on native install/uninstall smoke tests', () => {

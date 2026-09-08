@@ -1549,6 +1549,8 @@ jobs:
           printf '%s\n' 'existing-scheduler-sentinel' | $SUDO runuser -u "$account" -- tee "$scheduler" >/dev/null
           # An unenrolled, opted-out CLI profile exercises native adoption without credentials.
           existing_profile='{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true,"refreshSchedulerEnabled":false}'
+          # The only keys adoption may add; mirrors ownerFields in verify-desktop-profile.mjs.
+          owner_fields=appHandoverMaintenanceAt,appHandoverState,engineOwner,engineOwnerObservedAt,engineOwnerPath,legacyTrayRetirementState,loginRegistrationAttemptedAt,loginRegistrationObservedAt,loginRegistrationState,persistenceOwner,trayAppPath
           printf '%s\n' "$existing_profile" | $SUDO runuser -u "$account" -- tee "$state" >/dev/null
           scheduler_before="$($SUDO sha256sum "$scheduler")"
           state_before="$($SUDO sha256sum "$state")"
@@ -1614,15 +1616,14 @@ jobs:
             tray_pid=''
             $SUDO pkill -KILL -u "$account" >/dev/null 2>&1 || true
 
-            $SUDO python3 - "$state" "$engine" <<'PYPROFILE'
+            $SUDO python3 - "$state" "$engine" "$owner_fields" "$existing_profile" <<'PYPROFILE'
           import json, os, re, sys
           from datetime import datetime
           with open(sys.argv[1]) as source:
               profile = json.load(source)
           engine = os.path.realpath(sys.argv[2])
-          assert profile['name'] == 'existing-cli-sentinel'
-          assert profile['managedEnrollmentDisabled'] is True
-          assert profile['refreshSchedulerEnabled'] is False
+          owner_fields = set(sys.argv[3].split(','))
+          assert {k: v for k, v in profile.items() if k not in owner_fields} == json.loads(sys.argv[4])
           assert profile['engineOwner'] == 'app'
           assert profile['persistenceOwner'] == 'tray'
           assert profile['loginRegistrationState'] == 'enabled'

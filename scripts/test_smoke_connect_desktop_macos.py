@@ -47,6 +47,42 @@ class AccountBoundaryTest(unittest.TestCase):
                 self.assertFalse((Path(directory) / '.anyray').exists())
 
 
+class AdoptedProfileTest(unittest.TestCase):
+    def adopted(self, directory):
+        app = Path(directory) / 'Anyray Connect.app'
+        (app / 'Contents/MacOS').mkdir(parents=True)
+        (app / 'Contents/MacOS/anyray-connect').write_bytes(b'synthetic engine')
+        profile = dict(smoke.EXISTING_PROFILE, engineOwner='app', persistenceOwner='tray',
+                       loginRegistrationState='enabled', trayAppPath=str(app),
+                       engineOwnerPath=str(app / 'Contents/MacOS/anyray-connect'),
+                       engineOwnerObservedAt='2026-09-08T11:10:50.343Z',
+                       loginRegistrationObservedAt='2026-09-08T11:10:50.3435678Z')
+        return app, profile
+
+    def test_accepts_adoption_that_records_the_installed_app(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app, profile = self.adopted(directory)
+            smoke.check_adopted_profile(profile, app, 'enabled')
+
+    def test_rejects_drift_from_the_installed_app(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app, profile = self.adopted(directory)
+            for field, value, message in (
+                ('name', 'changed', 'existing profile field'),
+                ('managedEnrollmentDisabled', False, 'existing profile field'),
+                ('persistenceOwner', 'durable', 'adopted ownership'),
+                ('loginRegistrationState', 'disabled', 'login registration'),
+                ('trayAppPath', directory, 'installed app'),
+                ('trayAppPath', 'Anyray Connect.app', 'absolute'),
+                ('engineOwnerPath', str(app), 'installed app'),
+                ('engineOwnerObservedAt', '2026-09-08T11:10:50.343+00:00', 'RFC 3339'),
+                ('loginRegistrationObservedAt', '2026-13-08T11:10:50Z', 'RFC 3339'),
+                ('loginRegistrationObservedAt', None, 'RFC 3339'),
+            ):
+                with self.subTest(field=field), self.assertRaisesRegex(RuntimeError, message):
+                    smoke.check_adopted_profile(dict(profile, **{field: value}), app, 'enabled')
+
+
 class RestartBoundaryTest(unittest.TestCase):
     def test_registration_alone_does_not_prove_restart(self):
         with patch.object(smoke.time, 'monotonic', side_effect=[0, 0, 31]), \

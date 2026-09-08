@@ -45,3 +45,14 @@ test('rejects a different existing engine', (t) => {
   const f = fixture(t);
   assert.throws(() => f.check({ ...f.adopted, engineOwnerPath: f.before }), /owner path/);
 });
+
+for (const timestamp of ['2026-02-30T11:10:50.343Z', '2026-02-29T11:10:50.343Z', '2026-09-08T24:00:00.000Z']) {
+  test(`rejects normalized calendar overflow ${timestamp}`, (t) => {
+    const f = fixture(t);
+    assert.throws(() => f.check({ ...f.adopted, engineOwnerObservedAt: timestamp }), /timestamp/);
+  });
+}
+test('accepts a valid leap day', (t) => {
+  const f = fixture(t);
+  f.check({ ...f.adopted, engineOwnerObservedAt: '2024-02-29T11:10:50.343Z' });
+});

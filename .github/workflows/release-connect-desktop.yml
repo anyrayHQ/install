@@ -852,6 +852,7 @@ jobs:
           $line = (& $engine --version | Select-Object -First 1)
           if ($line -ne "anyray-connect $env:VERSION") { throw "engine version mismatch: $line" }
           New-Item -ItemType Directory -Force -Path out | Out-Null
+          node scripts/prepare-desktop-msi.mjs $main --prepare
           Copy-Item $main out/anyray-connect-tray-windows-x64.exe
           Copy-Item $engine out/anyray-connect-engine-windows-x64.exe
 
@@ -1037,6 +1038,7 @@ jobs:
           rustup default "$env:RUST_TOOLCHAIN"
           npm install --prefix "$env:RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$env:TAURI_CLI_VERSION"
           $main = "private-source/connect-tray/src-tauri/target/$env:TARGET_TRIPLE/release/connect-tray.exe"
+          node scripts/prepare-desktop-msi.mjs $main --check
           $before = (Get-FileHash $main -Algorithm SHA256).Hash
           Push-Location private-source/connect-tray/src-tauri
           node "$env:GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --target $env:TARGET_TRIPLE --bundles msi `
@@ -1200,6 +1202,15 @@ jobs:
               Select-Object -First 1
             if (-not $installedEngine) { throw 'installed MSI has no bundled anyray-connect.exe' }
             if (-not $installedMain) { throw 'installed MSI has no connect-tray.exe' }
+            # Compare the actual MSI payload, not just Tauri's restored input.
+            foreach ($pair in @(
+              @($installedMain.FullName, 'inner/anyray-connect-tray-windows-x64.exe'),
+              @($installedEngine.FullName, 'inner/anyray-connect-engine-windows-x64.exe')
+            )) {
+              if ((Get-FileHash $pair[0] -Algorithm SHA256).Hash -ne (Get-FileHash $pair[1] -Algorithm SHA256).Hash) {
+                throw "MSI changed signed payload: $($pair[0])"
+              }
+            }
             ./scripts/verify-authenticode-windows.ps1 -Path $installedEngine.FullName
             ./scripts/verify-authenticode-windows.ps1 -Path $installedMain.FullName
             $installedVersion = (& $installedEngine.FullName --version | Select-Object -First 1)

@@ -731,3 +731,13 @@ own README for, because neither channel is self-hosted:
   rolls the tap back). Until the token is set the step skips silently, and the
   cask can be updated by hand: run `scripts/gen-homebrew-cask.sh` and push
   `Casks/anyray-connect.rb`, or `brew bump-cask-pr`.
+
+Windows MSI packaging sets Tauri's bundle-type marker to MSI before Authenticode
+signing. The pinned bundler normally patches that marker while packaging and
+restores its input afterward, which can hide a broken signature inside the MSI
+from a before/after input hash check. The preparation helper requires exactly one
+known marker and rejects already-signed input; the bundle job checks the prepared
+marker without changing the signed file. Tauri may warn that the original UNK
+marker is absent because it is already MSI. Native verification also compares
+both installed executables byte-for-byte with the signed handoff artifacts and
+checks their Authenticode signatures. Revalidate this contract when upgrading Tauri.

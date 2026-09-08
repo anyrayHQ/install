@@ -148,6 +148,16 @@ describe('desktop staging workflow safety contract', () => {
     assert.ok(identifier > 0 && identifier < notarize);
   });
 
+  test('prepares MSI metadata before signing and verifies the installed signed payload', () => {
+    const build = job('build-windows-unsigned');
+    assert.ok(build.indexOf('node scripts/prepare-desktop-msi.mjs $main --prepare') > 0);
+    assert.ok(build.indexOf('--prepare') < build.indexOf('Copy-Item $main out/'));
+    const bundle = job('bundle-windows-unsigned');
+    assert.ok(bundle.indexOf('node scripts/prepare-desktop-msi.mjs $main --check') > 0);
+    assert.ok(bundle.indexOf('--check') < bundle.indexOf('tauri.js" bundle'));
+    assert.match(job('verify-windows-signatures'), /MSI changed signed payload/);
+  });
+
   test('signs Windows inner executables before MSI packaging and the MSI after', () => {
     assert.match(job('bundle-windows-unsigned'), /needs: \[preflight, sign-windows-inner\]/);
     assert.match(job('bundle-windows-unsigned'), /tauri\.js" bundle .*--bundles msi/);

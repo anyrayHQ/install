@@ -23,7 +23,8 @@ export function verifyProfile(beforePath, currentPath, enginePath) {
   }
   if (typeof current.engineOwnerObservedAt !== 'string' ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(current.engineOwnerObservedAt) ||
-      !Number.isFinite(Date.parse(current.engineOwnerObservedAt))) {
+      !Number.isFinite(Date.parse(current.engineOwnerObservedAt)) ||
+      new Date(current.engineOwnerObservedAt).toISOString() !== current.engineOwnerObservedAt) {
     throw new Error('engine ownership timestamp is invalid');
   }
 }

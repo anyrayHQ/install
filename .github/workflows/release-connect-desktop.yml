@@ -1563,13 +1563,19 @@ jobs:
               echo '::error::test-owned desktop autostart file already exists'
               exit 1
             }
-            $SUDO runuser -u "$account" -- mkdir -p "$(dirname "$autostart")" "$(dirname "$state")" "$existing_home/.runtime"
+            $SUDO runuser -u "$account" -- mkdir -p \
+              "$(dirname "$autostart")" "$(dirname "$state")" \
+              "$existing_home/.local/share" "$existing_home/.runtime"
             $SUDO runuser -u "$account" -- chmod 700 "$existing_home/.runtime"
             # An unenrolled, opted-out account exercises native adoption without credentials.
             printf '%s\n' '{"managedEnrollmentDisabled":true,"refreshSchedulerEnabled":false}' | \
               $SUDO runuser -u "$account" -- tee "$state" >/dev/null
             owns_autostart=true
-            setsid $SUDO runuser -u "$account" -- env XDG_RUNTIME_DIR="$existing_home/.runtime" \
+            setsid $SUDO runuser -u "$account" -- env \
+              HOME="$existing_home" \
+              XDG_CONFIG_HOME="$existing_home/.config" \
+              XDG_DATA_HOME="$existing_home/.local/share" \
+              XDG_RUNTIME_DIR="$existing_home/.runtime" \
               dbus-run-session -- xvfb-run -a "$main" \
               > "$RUNNER_TEMP/connect-desktop-linux-main.log" 2>&1 &
             tray_pid=$!

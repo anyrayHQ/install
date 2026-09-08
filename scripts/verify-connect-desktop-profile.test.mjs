@@ -69,3 +69,21 @@ test('accepts a valid leap day', (t) => {
   const f = fixture(t);
   f.check({ ...f.adopted, engineOwnerObservedAt: '2024-02-29T11:10:50.343Z' });
 });
+test('accepts producer timestamps with nanoseconds or no fraction', (t) => {
+  const f = fixture(t);
+  f.check({
+    ...f.adopted,
+    engineOwnerObservedAt: '2026-09-08T11:10:50.343123456Z',
+    loginRegistrationObservedAt: '2026-09-08T11:10:50Z',
+  });
+});
+for (const timestamp of [
+  '2026-09-08T11:10:50.Z',
+  '2026-09-08T11:10:50.1234567890Z',
+  '2026-02-30T11:10:50.123456789Z',
+]) {
+  test(`rejects malformed login timestamp ${timestamp}`, (t) => {
+    const f = fixture(t);
+    assert.throws(() => f.check({ ...f.adopted, loginRegistrationObservedAt: timestamp }), /timestamp/);
+  });
+}

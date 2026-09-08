@@ -297,6 +297,7 @@ test('Linux adoption smoke uses a real dedicated account and checks owner state'
   const linux = job('smoke-linux-installers');
   assert.match(linux, /useradd/);
   assert.match(linux, /runuser -u/);
+  assert.match(linux, /runuser -u "\$account" -- env \\\n+              HOME="\$existing_home" \\\n+              XDG_CONFIG_HOME="\$existing_home\/\.config" \\\n+              XDG_DATA_HOME="\$existing_home\/\.local\/share" \\\n+              XDG_RUNTIME_DIR="\$existing_home\/\.runtime"/);
   assert.match(linux, /engineOwner/);
   assert.doesNotMatch(linux, /state_before|scheduler-sentinel|existing-scheduler-sentinel/);
 });

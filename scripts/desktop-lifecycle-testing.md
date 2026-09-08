@@ -10,8 +10,8 @@ must have no existing Anyray profile, app process, or login registration. Changi
 is not isolation for Service Management.
 
 The signed smoke checks fresh native registration, migration from the actual legacy tray
-plist shape, preserved disabled consent, Quit/restart, and unregister. It cleans only its
-own profile and registration. It does not emulate a real logout/login, customer enrollment,
+plist shape, preserved disabled consent, process stop/restart, and unregister. It cleans only its
+own profile and registration. It does not exercise the UI Quit action, a real logout/login, customer enrollment,
 key renewal, or an EDR policy. Record those separately in the monorepo's
 `connect-tray/ACCEPTANCE.md` against the exact candidate.
 

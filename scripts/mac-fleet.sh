@@ -6,12 +6,9 @@
 # cost ~$450+/month. Instead the release workflow allocates a Mac ONLY when a
 # signing run needs one: `up` creates the fleet + an ephemeral CodeBuild runner
 # project (webhook-driven, gated to the maintainer actor); `down` deletes the
-# RUNNER but leaves the fleet, so every run inside the already-paid 24h window
-# reuses the same Mac and AWS reclaims it afterwards.
-#
-# **The billing unit is the DAY, not the release.** Deleting the fleet after each
-# run does not refund the 24h minimum — it only guarantees the next run re-buys
-# it. That cost ~$720/mo against 2.7h of real use; see the note on `down`.
+# runner and requests fleet deletion. Pending deletion preserves whatever
+# portion of the paid minimum AWS still makes available, then releases the host.
+# Leaving an ACTIVE fleet behind does not cap billing at 24 hours.
 #
 # Idempotent: `up` reuses an existing fleet/project (including one in
 # PENDING_DELETION, still buildable inside its window), `down` tolerates absence.
@@ -57,6 +54,7 @@ up() {
   fi
 
   echo "waiting for the fleet to be usable (Mac host allocation ~minutes)…"
+  local ready=false
   for _ in $(seq 1 60); do
     local st
     st="$(aws codebuild batch-get-fleets --region "$REGION" --names "$FLEET" \
@@ -67,11 +65,16 @@ up() {
       # inside its 24h-minimum window: CodeBuild keeps it "available to build
       # projects while pending deletion", so a release within 24h reuses the
       # same Mac at no additional host charge. Both are ready to build on.
-      ACTIVE|PENDING_DELETION) break ;;
+      ACTIVE|PENDING_DELETION) ready=true; break ;;
       CREATE_FAILED|UPDATE_ROLLBACK_FAILED|DELETING) echo "::error::fleet entered $st"; exit 1 ;;
     esac
     sleep 20
   done
+
+  if [ "$ready" != true ]; then
+    echo '::error::Mac fleet did not become usable within 20 minutes'
+    exit 1
+  fi
 
   # Ephemeral runner project bound to the fleet. If it exists, repoint it.
   if aws codebuild batch-get-projects --region "$REGION" --names "$PROJECT" \
@@ -95,42 +98,9 @@ up() {
   echo "mac fleet + runner project ready."
 }
 
-# Tear down the RUNNER (the security-relevant half: the webhook a fork actor
-# could otherwise reach), but deliberately LEAVE THE FLEET.
-#
-# The Mac host bills a 24-HOUR MINIMUM per allocation, and `up` already knows a
-# `PENDING_DELETION` fleet stays buildable for the rest of that window at no
-# extra host charge. So deleting the fleet here buys nothing back — the 24h is
-# already sunk — while guaranteeing the NEXT run inside the same day allocates a
-# fresh one and pays the minimum again.
-#
-# That is exactly what happened. Measured 2026-08-01..17 in the shared account:
-# 11 `CreateFleet` calls in 17 days, ~274h billed (16,446 min, $395 — a ~$720/mo
-# run rate) against just 2.7h of actual fleet lifetime. 11 allocations x 24h
-# minimum = 264h, which is the entire bill. The design intended "one 24h charge
-# per release (~$15-16)"; the effective rate was $35.91 per allocation because
-# releases cluster: 2026-08-13 ran the lane SIX times and 08-12 four times, and
-# CloudTrail shows the shape plainly — 1 CreateFleet against 9 DeleteFleet calls
-# on 08-13, 1 against 8 on 08-12. `up` is idempotent so parallel runs share one
-# fleet, then every run's `down` deleted it and the next `up` re-bought the
-# window. The teardown was racing itself.
-#
-# `down` now ALWAYS deletes the fleet, and that still gives the 24h window its
-# full value: a deleted fleet sits in PENDING_DELETION and, per AWS ("Fleets
-# are available to build projects while they are pending deletion"), keeps
-# serving builds for the remainder of the already-paid window — verified live
-# 2026-09-01, when a release created a same-name fleet while the previous one
-# was still pending deletion. So same-day releases still reuse the paid Mac,
-# there is still no re-buy churn, and reclamation no longer depends on anyone
-# remembering.
-#
-# The previous design left the fleet ACTIVE on the premise that "AWS reclaims
-# the host on its own afterwards". It does not — an ACTIVE fleet bills ~$67/day
-# until something deletes it. That premise cost $877 in Aug 2026 (fleet created
-# Aug 18, zero builds after its release, standing idle 13 days) and reproduced
-# the same day it was diagnosed: the very release that verified this fix left
-# another ACTIVE fleet behind. Billing caps at the 24h minimum ONLY via
-# delete-fleet.
+# All release callers hold the same workflow concurrency group until teardown.
+# Request deletion even after a failed build: ACTIVE fleets keep billing.
+# Do not remove delete-fleet in an attempt to reuse the paid minimum.
 down() {
   if aws codebuild batch-get-projects --region "$REGION" --names "$PROJECT" \
        --query 'projects[0].name' --output text 2>/dev/null | grep -q "$PROJECT"; then

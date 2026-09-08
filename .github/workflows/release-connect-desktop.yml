@@ -497,6 +497,7 @@ jobs:
           [ -n "$updater_app" ] || { echo '::error::macOS updater bundle contains no .app'; exit 1; }
           codesign --verify --deep --strict --verbose=2 "$updater_app"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$updater_app/Contents/Info.plist")" = "$VERSION"
+          test "$(plutil -extract LSMinimumSystemVersion raw -o - "$updater_app/Contents/Info.plist")" = '13.0'
 
           dmg="$(find signed -maxdepth 1 -type f -name '*.dmg' -print -quit)"
           [ -n "$dmg" ] || { echo '::error::signed macOS DMG is missing'; exit 1; }
@@ -538,6 +539,7 @@ jobs:
           [ -n "$app" ] || { echo '::error::signed DMG contains no .app'; exit 1; }
           engine="$app/Contents/MacOS/anyray-connect"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
+          test "$(plutil -extract LSMinimumSystemVersion raw -o - "$app/Contents/Info.plist")" = '13.0'
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --verify --strict --verbose=2 "$engine"
           codesign_details="$(codesign -dv --verbose=4 "$app" 2>&1)"

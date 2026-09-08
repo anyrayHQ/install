@@ -544,7 +544,8 @@ Native jobs download `@tauri-apps/cli@2.11.4` (including its exact-version nativ
 binary) instead of compiling tauri-cli from Rust four times. Application Rust
 builds use toolchain 1.98.0 and the checked-in Cargo lockfile. Source and Cargo
 build output are not cached or uploaded in this public repository. Intermediate
-artifacts expire after one day; the final rehearsal artifact lasts 14 days.
+artifacts last seven days to allow delayed jobs and retries; the final rehearsal
+artifact lasts 14 days.
 Artifact uploads skip redundant compression of installers and binary archives.
 
 Windows steps stop immediately on failed native commands. MSI signatures are

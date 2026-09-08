@@ -70,6 +70,11 @@ on:
         type: boolean
         default: false
 
+# Serialize owners of the shared Mac runner through teardown.
+concurrency:
+  group: anyray-install-mac-release
+  cancel-in-progress: false
+
 permissions:
   contents: read
 

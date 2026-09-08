@@ -226,12 +226,20 @@ jobs:
   build-macos-unsigned:
     needs: [preflight, provision-mac]
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
       TARGET_TRIPLE: universal-apple-darwin
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Mint a short-lived read-only token for the private monorepo
@@ -350,17 +358,19 @@ jobs:
           mkdir -p out
           ditto -c -k --keepParent "$app" out/connect-desktop-unsigned.zip
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-unsigned
           path: out/connect-desktop-unsigned.zip
-          compression-level: 0
           if-no-files-found: error
-          retention-days: 7
 
   sign-macos:
     needs: [preflight, build-macos-unsigned, provision-mac]
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 75
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -370,8 +380,20 @@ jobs:
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      # The S3 handoff below is a LOCAL composite action, so the repo must be
+      # on disk before it can be resolved.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-unsigned
           path: unsigned
 
@@ -517,15 +539,12 @@ jobs:
             security delete-keychain "$RUNNER_TEMP/connect-desktop-signing.keychain-db"
           fi
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
-          path: |
-            out/*.dmg
-            out/*.app.tar.gz
-          compression-level: 0
+          path: out/*.dmg out/*.app.tar.gz
           if-no-files-found: error
-          retention-days: 7
 
   # Runtime validation is deliberately separate from signing. The signed app
   # and bundled engine execute only after the Apple secrets and throwaway
@@ -535,12 +554,25 @@ jobs:
     runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      # The S3 handoff below is a LOCAL composite action, so the repo must be
+      # on disk before it can be resolved.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
           path: signed
       - name: Verify, install, execute, and uninstall without touching CLI state
@@ -668,11 +700,19 @@ jobs:
   build-windows-unsigned:
     needs: [preflight, validate-source]
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       TARGET_TRIPLE: x86_64-pc-windows-msvc
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Mint a short-lived read-only token for the private monorepo
         id: monorepo-token
@@ -795,13 +835,12 @@ jobs:
           Copy-Item $main out/anyray-connect-tray-windows-x64.exe
           Copy-Item $engine out/anyray-connect-engine-windows-x64.exe
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-unsigned
           path: out/*.exe
-          compression-level: 0
           if-no-files-found: error
-          retention-days: 7
 
   sign-windows-inner:
     needs: [preflight, build-windows-unsigned]
@@ -816,9 +855,15 @@ jobs:
       AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
       AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-unsigned
           path: out
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
@@ -846,22 +891,29 @@ jobs:
               --ca-file "$RUNNER_TEMP/ms-root.pem" \
               --expect-publisher 'Othentic Labs LTD'
           done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-signed
           path: out/*.exe
-          compression-level: 0
           if-no-files-found: error
-          retention-days: 7
 
   bundle-windows-unsigned:
     needs: [preflight, sign-windows-inner]
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       TARGET_TRIPLE: x86_64-pc-windows-msvc
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Mint a short-lived read-only token for the private monorepo
         id: monorepo-token
@@ -894,8 +946,9 @@ jobs:
           private-source
           "$env:EXPECTED_VERSION"
           "$env:EXPECTED_SOURCE_SHA"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-signed
           path: signed-inner
       - name: Restore the signed inner executables
@@ -979,13 +1032,12 @@ jobs:
           Copy-Item $installer.FullName `
             "out/anyray-connect-desktop-$env:VERSION-windows-x64.msi"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-unsigned
           path: out/*.msi
-          compression-level: 0
           if-no-files-found: error
-          retention-days: 7
 
   sign-windows-installer:
     needs: [preflight, bundle-windows-unsigned]
@@ -1000,9 +1052,15 @@ jobs:
       AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
       AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-unsigned
           path: out
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
@@ -1025,30 +1083,37 @@ jobs:
           ./scripts/azure-artifact-sign.sh "$installer" 'Anyray Connect Desktop' 'https://anyray.ai'
           # MSI is a compound document, not PE. verify-windows-signatures
           # requires Windows trust, publisher, and timestamp checks before assembly.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-signed
           path: out/*.msi
-          compression-level: 0
           if-no-files-found: error
-          retention-days: 7
 
   verify-windows-signatures:
     needs: [preflight, sign-windows-inner, sign-windows-installer]
     runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-signed
           path: inner
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-signed
           path: installer
       - name: Verify, install, execute, and uninstall without touching CLI state
@@ -1180,11 +1245,19 @@ jobs:
   build-linux-unsigned:
     needs: [preflight, validate-source]
     runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       TARGET_TRIPLE: x86_64-unknown-linux-gnu
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Mint a short-lived read-only token for the private monorepo
         id: monorepo-token
@@ -1308,27 +1381,33 @@ jobs:
           cp "$engine" out/anyray-connect-engine-linux-x64
           cp "$deb" "out/anyray-connect-desktop-${VERSION}-linux-x64.deb"
           cp "$rpm" "out/anyray-connect-desktop-${VERSION}-linux-x64.rpm"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-unsigned
           path: out/
-          compression-level: 0
           if-no-files-found: error
-          retention-days: 7
 
   sign-linux-artifacts:
     needs: build-linux-unsigned
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-unsigned
           path: out
       - name: GPG-sign Linux inner executables and outer packages
@@ -1339,25 +1418,37 @@ jobs:
           ./scripts/sign-gpg-artifacts.sh out "${linux_artifacts[@]}"
           mv out/anyray-endpoint-signing-key.asc \
             out/anyray-connect-desktop-signing-key.asc
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-signed
           path: out/
-          compression-level: 0
           if-no-files-found: error
-          retention-days: 7
 
   smoke-linux-installers:
     needs: [preflight, sign-linux-artifacts]
     runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      # The S3 handoff below is a LOCAL composite action, so the repo must be
+      # on disk before it can be resolved.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-signed
           path: signed
       - name: Install native package runtime and inspection tools
@@ -1497,6 +1588,7 @@ jobs:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -1504,21 +1596,30 @@ jobs:
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
           path: platform/macos
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-inner-signed
           path: platform/windows-inner
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-signed
           path: platform/windows-installer
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-signed
           path: platform/linux
       - name: Assemble signed platform outputs
@@ -1587,13 +1688,12 @@ jobs:
             assets/connect-desktop-staging.json
           cat assets/SHA256SUMS
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: ./.github/actions/s3-artifact-upload
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-staging-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
           path: assets/
-          compression-level: 0
           if-no-files-found: error
-          retention-days: 14
 
   publish-staging-prerelease:
     needs: [preflight, assemble-signed-staging]
@@ -1605,6 +1705,7 @@ jobs:
       group: connect-desktop-staging-feed
       cancel-in-progress: false
     permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: write
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -1613,6 +1714,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
     steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
       - name: Install pinned gh CLI
         run: |
           set -euo pipefail
@@ -1624,8 +1730,9 @@ jobs:
           tar -xzf /tmp/gh.tgz -C /tmp
           install -m 0755 "/tmp/gh_${V}_linux_amd64/bin/gh" /usr/local/bin/gh
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: ./.github/actions/s3-artifact-download
         with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-staging-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
           path: assets
       - name: Publish only an explicit staging prerelease and preserve latest

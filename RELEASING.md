@@ -542,8 +542,11 @@ still built from the exact private source commit.
 
 Native jobs download `@tauri-apps/cli@2.11.4` (including its exact-version native
 binary) instead of compiling tauri-cli from Rust four times. Application Rust
-builds use toolchain 1.98.0 and the checked-in Cargo lockfile. Source and Cargo
-build output are not cached or uploaded in this public repository. Intermediate
+builds use toolchain 1.98.0 and the checked-in Cargo lockfile. The Tauri launcher
+resolves Cargo through rustup, prepends that toolchain directory to the child
+PATH, and checks Cargo/rustc versions before building or bundling; changing the
+rustup default alone does not override a runner-installed standalone Cargo.
+Source and Cargo build output are not cached or uploaded in this public repository. Intermediate
 artifacts last seven days to allow delayed jobs and retries; the final rehearsal
 artifact lasts 14 days.
 Artifact uploads skip redundant compression of installers and binary archives.
@@ -587,6 +590,12 @@ while staging the Tauri external binary:
 | macOS universal | `connect-tray/src-tauri/binaries/anyray-connect-universal-apple-darwin` (Bun arm64 + x64 joined with `lipo`) |
 | Windows x64 | `connect-tray/src-tauri/binaries/anyray-connect-x86_64-pc-windows-msvc.exe` |
 | Linux x64 | `connect-tray/src-tauri/binaries/anyray-connect-x86_64-unknown-linux-gnu` |
+
+The universal macOS build stages its validated universal engine under all three
+externalBin target names: `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
+`universal-apple-darwin`. Tauri checks each architecture during compilation and
+the universal name during bundling. Reusing the universal engine for all three
+also avoids needing Rosetta to validate an x64-only sidecar on the ARM runner.
 
 Only the three native Tauri compilation steps receive
 `ANYRAY_CONNECT_DESKTOP_DISTRIBUTION=staging`. Unsigned monorepo CI/local builds

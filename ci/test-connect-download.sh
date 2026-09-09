@@ -128,7 +128,17 @@ for _ in $(seq 1 60); do [ -f ready ] && break; sleep 0.2; done
 [ -f ready ] || { echo "connect-download: stub server never started" >&2; exit 1; }
 want="$(cat expected.sha)"
 
-sha() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1 || sha256sum "$1" | cut -d' ' -f1; }
+# The `||` must guard the hash tool, not the pipeline: `tool | cut` succeeds
+# whenever cut does, so a fallback written as `tool | cut || other | cut` never
+# fires and silently compares against an empty string.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha() { sha256sum "$1" | cut -d' ' -f1; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+else
+  echo "connect-download: no sha256sum or shasum available" >&2
+  exit 1
+fi
 fail() { echo "connect-download: $*" >&2; exit 1; }
 
 # --- connect.sh -------------------------------------------------------------

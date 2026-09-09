@@ -53,13 +53,70 @@ if ($connectArgs.Count -eq 0 -and $env:ANYRAY_CONNECT) {
   $connectArgs = $env:ANYRAY_CONNECT -split '\s+' | Where-Object { $_ -ne '' }
 }
 
+# Download with resume. The Windows asset is ~100 MB and `Invoke-WebRequest` is
+# one shot: a proxy, a VPN or a flaky link that drops the connection mid-transfer
+# ends enrollment with "The request was aborted: The connection was closed
+# unexpectedly" and keeps none of what already arrived, so a retry pays for the
+# whole file again and can lose the same way. GitHub's release-asset host answers
+# `accept-ranges: bytes`, so each attempt below resumes from the bytes on disk.
+# Resuming is safe only because the SHA-256 check further down is unconditional:
+# a spliced or truncated file fails closed there, exactly like a corrupt
+# single-shot download. Streaming also skips 5.1's per-read progress bar, which
+# alone costs a large download an order of magnitude in time.
+function Get-AnyrayDownload {
+  param(
+    [Parameter(Mandatory = $true)][string] $Uri,
+    [Parameter(Mandatory = $true)][string] $OutFile,
+    [int] $Attempts = 4
+  )
+  $lastError = $null
+  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    $have = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
+    try {
+      $request = [System.Net.WebRequest]::Create($Uri)
+      $request.UserAgent = 'anyray-connect-installer'
+      $request.Timeout = 60000
+      $request.ReadWriteTimeout = 300000
+      if ($have -gt 0) { $request.AddRange($have) }
+      try {
+        $response = $request.GetResponse()
+      } catch [System.Net.WebException] {
+        # 416: the range starts past the end, i.e. the file on disk is already
+        # the whole asset (the previous attempt died on the very last bytes).
+        # Retrying forever would fail an otherwise-complete download; the
+        # checksum below still decides whether these bytes are the real thing.
+        $status = $null
+        if ($_.Exception.Response) { $status = $_.Exception.Response.StatusCode }
+        if ($have -gt 0 -and $status -eq [System.Net.HttpStatusCode]::RequestedRangeNotSatisfiable) { return }
+        throw
+      }
+      try {
+        # A host that ignores Range answers 200 with the WHOLE body; appending
+        # that to a partial file would splice two copies together, so restart.
+        if ($have -gt 0 -and $response.StatusCode -ne [System.Net.HttpStatusCode]::PartialContent) { $have = 0 }
+        $mode = if ($have -gt 0) { [System.IO.FileMode]::Append } else { [System.IO.FileMode]::Create }
+        $file = New-Object System.IO.FileStream($OutFile, $mode, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try { $response.GetResponseStream().CopyTo($file) } finally { $file.Dispose() }
+      } finally { $response.Close() }
+      return
+    } catch {
+      $lastError = $_
+      if ($attempt -ge $Attempts) { break }
+      $landed = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
+      Write-Host ("anyray-connect: transfer interrupted at {0:N0} MB, resuming (attempt {1} of {2})..." -f ($landed / 1MB), ($attempt + 1), $Attempts) -ForegroundColor Yellow
+      Start-Sleep -Seconds ([Math]::Min(8, [Math]::Pow(2, $attempt - 1)))
+    }
+  }
+  throw $lastError
+}
+
 $tmp = Join-Path $env:TEMP ("anyray-connect-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 $dl = Join-Path $tmp 'anyray-connect.exe'
 
 try {
   Write-Host "anyray-connect: downloading $asset..." -ForegroundColor Cyan
-  Invoke-WebRequest -Uri "$base/$asset" -OutFile $dl -UseBasicParsing
+  Get-AnyrayDownload -Uri "$base/$asset" -OutFile $dl
 
   # Verify the checksum from the same release. Every step here fails CLOSED, with
   # no bypass flag or env var: the exe below installs a Claude Code PostToolUse
@@ -72,7 +129,7 @@ try {
   # checksum MISMATCH is still thrown OUTSIDE any catch.
   $sumsPath = Join-Path $tmp 'SHA256SUMS'
   try {
-    Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile $sumsPath -UseBasicParsing
+    Get-AnyrayDownload -Uri "$base/SHA256SUMS" -OutFile $sumsPath -Attempts 3
   } catch {
     throw "could not fetch the checksums ($base/SHA256SUMS) - refusing to run an unverified $asset; retry, or use: npx anyray-connect <url>"
   }

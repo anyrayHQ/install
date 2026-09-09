@@ -47,6 +47,11 @@ jobs:
             $errors | ForEach-Object { Write-Error $_ }
             exit 1
           }
+      # Parsing proves the installers are well-formed, not that they survive a
+      # dropped connection — the failure that actually reached a customer. This
+      # drives both download helpers against a server that cuts transfers.
+      - name: Test installer downloads survive dropped connections
+        run: ci/test-connect-download.sh
       - name: Install package inspection tools
         run: |
           source ci/nfpm-tool.env

@@ -113,8 +113,35 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/anyray-connect.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 dl="${tmp}/anyray-connect"
 
+# Resume, don't restart. The binary is ~100 MB, and a proxy, VPN or flaky link
+# that drops the connection mid-transfer ends enrollment outright: curl reports
+# error 18 (transfer closed with N bytes remaining) and does NOT retry that even
+# under --retry, so one bad minute costs the whole download. GitHub's
+# release-asset host answers `accept-ranges: bytes`, so `--continue-at -` picks
+# up from the bytes already on disk. Resuming is safe only because the SHA-256
+# check below is unconditional: a spliced or truncated file fails closed there,
+# exactly like a corrupt single-shot download.
+#
+# Every branch is a full if/then: under `set -e` a bare `[ x ] && cmd` that tests
+# false is a failing last command, which would exit the installer outright.
+download_resumable() {
+  _url="$1"; _out="$2"; _attempts="$3"; _try=1
+  while :; do
+    curl -fSL --proto '=https' --continue-at - "$_url" -o "$_out" && return 0
+    _code=$?
+    # 33 = the host ignored our Range header, so this partial file can never be
+    # completed by resuming. Drop it; the next attempt fetches the whole thing.
+    if [ "$_code" -eq 33 ]; then rm -f "$_out"; fi
+    if [ "$_try" -ge "$_attempts" ]; then return 1; fi
+    if [ -f "$_out" ]; then _have="$(wc -c < "$_out" | tr -d ' ')"; else _have=0; fi
+    echo "anyray-connect: transfer interrupted at ${_have} bytes, resuming (attempt $((_try + 1)) of ${_attempts})…" >&2
+    if [ "$_try" -lt 4 ]; then sleep "$((_try * 2))"; else sleep 8; fi
+    _try=$((_try + 1))
+  done
+}
+
 echo "anyray-connect: downloading ${ASSET}…" >&2
-curl -fSL --proto '=https' "${BASE}/${ASSET}" -o "$dl" \
+download_resumable "${BASE}/${ASSET}" "$dl" 4 \
   || err "download failed (${BASE}/${ASSET}) — check your connection or use: npx anyray-connect <url>"
 
 # Verify the checksum from the same release. Every step here fails CLOSED, with
@@ -125,7 +152,7 @@ curl -fSL --proto '=https' "${BASE}/${ASSET}" -o "$dl" \
 # request fail — dropping just the SHA256SUMS fetch used to disable the check
 # entirely. A missing sums file, a missing entry, or a missing hash tool are all
 # hard errors; npm (npx) is the fallback, and it verifies via the registry.
-curl -fsSL --proto '=https' "${BASE}/SHA256SUMS" -o "${tmp}/SHA256SUMS" \
+curl -fsSL --proto '=https' --retry 3 --retry-delay 1 "${BASE}/SHA256SUMS" -o "${tmp}/SHA256SUMS" \
   || err "could not fetch the checksums (${BASE}/SHA256SUMS) — refusing to run an unverified ${ASSET}; retry, or use: npx anyray-connect <url>"
 
 want="$(awk -v a="$ASSET" '$2==a || $2=="*"a {print $1}' "${tmp}/SHA256SUMS" | head -n1)"

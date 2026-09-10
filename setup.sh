@@ -565,13 +565,10 @@ EOF
   # ── Anyray Cloud connect (--connect) ───────────────────────────────────────
   # (Re)writes only the connect vars below — every other line of .env is kept.
   if [ -n "$CONNECT_TOKEN" ]; then
-    # The vendor's Ed25519 verify key and the control-plane host are PINNED in
-    # the gateway image — they are no longer fetched or written here. That is
-    # what makes the billing kill-switch tamper-resistant: re-pointing the URL
-    # at a look-alike control plane gets nowhere, because the stock image won't
-    # phone home to a non-pinned host and verifies leases only against the
-    # baked-in key. So a custom --control-plane only works with an INTERNAL/DEV
-    # gateway build, gated behind the unsafe override below.
+    # The vendor's Ed25519 verify key and the control-plane host are pinned in
+    # the gateway image, so a deployment never chooses either: the image
+    # validates the host against its own allowlist and verifies leases only
+    # against the baked-in key. --control-plane is an internal-build flag.
     CANONICAL_CP="https://app.anyray.ai"
     CP_NORM="${CONTROL_PLANE%/}"
 
@@ -621,40 +618,31 @@ ANYRAY_ENTITLEMENT_GRACE_MS=86400000
 EOF
 
     if [ "$CP_NORM" = "$CANONICAL_CP" ]; then
-      # Production connect. Newer gateway images PIN the control-plane host and
-      # the Ed25519 verify key in the image, so they need neither here. But the
-      # published images that customers pull TODAY read both from the
-      # environment and SILENTLY skip metering (no log, no phone-home, no
-      # billing) if either is missing — so we write the canonical host and the
-      # vendor's verify-only key explicitly. This is safe and forward-compatible:
-      #   • The host is the canonical vendor host — a pinned image validates it
-      #     against its allowlist (passes) and a non-canonical host is REFUSED,
-      #     so this never becomes a re-pointable trust knob.
-      #   • The key is the vendor's PUBLIC verify-only key (it cannot sign
-      #     leases). A pinned image ignores it entirely (an env key is honored
-      #     only under ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1, which we do NOT set);
-      #     an older image verifies real vendor leases against it.
-      # Keep this key in sync with PINNED_LICENSE_PUBLIC_KEY in the gateway's
+      # Production connect. Current gateway images carry the control-plane host
+      # and the Ed25519 verify key pinned in the image and need neither here;
+      # images published before that pin read both from the environment, so
+      # write them for a deployment that has not upgraded yet. Both are the
+      # canonical vendor values: a pinned image validates the host against its
+      # allowlist and passes, and the key is verify-only (it cannot sign a
+      # lease), so neither is a trust knob a deployment can re-point.
+      # Keep this key in sync with PINNED_LICENSE_PUBLIC_KEY in the monorepo's
       # licenseAnchor.ts (same key, distributed two ways).
       cat >> .env <<EOF
 ANYRAY_CONTROL_PLANE_URL=${CANONICAL_CP}
 ANYRAY_LICENSE_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAOScd41AewtCOmQSkT9N7Jn9V1u+uFykC/Vf8hnfKVPQ=\n-----END PUBLIC KEY-----\n"
 EOF
     else
-      # Custom control plane → dev/internal builds only. Enable the unsafe
-      # override and fetch that control plane's verify key into .env (a stock
-      # image ignores both; only a dev build honors them).
+      # Internal control plane: fetch its verify key into .env beside the flag
+      # an internal build reads. Rationale is in the monorepo's ENV-SURFACE.md.
       echo "⚠ --control-plane ${CONTROL_PLANE} is not the Anyray control plane (${CANONICAL_CP})."
-      echo "  A stock gateway image pins the vendor host + key and will REFUSE to meter against it."
-      echo "  Enabling ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1 — honored ONLY by an internal/dev gateway build."
+      echo "  This flag is for internal builds; a released gateway image does not meter against it."
       command -v curl >/dev/null 2>&1 || { echo "✗ curl not found — needed to fetch the dev control plane's verify key" >&2; exit 1; }
-      # The verify key is no longer public — it is served only at the admin-gated
-      # /admin/license-public-key. A dev operator runs the dev control plane, so
-      # they hold its admin token: pass it as ANYRAY_CP_ADMIN_TOKEN. (Or skip the
-      # fetch entirely by exporting ANYRAY_LICENSE_PUBLIC_KEY yourself.)
+      # The key is served only at the admin-gated /admin/license-public-key, and
+      # whoever runs an internal control plane holds its admin token: pass it as
+      # ANYRAY_CP_ADMIN_TOKEN.
       if [ -z "${ANYRAY_CP_ADMIN_TOKEN:-}" ]; then
         echo "✗ --control-plane needs the dev control plane's admin token to fetch its verify key." >&2
-        echo "  Set ANYRAY_CP_ADMIN_TOKEN=… and re-run, or set ANYRAY_LICENSE_PUBLIC_KEY=… yourself." >&2
+        echo "  Set ANYRAY_CP_ADMIN_TOKEN=… and re-run." >&2
         exit 1
       fi
       LICENSE_ENDPOINT="${CP_NORM}/admin/license-public-key"
@@ -668,9 +656,9 @@ EOF
         *) echo "✗ unexpected response from ${LICENSE_ENDPOINT} (no publicKeyPem) — is ${CONTROL_PLANE} really an Anyray control plane?" >&2; exit 1 ;;
       esac
       cat >> .env <<EOF
-# Dev/staging ONLY — overrides the pinned vendor key + host. Never set in prod.
-# The URL is written here (not in the common block) because it only takes effect
-# under the override; a stock image ignores it and uses the pinned host.
+# Internal builds only — never set these on a production deployment.
+# The URL is written here rather than in the common block because a released
+# image ignores it and uses the pinned host.
 ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1
 ANYRAY_CONTROL_PLANE_URL=${CONTROL_PLANE}
 ANYRAY_LICENSE_PUBLIC_KEY="${LICENSE_PEM}"

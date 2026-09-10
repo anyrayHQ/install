@@ -201,11 +201,7 @@ services:
       # Entitlement (ANY-198): the optimizer verifies the gateway-written lease
       # itself, against the key pinned in its image, so the dev-override is now
       # an optimizer concern too — same two vars, same reason as the gateway
-      # above. An internal build whose control plane signs with a non-vendor
-      # keypair MUST inject the matching verify key here, or the optimizer
-      # rejects every lease that control plane signed and refuses to optimize.
-      # Unset on a customer deployment, where the image-pinned vendor key is
-      # the right one and these must never be set.
+      # above, and unset on a deployment that uses the image-pinned vendor key.
       ANYRAY_DEV_UNSAFE_CONTROL_PLANE: ${ANYRAY_DEV_UNSAFE_CONTROL_PLANE:-}
       ANYRAY_LICENSE_PUBLIC_KEY: ${ANYRAY_LICENSE_PUBLIC_KEY:-}
       # The PUBLIC half only (ANY-202). Verify-only, exactly like the vendor

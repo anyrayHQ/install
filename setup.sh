@@ -632,9 +632,8 @@ ANYRAY_CONTROL_PLANE_URL=${CANONICAL_CP}
 ANYRAY_LICENSE_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAOScd41AewtCOmQSkT9N7Jn9V1u+uFykC/Vf8hnfKVPQ=\n-----END PUBLIC KEY-----\n"
 EOF
     else
-      # Custom control plane → dev/internal builds only. Enable the unsafe
-      # override and fetch that control plane's verify key into .env (a stock
-      # image ignores both; only a dev build honors them).
+      # Internal control plane: fetch its verify key into .env beside the flag
+      # an internal build reads. Rationale is in the monorepo's ENV-SURFACE.md.
       echo "⚠ --control-plane ${CONTROL_PLANE} is not the Anyray control plane (${CANONICAL_CP})."
       echo "  This flag is for internal builds; a released gateway image does not meter against it."
       command -v curl >/dev/null 2>&1 || { echo "✗ curl not found — needed to fetch the dev control plane's verify key" >&2; exit 1; }
@@ -657,9 +656,9 @@ EOF
         *) echo "✗ unexpected response from ${LICENSE_ENDPOINT} (no publicKeyPem) — is ${CONTROL_PLANE} really an Anyray control plane?" >&2; exit 1 ;;
       esac
       cat >> .env <<EOF
-# Dev/staging ONLY — overrides the pinned vendor key + host. Never set in prod.
-# The URL is written here (not in the common block) because it only takes effect
-# under the override; a stock image ignores it and uses the pinned host.
+# Internal builds only — never set these on a production deployment.
+# The URL is written here rather than in the common block because a released
+# image ignores it and uses the pinned host.
 ANYRAY_DEV_UNSAFE_CONTROL_PLANE=1
 ANYRAY_CONTROL_PLANE_URL=${CONTROL_PLANE}
 ANYRAY_LICENSE_PUBLIC_KEY="${LICENSE_PEM}"

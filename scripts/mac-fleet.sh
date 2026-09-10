@@ -39,7 +39,40 @@ PROJECT="anyray-install-runner-mac"
 PEER_PROJECTS="anyray-gha-runner-mac"
 FLEET_SERVICE_ROLE="arn:aws:iam::${ACCOUNT}:role/anyray-mac-fleet-service"
 RUNNER_SERVICE_ROLE="arn:aws:iam::${ACCOUNT}:role/anyray-gha-runner-codebuild"
-CODECONNECTION="arn:aws:codeconnections:${REGION}:${ACCOUNT}:connection/f9f248ff-57a1-4de0-8f46-52349e85eae9"
+# Discovered, never hardcoded — same reason as ACCOUNT above (this repo is
+# PUBLIC). A connection's UUID is per-account, and so is the NAME operators give
+# it, so there is no literal that stays correct once CI moves accounts: a baked-in
+# ARN silently points the fleet at an account we no longer build in. That is not
+# hypothetical — a CodeBuild suspension forced exactly that move on 2026-09-10.
+# Resolve the one AVAILABLE GitHub connection in this account+region, and fail
+# loudly rather than guess. ANYRAY_CODECONNECTION_ARN overrides when an account
+# legitimately holds several.
+#
+# Resolved LAZILY, at the one call site that needs it. Only `create-project`
+# consumes a connection: `down` does not, and neither does an `up` that dies
+# waiting for the fleet. Resolving at load time would make every one of those
+# paths depend on a connection existing, turning "the fleet never became usable"
+# into "no connection found" and failing teardown outright.
+_CODECONNECTION=""
+codeconnection() {
+  [ -n "$_CODECONNECTION" ] && { printf '%s' "$_CODECONNECTION"; return 0; }
+  if [ -n "${ANYRAY_CODECONNECTION_ARN:-}" ]; then
+    _CODECONNECTION="$ANYRAY_CODECONNECTION_ARN"
+    printf '%s' "$_CODECONNECTION"; return 0
+  fi
+  # Exactly one is the only unambiguous answer; several means the caller must
+  # choose. `|| true` keeps `set -e` from pre-empting the error messages below,
+  # which are far more useful than a bare non-zero exit.
+  local conns=()
+  mapfile -t conns < <(aws codeconnections list-connections --region "$REGION" \
+    --query "Connections[?ProviderType=='GitHub' && ConnectionStatus=='AVAILABLE'].ConnectionArn" \
+    --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)
+  case "${#conns[@]}" in
+    1) _CODECONNECTION="${conns[0]}"; printf '%s' "$_CODECONNECTION" ;;
+    0) echo "::error::no AVAILABLE GitHub CodeConnection in this account/${REGION}. Authorize one in the CodeConnections console, or set ANYRAY_CODECONNECTION_ARN." >&2; return 1 ;;
+    *) echo "::error::${#conns[@]} AVAILABLE GitHub CodeConnections in this account/${REGION}; set ANYRAY_CODECONNECTION_ARN to pick one." >&2; return 1 ;;
+  esac
+}
 # Only this GitHub account id may start a runner (fork-PR RCE guard on a PUBLIC repo).
 ACTOR_ACCOUNT_ID="16443050"
 SOURCE_URL="https://github.com/anyrayHQ/install.git"
@@ -93,9 +126,10 @@ up() {
       --environment "type=MAC_ARM,image=aws/codebuild/macos-arm-base:14,computeType=BUILD_GENERAL1_MEDIUM,fleet={fleetArn=$arn}" >/dev/null
   else
     echo "creating project $PROJECT bound to fleet $arn"
+    local conn; conn="$(codeconnection)"
     aws codebuild create-project --region "$REGION" --name "$PROJECT" \
       --description "Ephemeral on-demand macOS signing runner (RFC 0010); created/deleted per release by mac-fleet.sh" \
-      --source "type=GITHUB,location=$SOURCE_URL,auth={type=CODECONNECTIONS,resource=$CODECONNECTION}" \
+      --source "type=GITHUB,location=$SOURCE_URL,auth={type=CODECONNECTIONS,resource=$conn}" \
       --artifacts type=NO_ARTIFACTS \
       --environment "type=MAC_ARM,image=aws/codebuild/macos-arm-base:14,computeType=BUILD_GENERAL1_MEDIUM,fleet={fleetArn=$arn}" \
       --service-role "$RUNNER_SERVICE_ROLE" >/dev/null

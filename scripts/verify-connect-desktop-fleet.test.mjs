@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-function runFleet(t, action, fleetStatus, { connections = ['arn:aws:codeconnections:test:connection/example'] } = {}) {
+function runFleet(t, action, fleetStatus, { connections = ['arn:aws:codeconnections:test:connection/example'], webhookStatus = 'ACTIVE' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'desktop-fleet-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // `list-connections` returns tab-separated ARNs with --output text, and an
@@ -17,6 +17,7 @@ printf '%s\\n' "$*" >> "$FLEET_TEST_LOG"
 case "$*" in
   *batch-get-fleets*status.statusCode*) echo "$FLEET_TEST_STATUS" ;;
   *batch-get-fleets*) echo arn:aws:codebuild:test:fleet/example ;;
+  *batch-get-projects*webhook.status*) echo "$FLEET_TEST_WEBHOOK_STATUS" ;;
   *batch-get-projects*) echo None ;;
   *codeconnections*list-connections*) printf '%s\\n' "$FLEET_TEST_CONNECTIONS" ;;
 esac
@@ -27,6 +28,7 @@ esac
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, AWS_ACCOUNT_ID: '000000000000',
       FLEET_TEST_LOG: join(dir, 'calls'), FLEET_TEST_STATUS: fleetStatus,
       FLEET_TEST_CONNECTIONS: connections.join('\t'),
+      FLEET_TEST_WEBHOOK_STATUS: webhookStatus,
       // Never inherit a real override from the developer's shell: it would skip
       // discovery entirely and quietly pass the tests that exercise it.
       ANYRAY_CODECONNECTION_ARN: '' },
@@ -87,4 +89,30 @@ test('teardown needs no connection at all', (t) => {
   const result = runFleet(t, 'down', 'ACTIVE', { connections: [] });
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.calls, /list-connections/);
+});
+
+// GitHub delivers a job's `queued` event once and never retries, so `up` must not
+// return while the runner webhook could still drop it (see wait_webhook_active).
+test('up waits for the new webhook to be ACTIVE before handing off', (t) => {
+  const result = runFleet(t, 'up', 'PENDING_DELETION', { webhookStatus: 'ACTIVE' });
+  assert.equal(result.status, 0, result.stderr);
+  const calls = result.calls.split('\n');
+  const created = calls.findIndex((c) => c.includes('create-webhook'));
+  const polled = calls.findIndex((c, i) => i > created && c.includes('webhook.status'));
+  assert.ok(created >= 0, 'create-webhook was never called');
+  assert.ok(polled > created, 'webhook status was not checked after create-webhook');
+  assert.match(result.stdout, /webhook ACTIVE; settling/);
+});
+
+test('a webhook that fails to create fails provisioning loudly', (t) => {
+  const result = runFleet(t, 'up', 'PENDING_DELETION', { webhookStatus: 'CREATE_FAILED' });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /webhook for anyray-install-runner-mac is CREATE_FAILED/);
+  assert.doesNotMatch(result.stdout, /runner project ready/);
+});
+
+test('a webhook stuck CREATING fails instead of stranding sign-macos', (t) => {
+  const result = runFleet(t, 'up', 'PENDING_DELETION', { webhookStatus: 'CREATING' });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /never became ACTIVE \(last status: CREATING\)/);
 });

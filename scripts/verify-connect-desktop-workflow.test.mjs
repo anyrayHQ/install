@@ -10,6 +10,14 @@ const macSmoke = readFileSync(
   new URL('./smoke-connect-desktop-macos.py', import.meta.url),
   'utf8'
 );
+const macPostinstall = readFileSync(
+  new URL('./desktop-pkg/postinstall', import.meta.url),
+  'utf8'
+);
+const macUninstall = readFileSync(
+  new URL('./desktop-pkg/uninstall.sh', import.meta.url),
+  'utf8'
+);
 
 const job = (name) => {
   const marker = `  ${name}:\n`;
@@ -152,6 +160,29 @@ describe('desktop staging workflow safety contract', () => {
     assert.ok(identifier > 0 && identifier < notarize);
   });
 
+  test('builds a non-relocatable signed and notarized desktop PKG', () => {
+    const preflight = job('preflight');
+    assert.match(preflight, /APPLE_INSTALLER_CERT_P12: \$\{\{ secrets\.APPLE_INSTALLER_CERT_P12 \}\}/);
+    assert.match(preflight, /APPLE_INSTALLER_CERT_PASSWORD: \$\{\{ secrets\.APPLE_INSTALLER_CERT_PASSWORD \}\}/);
+
+    const sign = job('sign-macos');
+    assert.match(sign, /scripts\/desktop-pkg/);
+    assert.match(sign, /ditto "\$app" "\$root\/Applications\/Anyray Connect\.app"/);
+    assert.match(sign, /--identifier ai\.anyray\.connect-tray/);
+    assert.match(sign, /plutil -replace 0\.BundleIsRelocatable -bool false "\$component_plist"/);
+    assert.match(sign, /RootRelativeBundlePath/);
+    assert.match(sign, /Developer ID Installer/);
+    assert.match(sign, /xar -tf "\$pkg" \| grep -qx 'Distribution'/);
+    assert.match(sign, /payload-files "\$pkg"/);
+    assert.match(sign, /Applications\/Anyray Connect\\\.app\/Contents\/MacOS\/anyray-connect/);
+    assert.match(sign, /spctl -a -vvv -t install "\$pkg"/);
+    assert.match(sign, /out\/\*\.pkg out\/\*\.app\.tar\.gz/);
+    assert.doesNotMatch(sign, /hdiutil|\.dmg|DMG/);
+    const verify = job('verify-macos-signed');
+    assert.match(verify, /count\(\/pkg-info\/relocate\/bundle\)' "\$package_info"\)" = 0/);
+    assert.match(verify, /= '\.\/Applications\/Anyray Connect\.app'/);
+  });
+
   test('prepares MSI metadata before signing and verifies the installed signed payload', () => {
     const build = job('build-windows-unsigned');
     assert.ok(build.indexOf('node scripts/prepare-desktop-msi.mjs $main --prepare') > 0);
@@ -173,7 +204,7 @@ describe('desktop staging workflow safety contract', () => {
     const mac = job('verify-macos-signed');
     assert.match(mac, /actions\/setup-node@/);
     assert.match(mac, /sparse-checkout: \|\n            .github\/actions\n            scripts/);
-    assert.ok(mac.indexOf('smoke-connect-desktop-macos.py') < mac.lastIndexOf('sudo rm -rf "$installed_app"'));
+    assert.ok(mac.indexOf('smoke-connect-desktop-macos.py') < mac.lastIndexOf('sudo "$uninstall"'));
     const macOwnership = macSmoke.indexOf("profile.get('engineOwner') == 'app'");
     const macStop = macSmoke.indexOf('            stop()', macOwnership);
     assert.ok(macOwnership > 0 && macOwnership < macStop);
@@ -193,10 +224,12 @@ describe('desktop staging workflow safety contract', () => {
     const mac = job('verify-macos-signed');
     assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$updater_app\/Contents\/Info\.plist"\)" = '13\.0'/);
     assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$app\/Contents\/Info\.plist"\)" = '13\.0'/);
-    assert.match(mac, /ditto "\$app" "\$installed_app"/);
+    assert.match(mac, /installer -pkg "\$pkg" -target \//);
+    assert.match(mac, /cmp "\$foreign" "\$launcher"/);
+    assert.match(mac, /readlink "\$launcher"/);
     assert.match(mac, /smoke-connect-desktop-macos.py/);
     assert.match(mac, /launchctl asuser/);
-    assert.match(mac, /rm -rf "\$installed_app"/);
+    assert.match(mac, /sudo "\$uninstall"/);
 
     const windows = job('verify-windows-signatures');
     assert.match(windows, /MSI install failed/);
@@ -255,6 +288,36 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(publish, /node scripts\/publish-desktop-feed\.mjs/);
     assert.doesNotMatch(workflow, /connect-update\.json|npm publish|gen-winget|gen-homebrew/);
   });
+});
+
+test('macOS package scripts create, verify, and remove only owned launchers', () => {
+  for (const script of [macPostinstall, macUninstall]) {
+    assert.match(script, /^#!\/bin\/bash\nset -euo pipefail\n/);
+  }
+  assert.match(macPostinstall, /refusing to overwrite foreign \$launcher/);
+  assert.match(macPostinstall, /refusing to overwrite foreign \$helper/);
+  assert.match(macPostinstall, /desktop helper --print/);
+  assert.match(macPostinstall, /--wrapper "\$wrapper"/);
+  assert.match(macPostinstall, /--bin "\$launcher"/);
+  assert.match(macPostinstall, /\/bin\/sh -n "\$helper"/);
+  assert.match(macPostinstall, /\$lib_dir\/uninstall\.sh/);
+  assert.doesNotMatch(macPostinstall, /ai\.anyray\.connect com\.fleetdm\.orbit\.base\.pkg/);
+  assert.doesNotMatch(macPostinstall, /\/Library\/LaunchAgents\/ai\.anyray\.connect\.managed-enroll\.plist/);
+  assert.doesNotMatch(macPostinstall, /launchctl print system\/com\.fleetdm\.orbit/);
+  assert.match(macUninstall, /launchctl asuser "\$uid"/);
+  assert.match(macUninstall, /uninstall --user --json/);
+  assert.match(macUninstall, /--help 2>\/dev\/null \| \/usr\/bin\/grep -Eq '\^\[\[:space:\]\]\*uninstall\[\[:space:\]\]'/);
+  assert.match(macUninstall, /engine predates the uninstall verb/);
+  assert.match(macUninstall, /leaving foreign \$launcher untouched/);
+  assert.match(macUninstall, /pkgutil --forget "\$receipt"/);
+});
+
+test('desktop staging assets contain one PKG, one updater tarball, and no DMG', () => {
+  const assemble = job('assemble-signed-staging');
+  assert.match(assemble, /cp platform\/macos\/\*\.pkg assets\//);
+  assert.match(assemble, /cp platform\/macos\/\*\.app\.tar\.gz assets\//);
+  assert.match(assemble, /-name '\*\.pkg'[\s\S]*-eq 1/);
+  assert.match(assemble, /-name '\*\.dmg'[\s\S]*-eq 0/);
 });
 
 test('all Mac fleet owners serialize the full workflow, including cleanup', () => {

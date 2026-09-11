@@ -77,6 +77,34 @@ codeconnection() {
 ACTOR_ACCOUNT_ID="16443050"
 SOURCE_URL="https://github.com/anyrayHQ/install.git"
 
+# Block until the runner webhook will actually start a build (see its caller).
+# Two gates, because the status alone is not proven to cover the whole window:
+# the webhook read ACTIVE on the first poll 32s after creation, while the event
+# that was dropped arrived 4s after it — so after ACTIVE, settle for WEBHOOK_SETTLE
+# seconds, the delay that was observed to work. Failing here is the point: a red
+# provision-mac now beats a silent 146-minute strand and an unpublished release.
+WEBHOOK_SETTLE=30
+wait_webhook_active() {
+  local s=""
+  for _ in $(seq 1 24); do
+    s="$(aws codebuild batch-get-projects --region "$REGION" --names "$PROJECT" \
+          --query 'projects[0].webhook.status' --output text 2>/dev/null || true)"
+    case "$s" in
+      ACTIVE) break ;;
+      CREATE_FAILED|DELETING)
+        echo "::error::webhook for ${PROJECT} is ${s}; sign-macos would wait for a runner that never starts"
+        return 1 ;;
+    esac
+    sleep 5
+  done
+  if [ "$s" != ACTIVE ]; then
+    echo "::error::webhook for ${PROJECT} never became ACTIVE (last status: ${s:-none}); refusing to hand sign-macos a dead webhook"
+    return 1
+  fi
+  echo "webhook ACTIVE; settling ${WEBHOOK_SETTLE}s before sign-macos queues"
+  sleep "$WEBHOOK_SETTLE"
+}
+
 fleet_arn() {
   aws codebuild batch-get-fleets --region "$REGION" --names "$FLEET" \
     --query 'fleets[0].arn' --output text 2>/dev/null | grep -v '^None$' || true
@@ -137,6 +165,15 @@ up() {
     # (public repo — a fork-PR actor must never start a Mac).
     aws codebuild create-webhook --region "$REGION" --project-name "$PROJECT" \
       --filter-groups "[[{\"type\":\"EVENT\",\"pattern\":\"WORKFLOW_JOB_QUEUED\"},{\"type\":\"ACTOR_ACCOUNT_ID\",\"pattern\":\"^${ACTOR_ACCOUNT_ID}$\"}]]" >/dev/null
+    # `create-webhook` returning is NOT the webhook being able to act on an
+    # event, and sign-macos queues the instant this job ends. GitHub delivers a
+    # job's `queued` event exactly once and never retries, so an event that
+    # lands before the webhook is live is simply dropped: the job then waits
+    # with no runner until the stuck-run watchdog kills it, and `release` never
+    # runs. Observed 2026-09-11: the event arrived 4s after creation and started
+    # no build (sign-macos sat 146 min); the same project with its webhook
+    # created ~30s ahead started a build within a second.
+    wait_webhook_active || exit 1
   fi
   # Same fleet, different repo: repoint every peer project too, or the next
   # release silently strands them (see PEER_PROJECTS above). Best-effort by

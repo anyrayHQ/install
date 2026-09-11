@@ -110,6 +110,8 @@ jobs:
       AWS_MAC_FLEET_ROLE_ARN: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
       APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
       APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+      APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
       APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
@@ -142,6 +144,7 @@ jobs:
             MONOREPO_READ_APP_ID MONOREPO_READ_APP_PRIVATE_KEY \
             AWS_MAC_FLEET_ROLE_ARN \
             APPLE_SIGNING_CERT_P12 APPLE_SIGNING_CERT_PASSWORD \
+            APPLE_INSTALLER_CERT_P12 APPLE_INSTALLER_CERT_PASSWORD \
             APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID \
             AZURE_SIGNING_CLIENT_ID AZURE_SIGNING_TENANT_ID \
             AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT_PROFILE \
@@ -381,6 +384,8 @@ jobs:
       VERSION: ${{ needs.preflight.outputs.version }}
       APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
       APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+      APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
       APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
@@ -389,7 +394,9 @@ jobs:
       # on disk before it can be resolved.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            scripts/desktop-pkg
           sparse-checkout-cone-mode: false
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
@@ -505,41 +512,109 @@ jobs:
           tarball="out/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
           tar -czf "$tarball" -C "$(dirname "$app")" "$(basename "$app")"
 
-      - name: Create, sign, notarize, and staple the DMG
+      - name: Build and sign the macOS installer (Developer ID Installer)
         run: |
           set -euo pipefail
           app="$(find expanded -maxdepth 1 -type d -name '*.app' -print -quit)"
-          [ -n "$app" ] || { echo '::error::signed app is missing before DMG packaging'; exit 1; }
-          dmgroot="$RUNNER_TEMP/connect-desktop-dmgroot"
-          mkdir -p "$dmgroot"
-          ditto "$app" "$dmgroot/Anyray Connect.app"
-          ln -s /Applications "$dmgroot/Applications"
-          dmg="out/anyray-connect-desktop-${VERSION}-macos-universal.dmg"
-          hdiutil create -volname 'Anyray Connect' -srcfolder "$dmgroot" \
-            -ov -format UDZO "$dmg"
-          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
-          codesign --verify --verbose=2 "$dmg"
+          [ -n "$app" ] || { echo '::error::signed app is missing before PKG packaging'; exit 1; }
+          root="$RUNNER_TEMP/connect-desktop-pkgroot"
+          scripts="$RUNNER_TEMP/connect-desktop-pkgscripts"
+          component_plist="$RUNNER_TEMP/connect-desktop-components.plist"
+          component_pkg="$RUNNER_TEMP/connect-desktop-component.pkg"
+          unsigned_pkg="$RUNNER_TEMP/connect-desktop-unsigned.pkg"
+          mkdir -p \
+            "$root/Applications" \
+            "$root/usr/local/lib/anyray-connect" \
+            "$scripts"
+          ditto "$app" "$root/Applications/Anyray Connect.app"
+          install -m 0755 scripts/desktop-pkg/uninstall.sh \
+            "$root/usr/local/lib/anyray-connect/uninstall.sh"
+          install -m 0755 scripts/desktop-pkg/postinstall "$scripts/postinstall"
 
-          status="$(xcrun notarytool submit "$dmg" \
+          pkgbuild --analyze --root "$root" "$component_plist"
+          plutil -replace 0.BundleIsRelocatable -bool false "$component_plist"
+          test "$(plutil -extract 0.BundleIsRelocatable raw -o - "$component_plist")" = false
+          test "$(plutil -extract 0.RootRelativeBundlePath raw -o - "$component_plist")" \
+            = 'Applications/Anyray Connect.app'
+          pkgbuild \
+            --root "$root" \
+            --scripts "$scripts" \
+            --component-plist "$component_plist" \
+            --identifier ai.anyray.connect-tray \
+            --version "$VERSION" \
+            --install-location / \
+            --ownership recommended \
+            "$component_pkg"
+          # MDM InstallApplication only installs distribution packages; a bare
+          # component package is acknowledged by Jamf and then silently dropped.
+          productbuild --package "$component_pkg" "$unsigned_pkg"
+
+          keychain="$RUNNER_TEMP/connect-desktop-signing.keychain-db"
+          keychain_password_file="$RUNNER_TEMP/connect-desktop-keychain-password"
+          test -f "$keychain_password_file"
+          keychain_password="$(cat "$keychain_password_file")"
+          printf '%s' "$APPLE_INSTALLER_CERT_P12" \
+            | base64 -d > "$RUNNER_TEMP/connect-desktop-installer-cert.p12"
+          security import "$RUNNER_TEMP/connect-desktop-installer-cert.p12" \
+            -k "$keychain" -f pkcs12 \
+            -P "$APPLE_INSTALLER_CERT_PASSWORD" -A -T /usr/bin/productsign
+          rm -f "$RUNNER_TEMP/connect-desktop-installer-cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          system_root_keychain='/System/Library/Keychains/SystemRootCertificates.keychain'
+          test -r "$system_root_keychain"
+          security list-keychains -s "$keychain" "$system_root_keychain"
+          echo '--- installer identities in the throwaway keychain ---'
+          security find-identity -v "$keychain" || true
+          installer_identity="$(security find-identity -v "$keychain" \
+            | awk '/Developer ID Installer/ {print $2; exit}')"
+          if [ -z "$installer_identity" ]; then
+            echo '::error::APPLE_INSTALLER_CERT_P12 imported no Developer ID Installer identity'
+            exit 1
+          fi
+
+          pkg="out/anyray-connect-desktop-${VERSION}-macos-universal.pkg"
+          productsign --sign "$installer_identity" "$unsigned_pkg" "$pkg"
+          pkgutil --check-signature "$pkg"
+          xar -tf "$pkg" | grep -qx 'Distribution'
+          payload_files="$(pkgutil --payload-files "$pkg")"
+          printf '%s\n' "$payload_files"
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?Applications/Anyray Connect\.app(/|$)'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?Applications/Anyray Connect\.app/Contents/MacOS/anyray-connect$'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/lib/anyray-connect/uninstall\.sh$'
+
+      - name: Notarize and staple the macOS installer
+        run: |
+          set -euo pipefail
+          pkg="out/anyray-connect-desktop-${VERSION}-macos-universal.pkg"
+
+          status="$(xcrun notarytool submit "$pkg" \
             --key "$RUNNER_TEMP/connect-desktop-notary-key.p8" \
             --key-id "$APPLE_NOTARY_KEY_ID" \
             --issuer "$APPLE_NOTARY_ISSUER_ID" \
             --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
-          [ "$status" = Accepted ] || { echo "::error::DMG notarization failed: $status"; exit 1; }
-          xcrun stapler staple "$dmg"
-          xcrun stapler validate "$dmg"
-          hdiutil verify "$dmg"
-          spctl -a -vvv -t open --context context:primary-signature "$dmg"
+          [ "$status" = Accepted ] || { echo "::error::PKG notarization failed: $status"; exit 1; }
+          xcrun stapler staple "$pkg"
+          xcrun stapler validate "$pkg"
+          spctl -a -vvv -t install "$pkg"
 
       - name: Delete the throwaway Apple signing material
         if: always()
         run: |
+          set -euo pipefail
           rm -f \
             "$RUNNER_TEMP/connect-desktop-cert.p12" \
+            "$RUNNER_TEMP/connect-desktop-installer-cert.p12" \
             "$RUNNER_TEMP/connect-desktop-notary-key.p8" \
             "$RUNNER_TEMP/connect-desktop-keychain-password" \
             "$RUNNER_TEMP/connect-desktop-engine-entitlements.plist" \
-            "$RUNNER_TEMP/connect-desktop-notary.zip"
+            "$RUNNER_TEMP/connect-desktop-notary.zip" \
+            "$RUNNER_TEMP/connect-desktop-components.plist" \
+            "$RUNNER_TEMP/connect-desktop-component.pkg" \
+            "$RUNNER_TEMP/connect-desktop-unsigned.pkg"
           if [ -f "$RUNNER_TEMP/connect-desktop-signing.keychain-db" ]; then
             security delete-keychain "$RUNNER_TEMP/connect-desktop-signing.keychain-db"
           fi
@@ -548,7 +623,7 @@ jobs:
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
-          path: out/*.dmg out/*.app.tar.gz
+          path: out/*.pkg out/*.app.tar.gz
           if-no-files-found: error
 
   # Runtime validation is deliberately separate from signing. The signed app
@@ -602,11 +677,27 @@ jobs:
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$updater_app/Contents/Info.plist")" = "$VERSION"
           test "$(plutil -extract LSMinimumSystemVersion raw -o - "$updater_app/Contents/Info.plist")" = '13.0'
 
-          dmg="$(find signed -maxdepth 1 -type f -name '*.dmg' -print -quit)"
-          [ -n "$dmg" ] || { echo '::error::signed macOS DMG is missing'; exit 1; }
-          codesign --verify --verbose=2 "$dmg"
-          xcrun stapler validate "$dmg"
-          spctl -a -vvv -t open --context context:primary-signature "$dmg"
+          test "$(find signed -maxdepth 1 -type f -name '*.pkg' | wc -l | tr -d ' ')" -eq 1
+          test "$(find signed -maxdepth 1 -type f -name '*.app.tar.gz' | wc -l | tr -d ' ')" -eq 1
+          pkg="signed/anyray-connect-desktop-${VERSION}-macos-universal.pkg"
+          test -s "$pkg" || { echo '::error::signed macOS installer is missing'; exit 1; }
+          pkgutil --check-signature "$pkg"
+          xar -tf "$pkg" | grep -qx 'Distribution'
+          xcrun stapler validate "$pkg"
+          spctl -a -vvv -t install "$pkg"
+          payload_files="$(pkgutil --payload-files "$pkg")"
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?Applications/Anyray Connect\.app(/|$)'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/lib/anyray-connect/uninstall\.sh$'
+          expanded_pkg="$RUNNER_TEMP/connect-desktop-expanded-pkg"
+          pkgutil --expand-full "$pkg" "$expanded_pkg"
+          package_info="$(find "$expanded_pkg" -type f -name PackageInfo -print -quit)"
+          [ -n "$package_info" ] || { echo '::error::PKG contains no component PackageInfo'; exit 1; }
+          test "$(xmllint --xpath 'string(/pkg-info/bundle/@path)' "$package_info")" \
+            = './Applications/Anyray Connect.app'
+          # pkg-info/@relocatable is always "false"; a relocatable pkg instead lists a bundle under <relocate>.
+          test "$(xmllint --xpath 'count(/pkg-info/relocate/bundle)' "$package_info")" = 0
 
           # Native Service Management uses the account's real GUI session, not HOME.
           test_user="$DESKTOP_MAC_TEST_USER"
@@ -622,19 +713,82 @@ jobs:
             echo '::error::the dedicated test account must have a real GUI login session'
             exit 1
           }
-          mountpoint="$RUNNER_TEMP/connect-desktop-mounted"
-          mkdir -p "$mountpoint"
-          hdiutil attach -nobrowse -readonly -mountpoint "$mountpoint" "$dmg"
-          installed_app="$test_home/Applications/Anyray Connect.app"
-          owns_app=false
+          installed_app='/Applications/Anyray Connect.app'
+          launcher='/usr/local/bin/anyray-connect'
+          credential_helper='/usr/local/bin/anyray-credential-helper'
+          bootstrap_helper='/usr/local/bin/anyray-bootstrap-headers-helper'
+          uninstall='/usr/local/lib/anyray-connect/uninstall.sh'
+          for path in \
+            "$installed_app" \
+            "$launcher" \
+            "$credential_helper" \
+            "$bootstrap_helper" \
+            /usr/local/lib/anyray-connect; do
+            sudo test ! -e "$path"
+            sudo test ! -L "$path"
+          done
+
+          foreign="$RUNNER_TEMP/foreign-anyray-connect"
+          printf '%s\n' '#!/bin/sh' 'exit 23' > "$foreign"
+          chmod 0755 "$foreign"
+          # A fresh Apple Silicon host has no /usr/local/bin yet.
+          sudo install -d -m 0755 /usr/local/bin
+          sudo install -m 0755 "$foreign" "$launcher"
+          foreign_owned=true
           cleanup() {
-            if [ "$owns_app" = true ]; then sudo rm -rf "$installed_app"; fi
-            hdiutil detach "$mountpoint" >/dev/null 2>&1 || true
+            if sudo test -x "$uninstall"; then
+              sudo "$uninstall" >/dev/null 2>&1 || true
+            fi
+            sudo rm -rf "$installed_app" /usr/local/lib/anyray-connect
+            for helper in "$credential_helper" "$bootstrap_helper"; do
+              if sudo test -f "$helper" \
+                && sudo grep -q 'Managed by anyray-connect desktop helper' "$helper"; then
+                sudo rm -f "$helper"
+              fi
+            done
+            if sudo test -L "$launcher" \
+              && [ "$(sudo readlink "$launcher")" = "/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect" ]; then
+              sudo rm -f "$launcher"
+            fi
+            if [ "$foreign_owned" = true ]; then
+              sudo rm -f "$launcher"
+            fi
+            sudo pkgutil --forget ai.anyray.connect-tray >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
-          sudo test ! -e "$installed_app"
-          app="$(find "$mountpoint" -maxdepth 1 -type d -name '*.app' -print -quit)"
-          test -n "$app"
+
+          if sudo installer -pkg "$pkg" -target /; then
+            echo '::error::PKG overwrote a foreign /usr/local/bin/anyray-connect'
+            exit 1
+          fi
+          sudo cmp "$foreign" "$launcher"
+          # The installer has no rollback: the bundle payload is already on disk when postinstall refuses.
+          sudo test -e "$installed_app"
+          sudo test ! -L "$launcher"
+          sudo test ! -e "$credential_helper"
+          sudo test ! -e "$bootstrap_helper"
+          if pkgutil --pkg-info ai.anyray.connect-tray >/dev/null 2>&1; then
+            echo '::error::failed PKG install left its receipt behind'
+            exit 1
+          fi
+          sudo rm -f "$launcher"
+          foreign_owned=false
+
+          sudo installer -pkg "$pkg" -target /
+          pkgutil --pkg-info ai.anyray.connect-tray >/dev/null
+          sudo test -L "$launcher"
+          test "$(sudo readlink "$launcher")" \
+            = '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'
+          sudo test -x "$launcher"
+          for helper in "$credential_helper" "$bootstrap_helper"; do
+            sudo test -x "$helper"
+            sudo /bin/sh -n "$helper"
+            sudo grep -q 'Managed by anyray-connect desktop helper' "$helper"
+            sudo grep -Fq "$launcher" "$helper"
+          done
+          sudo test -x "$uninstall"
+
+          app="$installed_app"
           engine="$app/Contents/MacOS/anyray-connect"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
           test "$(plutil -extract LSMinimumSystemVersion raw -o - "$app/Contents/Info.plist")" = '13.0'
@@ -646,11 +800,7 @@ jobs:
           spctl -a -vvv -t exec "$app"
           lipo -archs "$engine" | grep -q arm64
           lipo -archs "$engine" | grep -q x86_64
-          sudo -H -u "$test_user" mkdir -p "$test_home/Applications"
-          owns_app=true
-          sudo ditto "$app" "$installed_app"
-          codesign --verify --deep --strict --verbose=2 "$installed_app"
-          test "$(sudo -H -u "$test_user" "$installed_app/Contents/MacOS/anyray-connect" --version | head -1)" = "anyray-connect $VERSION"
+          test "$(sudo -H -u "$test_user" "$engine" --version | head -1)" = "anyray-connect $VERSION"
           # Use a shared readable script path; the runner checkout may be private.
           smoke_script="$(mktemp /tmp/anyray-desktop-smoke.XXXXXX)"
           cp scripts/smoke-connect-desktop-macos.py "$smoke_script"
@@ -662,9 +812,17 @@ jobs:
             rm -f "$smoke_script"
             exit 1
           fi
-          sudo rm -rf "$installed_app"
-          owns_app=false
+          sudo "$uninstall"
           sudo test ! -e "$installed_app"
+          sudo test ! -e "$launcher"
+          sudo test ! -L "$launcher"
+          sudo test ! -e "$credential_helper"
+          sudo test ! -e "$bootstrap_helper"
+          sudo test ! -e /usr/local/lib/anyray-connect
+          if pkgutil --pkg-info ai.anyray.connect-tray >/dev/null 2>&1; then
+            echo '::error::uninstall left the PKG receipt behind'
+            exit 1
+          fi
 
   teardown-mac:
     needs: [provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed]
@@ -1739,12 +1897,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p assets
-          cp platform/macos/*.dmg assets/
+          cp platform/macos/*.pkg assets/
           cp platform/macos/*.app.tar.gz assets/
           cp platform/windows-inner/*.exe assets/
           cp platform/windows-installer/*.msi assets/
           cp platform/linux/* assets/
-          test "$(find assets -maxdepth 1 -type f -name '*.dmg' | wc -l)" -eq 1
+          test "$(find assets -maxdepth 1 -type f -name '*.pkg' | wc -l)" -eq 1
+          test "$(find assets -maxdepth 1 -type f -name '*.dmg' | wc -l)" -eq 0
           test "$(find assets -maxdepth 1 -type f -name '*.app.tar.gz' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -type f -name '*windows*x64*.exe' | wc -l)" -eq 2
           test "$(find assets -maxdepth 1 -type f -name '*windows*x64.msi' | wc -l)" -eq 1

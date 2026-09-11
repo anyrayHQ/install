@@ -1,0 +1,87 @@
+#!/bin/bash
+set -euo pipefail
+
+engine='/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'
+launcher='/usr/local/bin/anyray-connect'
+lib_dir='/usr/local/lib/anyray-connect'
+credential_helper='/usr/local/bin/anyray-credential-helper'
+bootstrap_helper='/usr/local/bin/anyray-bootstrap-headers-helper'
+temporary_helper=''
+complete=false
+cleanup_outputs=false
+
+cleanup() {
+  if [ -n "$temporary_helper" ]; then
+    /bin/rm -f "$temporary_helper"
+  fi
+  if [ "$complete" = false ] && [ "$cleanup_outputs" = true ]; then
+    if [ -L "$launcher" ] && [ "$(/usr/bin/readlink "$launcher")" = "$engine" ]; then
+      /bin/rm -f "$launcher"
+    fi
+    for helper in "$credential_helper" "$bootstrap_helper"; do
+      if [ -f "$helper" ] \
+        && /usr/bin/grep -q 'Managed by anyray-connect desktop helper' "$helper"; then
+        /bin/rm -f "$helper"
+      fi
+    done
+  fi
+}
+trap cleanup EXIT
+
+if [ ! -x "$engine" ]; then
+  echo "installed Anyray Connect engine is missing or not executable: $engine" >&2
+  exit 1
+fi
+if [ ! -x "$lib_dir/uninstall.sh" ]; then
+  echo "Anyray Connect uninstaller is missing or not executable: $lib_dir/uninstall.sh" >&2
+  exit 1
+fi
+
+/bin/mkdir -p /usr/local/bin
+if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+  if [ ! -L "$launcher" ] || [ "$(/usr/bin/readlink "$launcher")" != "$engine" ]; then
+    echo "refusing to overwrite foreign $launcher" >&2
+    exit 1
+  fi
+  /bin/rm -f "$launcher"
+fi
+cleanup_outputs=true
+/bin/ln -s "$engine" "$launcher"
+
+for wrapper in credential bootstrap-headers; do
+  case "$wrapper" in
+    credential) helper="$credential_helper" ;;
+    bootstrap-headers) helper="$bootstrap_helper" ;;
+  esac
+  if [ -e "$helper" ] || [ -L "$helper" ]; then
+    if ! { [ -f "$helper" ] && /usr/bin/grep -q 'Managed by anyray-connect desktop helper' "$helper"; }; then
+      echo "refusing to overwrite foreign $helper" >&2
+      exit 1
+    fi
+  fi
+  temporary_helper="$(/usr/bin/mktemp "${helper}.XXXXXX")"
+  "$engine" desktop helper --print \
+    --platform posix \
+    --wrapper "$wrapper" \
+    --bin "$launcher" > "$temporary_helper"
+  /bin/chmod 0755 "$temporary_helper"
+  /bin/sh -n "$temporary_helper"
+  /usr/bin/head -1 "$temporary_helper" | /usr/bin/grep -qx '#!/bin/sh'
+  /usr/bin/grep -q 'Managed by anyray-connect desktop helper' "$temporary_helper"
+  /usr/bin/grep -Fq "$launcher" "$temporary_helper"
+  /bin/mv -f "$temporary_helper" "$helper"
+  temporary_helper=''
+done
+
+[ -L "$launcher" ]
+[ "$(/usr/bin/readlink "$launcher")" = "$engine" ]
+[ -x "$launcher" ]
+for helper in \
+  /usr/local/bin/anyray-credential-helper \
+  /usr/local/bin/anyray-bootstrap-headers-helper; do
+  [ -x "$helper" ]
+  /bin/sh -n "$helper"
+done
+[ -x "$lib_dir/uninstall.sh" ]
+# Sweep postconditions (retired receipts, managed-enroll LaunchAgent, fleetd daemon) land with the preinstall sweep PR.
+complete=true

@@ -10,14 +10,6 @@ const macSmoke = readFileSync(
   new URL('./smoke-connect-desktop-macos.py', import.meta.url),
   'utf8'
 );
-const macPostinstall = readFileSync(
-  new URL('./desktop-pkg/postinstall', import.meta.url),
-  'utf8'
-);
-const macUninstall = readFileSync(
-  new URL('./desktop-pkg/uninstall.sh', import.meta.url),
-  'utf8'
-);
 
 const job = (name) => {
   const marker = `  ${name}:\n`;
@@ -166,7 +158,7 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(preflight, /APPLE_INSTALLER_CERT_PASSWORD: \$\{\{ secrets\.APPLE_INSTALLER_CERT_PASSWORD \}\}/);
 
     const sign = job('sign-macos');
-    assert.match(sign, /scripts\/desktop-pkg/);
+    assert.match(sign, /unsigned\/pkg-scripts/);
     assert.match(sign, /ditto "\$app" "\$root\/Applications\/Anyray Connect\.app"/);
     assert.match(sign, /--identifier ai\.anyray\.connect-tray/);
     assert.match(sign, /plutil -replace 0\.BundleIsRelocatable -bool false "\$component_plist"/);
@@ -290,26 +282,33 @@ describe('desktop staging workflow safety contract', () => {
   });
 });
 
-test('macOS package scripts create, verify, and remove only owned launchers', () => {
-  for (const script of [macPostinstall, macUninstall]) {
-    assert.match(script, /^#!\/bin\/bash\nset -euo pipefail\n/);
-  }
-  assert.match(macPostinstall, /refusing to overwrite foreign \$launcher/);
-  assert.match(macPostinstall, /refusing to overwrite foreign \$helper/);
-  assert.match(macPostinstall, /desktop helper --print/);
-  assert.match(macPostinstall, /--wrapper "\$wrapper"/);
-  assert.match(macPostinstall, /--bin "\$launcher"/);
-  assert.match(macPostinstall, /\/bin\/sh -n "\$helper"/);
-  assert.match(macPostinstall, /\$lib_dir\/uninstall\.sh/);
-  assert.doesNotMatch(macPostinstall, /ai\.anyray\.connect com\.fleetdm\.orbit\.base\.pkg/);
-  assert.doesNotMatch(macPostinstall, /\/Library\/LaunchAgents\/ai\.anyray\.connect\.managed-enroll\.plist/);
-  assert.doesNotMatch(macPostinstall, /launchctl print system\/com\.fleetdm\.orbit/);
-  assert.match(macUninstall, /launchctl asuser "\$uid"/);
-  assert.match(macUninstall, /uninstall --user --json/);
-  assert.match(macUninstall, /--help 2>\/dev\/null \| \/usr\/bin\/grep -Eq '\^\[\[:space:\]\]\*uninstall\[\[:space:\]\]'/);
-  assert.match(macUninstall, /engine predates the uninstall verb/);
-  assert.match(macUninstall, /leaving foreign \$launcher untouched/);
-  assert.match(macUninstall, /pkgutil --forget "\$receipt"/);
+test('macOS pkg scripts ride the unsigned artifact from the monorepo source checkout', () => {
+  const build = job('build-macos-unsigned');
+  assert.match(
+    build,
+    /test -f private-source\/connect-tray\/src-tauri\/macos\/postinstall/
+  );
+  assert.match(
+    build,
+    /test -f private-source\/connect-tray\/src-tauri\/macos\/uninstall\.sh/
+  );
+  assert.match(
+    build,
+    /cp private-source\/connect-tray\/src-tauri\/macos\/postinstall out\/pkg-scripts\/postinstall/
+  );
+  assert.match(
+    build,
+    /cp private-source\/connect-tray\/src-tauri\/macos\/uninstall\.sh out\/pkg-scripts\/uninstall\.sh/
+  );
+  assert.match(build, /path: out\/connect-desktop-unsigned\.zip out\/pkg-scripts/);
+
+  const sign = job('sign-macos');
+  assert.match(sign, /pkg_scripts_src="unsigned\/pkg-scripts"/);
+  assert.match(sign, /"\$pkg_scripts_src\/postinstall"/);
+  assert.match(sign, /"\$pkg_scripts_src\/uninstall\.sh"/);
+  assert.doesNotMatch(sign, /sparse-checkout:[\s\S]*scripts\/desktop-pkg/);
+
+  assert.doesNotMatch(workflow, /scripts\/desktop-pkg/);
 });
 
 test('desktop staging assets contain one PKG, one updater tarball, and no DMG', () => {

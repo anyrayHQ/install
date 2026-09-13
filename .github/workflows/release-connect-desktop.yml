@@ -371,8 +371,10 @@ jobs:
           set -euo pipefail
           mkdir -p out/pkg-scripts
           # Rides with the artifact so the pkg is built from the same source SHA as the app.
+          test -f private-source/connect-tray/src-tauri/macos/preinstall
           test -f private-source/connect-tray/src-tauri/macos/postinstall
           test -f private-source/connect-tray/src-tauri/macos/uninstall.sh
+          cp private-source/connect-tray/src-tauri/macos/preinstall out/pkg-scripts/preinstall
           cp private-source/connect-tray/src-tauri/macos/postinstall out/pkg-scripts/postinstall
           cp private-source/connect-tray/src-tauri/macos/uninstall.sh out/pkg-scripts/uninstall.sh
 
@@ -380,7 +382,7 @@ jobs:
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-unsigned
-          path: out/connect-desktop-unsigned.zip out/pkg-scripts
+          path: out/connect-desktop-unsigned.zip out/pkg-scripts/preinstall out/pkg-scripts/postinstall out/pkg-scripts/uninstall.sh
           if-no-files-found: error
 
   sign-macos:
@@ -537,17 +539,18 @@ jobs:
             "$scripts"
           ditto "$app" "$root/Applications/Anyray Connect.app"
 
-          pkg_scripts_src="unsigned/pkg-scripts"
-          test -f "$pkg_scripts_src/postinstall"
-          test -f "$pkg_scripts_src/uninstall.sh"
-          for pkg_script in "$pkg_scripts_src/postinstall" "$pkg_scripts_src/uninstall.sh"; do
+          test -f unsigned/preinstall
+          test -f unsigned/postinstall
+          test -f unsigned/uninstall.sh
+          for pkg_script in unsigned/preinstall unsigned/postinstall unsigned/uninstall.sh; do
             /bin/sh -n "$pkg_script"
             head -1 "$pkg_script" | grep -qx '#!/bin/sh'
             grep -q 'Managed by anyray-connect desktop helper' "$pkg_script"
           done
-          install -m 0755 "$pkg_scripts_src/uninstall.sh" \
+          install -m 0755 unsigned/uninstall.sh \
             "$root/usr/local/lib/anyray-connect/uninstall.sh"
-          install -m 0755 "$pkg_scripts_src/postinstall" "$scripts/postinstall"
+          install -m 0755 unsigned/preinstall "$scripts/preinstall"
+          install -m 0755 unsigned/postinstall "$scripts/postinstall"
 
           pkgbuild --analyze --root "$root" "$component_plist"
           plutil -replace 0.BundleIsRelocatable -bool false "$component_plist"
@@ -780,8 +783,8 @@ jobs:
             exit 1
           fi
           sudo cmp "$foreign" "$launcher"
-          # The installer has no rollback: the bundle payload is already on disk when postinstall refuses.
-          sudo test -e "$installed_app"
+          # preinstall refuses before Installer writes the payload, so the bundle never lands.
+          sudo test ! -e "$installed_app"
           sudo test ! -L "$launcher"
           sudo test ! -e "$credential_helper"
           sudo test ! -e "$bootstrap_helper"

@@ -572,10 +572,16 @@ requires all of the following before source-controlled build code executes:
 - Tauri's macOS minimum is `13.0`. Signed pkg and updater bundle verification
   also checks the generated `LSMinimumSystemVersion`.
 
-The private checkout is local to that native job and is **never uploaded**.
-Only compiled executables and packages cross a job boundary. Provision a GitHub
-App installed only on the private monorepo, grant it repository Contents
-read-only, and set these install-repository secrets:
+The private checkout is local to that native job and is **never uploaded** as
+source. The one exception is the three macOS pkg maintainer scripts
+(`preinstall`, `postinstall`, `uninstall.sh`): they are plain POSIX shell, not
+compiled, and the unsigned build job copies them byte-identical from the
+reviewed source SHA into the unsigned macOS artifact so `sign-macos` can build
+the installer from them. They carry the same bucket, access, and retention as
+the compiled app in that artifact. No TypeScript or Rust source ever crosses a
+job boundary. Provision a GitHub App installed only on the private monorepo,
+grant it repository Contents read-only, and set these install-repository
+secrets:
 
 | Secret | Value |
 | --- | --- |
@@ -611,9 +617,9 @@ source or GitHub App credential:
 
 - **macOS:** `provision-mac` allocates the ephemeral CodeBuild Mac right after
   preflight; `build-macos-unsigned` compiles one unsigned universal `.app` on
-  it, then copies `postinstall` and `uninstall.sh` from the reviewed
-  `private-source/connect-tray/src-tauri/macos/` checkout into the unsigned
-  artifact's `pkg-scripts/` directory — those scripts are product behaviour
+  it, then copies `preinstall`, `postinstall`, and `uninstall.sh` from the
+  reviewed `private-source/connect-tray/src-tauri/macos/` checkout alongside
+  the unsigned app in the same artifact — those scripts are product behaviour
   and live in the monorepo next to their Windows and Linux installer twins,
   so this lane only carries them along, byte-identical, from the same source
   SHA as the app. The artifact-only `sign-macos` job signs the bundled Bun
@@ -621,7 +627,8 @@ source or GitHub App credential:
   outer app, requires Apple Team ID `V53XMA78UF` and bundle identifier
   `ai.anyray.connect-tray`, notarizes and staples it, packs the stapled app as
   a space-free `.app.tar.gz` for the updater, then builds a non-relocatable
-  installer `.pkg` from the downloaded `pkg-scripts/` (postinstall creates the
+  installer `.pkg` from the downloaded scripts (preinstall refuses foreign
+  launchers/shims before Installer writes the payload, postinstall creates the
   `/usr/local/bin` symlink and shims and installs `uninstall.sh`), signs it
   with the Developer ID Installer certificate, and notarizes and staples it. A
   credential-free `verify-macos-signed` job on the same fleet installs and

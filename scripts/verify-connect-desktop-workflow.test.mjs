@@ -158,7 +158,10 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(preflight, /APPLE_INSTALLER_CERT_PASSWORD: \$\{\{ secrets\.APPLE_INSTALLER_CERT_PASSWORD \}\}/);
 
     const sign = job('sign-macos');
-    assert.match(sign, /unsigned\/pkg-scripts/);
+    assert.match(sign, /unsigned\/preinstall/);
+    assert.match(sign, /unsigned\/postinstall/);
+    assert.match(sign, /unsigned\/uninstall\.sh/);
+    assert.doesNotMatch(sign, /unsigned\/pkg-scripts/);
     assert.match(sign, /ditto "\$app" "\$root\/Applications\/Anyray Connect\.app"/);
     assert.match(sign, /--identifier ai\.anyray\.connect-tray/);
     assert.match(sign, /plutil -replace 0\.BundleIsRelocatable -bool false "\$component_plist"/);
@@ -218,6 +221,10 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$app\/Contents\/Info\.plist"\)" = '13\.0'/);
     assert.match(mac, /installer -pkg "\$pkg" -target \//);
     assert.match(mac, /cmp "\$foreign" "\$launcher"/);
+    assert.match(
+      mac,
+      /cmp "\$foreign" "\$launcher"\s*\n\s*#[^\n]*\n\s*sudo test ! -e "\$installed_app"/
+    );
     assert.match(mac, /readlink "\$launcher"/);
     assert.match(mac, /smoke-connect-desktop-macos.py/);
     assert.match(mac, /launchctl asuser/);
@@ -284,28 +291,30 @@ describe('desktop staging workflow safety contract', () => {
 
 test('macOS pkg scripts ride the unsigned artifact from the monorepo source checkout', () => {
   const build = job('build-macos-unsigned');
+  for (const script of ['preinstall', 'postinstall', 'uninstall.sh']) {
+    assert.match(
+      build,
+      new RegExp(
+        `test -f private-source/connect-tray/src-tauri/macos/${script.replace('.', '\\.')}`
+      )
+    );
+    assert.match(
+      build,
+      new RegExp(
+        `cp private-source/connect-tray/src-tauri/macos/${script.replace('.', '\\.')} out/pkg-scripts/${script.replace('.', '\\.')}`
+      )
+    );
+  }
   assert.match(
     build,
-    /test -f private-source\/connect-tray\/src-tauri\/macos\/postinstall/
+    /path: out\/connect-desktop-unsigned\.zip out\/pkg-scripts\/preinstall out\/pkg-scripts\/postinstall out\/pkg-scripts\/uninstall\.sh/
   );
-  assert.match(
-    build,
-    /test -f private-source\/connect-tray\/src-tauri\/macos\/uninstall\.sh/
-  );
-  assert.match(
-    build,
-    /cp private-source\/connect-tray\/src-tauri\/macos\/postinstall out\/pkg-scripts\/postinstall/
-  );
-  assert.match(
-    build,
-    /cp private-source\/connect-tray\/src-tauri\/macos\/uninstall\.sh out\/pkg-scripts\/uninstall\.sh/
-  );
-  assert.match(build, /path: out\/connect-desktop-unsigned\.zip out\/pkg-scripts/);
 
   const sign = job('sign-macos');
-  assert.match(sign, /pkg_scripts_src="unsigned\/pkg-scripts"/);
-  assert.match(sign, /"\$pkg_scripts_src\/postinstall"/);
-  assert.match(sign, /"\$pkg_scripts_src\/uninstall\.sh"/);
+  assert.match(sign, /test -f unsigned\/preinstall/);
+  assert.match(sign, /test -f unsigned\/postinstall/);
+  assert.match(sign, /test -f unsigned\/uninstall\.sh/);
+  assert.doesNotMatch(workflow, /unsigned\/pkg-scripts/);
   assert.doesNotMatch(sign, /sparse-checkout:[\s\S]*scripts\/desktop-pkg/);
 
   assert.doesNotMatch(workflow, /scripts\/desktop-pkg/);

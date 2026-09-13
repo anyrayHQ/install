@@ -1285,14 +1285,14 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-signed
           path: installer
-      - name: Verify, install, execute, and uninstall without touching CLI state
+      - name: Verify refusal, install layout, execute, and uninstall without touching CLI state
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
           $PSNativeCommandUseErrorActionPreference = $true
-          $inner = @(Get-ChildItem inner -Filter '*.exe')
-          $installers = @(Get-ChildItem installer -Filter '*.msi')
+          $inner = @(Get-ChildItem -LiteralPath 'inner' -Filter '*.exe')
+          $installers = @(Get-ChildItem -LiteralPath 'installer' -Filter '*.msi')
           if ($inner.Count -ne 2) { throw "expected two signed inner executables, found $($inner.Count)" }
           if ($installers.Count -ne 1) { throw "expected one signed MSI, found $($installers.Count)" }
           $inner | ForEach-Object {
@@ -1301,7 +1301,7 @@ jobs:
           $installers | ForEach-Object {
             ./scripts/verify-authenticode-windows.ps1 -Path $_.FullName
           }
-          $engine = Resolve-Path 'inner/anyray-connect-engine-windows-x64.exe'
+          $engine = Resolve-Path -LiteralPath 'inner/anyray-connect-engine-windows-x64.exe'
           $line = (& $engine --version | Select-Object -First 1)
           if ($line -ne "anyray-connect $env:VERSION") { throw "signed engine version mismatch: $line" }
 
@@ -1309,11 +1309,11 @@ jobs:
           $state = Join-Path $existingHome '.anyray\connect.json'
           $scheduler = Join-Path $existingHome 'AppData\Roaming\Anyray\anyray-connect-refresh.scheduler-sentinel'
           New-Item -ItemType Directory -Force -Path (Split-Path $state),(Split-Path $scheduler) | Out-Null
-          Set-Content -NoNewline -Path $state -Value '{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true}'
-          Set-Content -NoNewline -Path $scheduler -Value 'existing-scheduler-sentinel'
+          Set-Content -NoNewline -LiteralPath $state -Value '{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true}'
+          Set-Content -NoNewline -LiteralPath $scheduler -Value 'existing-scheduler-sentinel'
           $profileBefore = Join-Path $env:RUNNER_TEMP 'connect-desktop-profile-before.json'
-          Copy-Item $state $profileBefore
-          $schedulerBefore = (Get-FileHash $scheduler -Algorithm SHA256).Hash
+          Copy-Item -LiteralPath $state -Destination $profileBefore
+          $schedulerBefore = (Get-FileHash -LiteralPath $scheduler -Algorithm SHA256).Hash
           $env:HOME = $existingHome
           $env:USERPROFILE = $existingHome
           $env:APPDATA = Join-Path $existingHome 'AppData\Roaming'
@@ -1321,17 +1321,78 @@ jobs:
 
           $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
           $runName = 'ai.anyray.connect-tray'
-          if (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue) {
+          if (Get-ItemProperty -LiteralPath $runKey -Name $runName -ErrorAction SilentlyContinue) {
             throw "test-owned desktop autostart registry value already exists: $runName"
           }
 
           $msi = $installers[0].FullName
-          $installDir = Join-Path $env:RUNNER_TEMP 'connect-desktop-installed'
+          $installDir = Join-Path $env:ProgramFiles 'Anyray'
+          $installedEnginePath = Join-Path $installDir 'anyray-connect.exe'
+          $installedMainPath = Join-Path $installDir 'connect-tray.exe'
+          $credentialShim = Join-Path $installDir 'anyray-credential-helper.cmd'
+          $bootstrapShim = Join-Path $installDir 'anyray-bootstrap-headers-helper.cmd'
+          $uninstallScript = Join-Path $installDir 'uninstall.ps1'
+          $helperMarker = 'Managed by anyray-connect desktop helper; do not edit.'
           $log = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi.log'
+          $foreignLog = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi-foreign.log'
           $installed = $false
           $appProcess = $null
           $createdRunKey = $false
+
+          function Test-MachinePathEntry {
+            param([Parameter(Mandatory = $true)][string]$ExpectedPath)
+
+            $machinePath = [Environment]::GetEnvironmentVariable(
+              'Path', [System.EnvironmentVariableTarget]::Machine
+            )
+            if ([string]::IsNullOrWhiteSpace($machinePath)) { return $false }
+            $expected = $ExpectedPath.TrimEnd('\')
+            foreach ($entry in $machinePath -split ';') {
+              if ([string]::Equals(
+                $entry.Trim().TrimEnd('\'), $expected,
+                [StringComparison]::OrdinalIgnoreCase
+              )) { return $true }
+            }
+            return $false
+          }
+
           try {
+            if (Test-Path -LiteralPath $installDir) {
+              throw "Windows install smoke requires an absent install directory: $installDir"
+            }
+            if (Test-MachinePathEntry -ExpectedPath $installDir) {
+              throw "Windows install smoke found a pre-existing machine PATH entry: $installDir"
+            }
+            New-Item -ItemType Directory -Path $installDir | Out-Null
+            Set-Content -NoNewline -LiteralPath $installedEnginePath -Value 'foreign-engine-sentinel'
+            $foreignSignature = Get-AuthenticodeSignature -LiteralPath $installedEnginePath
+            if ($foreignSignature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "foreign engine fixture is not Authenticode-unsigned: $($foreignSignature.Status)"
+            }
+            $foreignHash = (Get-FileHash -LiteralPath $installedEnginePath -Algorithm SHA256).Hash
+            $foreignInstallArgs = @(
+              '/i', "`"$msi`"", '/qn', '/norestart', '/L*v', "`"$foreignLog`""
+            )
+            $foreignInstall = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
+              -ArgumentList $foreignInstallArgs
+            if ($foreignInstall.ExitCode -in 0,3010) { $installed = $true }
+            if ($foreignInstall.ExitCode -ne 1603) {
+              Get-Content -LiteralPath $foreignLog -Tail 80 -ErrorAction SilentlyContinue
+              throw "MSI foreign-engine refusal returned exit $($foreignInstall.ExitCode), expected 1603"
+            }
+            if (-not (Test-Path -LiteralPath $installedEnginePath -PathType Leaf)) {
+              throw 'MSI foreign-engine refusal removed the foreign engine'
+            }
+            if ((Get-FileHash -LiteralPath $installedEnginePath -Algorithm SHA256).Hash -ne $foreignHash) {
+              throw 'MSI foreign-engine refusal changed the foreign engine'
+            }
+            Remove-Item -LiteralPath $installedEnginePath
+            Set-Content -LiteralPath $credentialShim -Value @(
+              '@echo off'
+              "REM $helperMarker"
+              'echo stale-helper-sentinel'
+            )
+
             # auto-launch opens this standard desktop key; it does not create it.
             # Minimal Windows runner profiles may not have an Explorer Run key.
             $runKeyExisted = Test-Path -LiteralPath $runKey
@@ -1346,32 +1407,50 @@ jobs:
             )
             if ($null -eq $runHandle) { throw 'Windows runner cannot open HKCU Run for autostart' }
             $runHandle.Dispose()
-            $proc = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
-              '/i', "`"$msi`"", '/qn', '/norestart',
-              "INSTALLDIR=`"$installDir`"", "/L*v", "`"$log`""
+            $installArgs = @(
+              '/i', "`"$msi`"", '/qn', '/norestart', '/L*v', "`"$log`""
             )
+            $proc = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
+              -ArgumentList $installArgs
             if ($proc.ExitCode -notin 0,3010) {
-              Get-Content $log -Tail 80 -ErrorAction SilentlyContinue
+              Get-Content -LiteralPath $log -Tail 80 -ErrorAction SilentlyContinue
               throw "MSI install failed with exit $($proc.ExitCode)"
             }
             $installed = $true
-            $installedEngine = Get-ChildItem $installDir -Recurse -Filter 'anyray-connect.exe' |
-              Select-Object -First 1
-            $installedMain = Get-ChildItem $installDir -Recurse -Filter 'connect-tray.exe' |
-              Select-Object -First 1
-            if (-not $installedEngine) { throw 'installed MSI has no bundled anyray-connect.exe' }
-            if (-not $installedMain) { throw 'installed MSI has no connect-tray.exe' }
+            $installedEngine = Get-Item -LiteralPath $installedEnginePath -ErrorAction SilentlyContinue
+            $installedMain = Get-Item -LiteralPath $installedMainPath -ErrorAction SilentlyContinue
+            if ($null -eq $installedEngine) { throw "installed MSI has no engine at $installedEnginePath" }
+            if ($null -eq $installedMain) { throw "installed MSI has no tray at $installedMainPath" }
             # Compare the actual MSI payload, not just Tauri's restored input.
             foreach ($pair in @(
               @($installedMain.FullName, 'inner/anyray-connect-tray-windows-x64.exe'),
               @($installedEngine.FullName, 'inner/anyray-connect-engine-windows-x64.exe')
             )) {
-              if ((Get-FileHash $pair[0] -Algorithm SHA256).Hash -ne (Get-FileHash $pair[1] -Algorithm SHA256).Hash) {
+              if ((Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $pair[1] -Algorithm SHA256).Hash) {
                 throw "MSI changed signed payload: $($pair[0])"
               }
             }
             ./scripts/verify-authenticode-windows.ps1 -Path $installedEngine.FullName
             ./scripts/verify-authenticode-windows.ps1 -Path $installedMain.FullName
+            foreach ($helperPath in @($credentialShim, $bootstrapShim)) {
+              if (-not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
+                throw "installed MSI has no managed helper shim: $helperPath"
+              }
+              $helperHead = @(Get-Content -LiteralPath $helperPath -TotalCount 2)
+              if ($helperHead.Count -ne 2 -or $helperHead[0] -ne '@echo off' -or $helperHead[1] -ne "REM $helperMarker") {
+                throw "installed helper shim has no management marker: $helperPath"
+              }
+              $helperContent = Get-Content -Raw -LiteralPath $helperPath
+              if ($helperContent.IndexOf($installedEnginePath, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                throw "installed helper shim does not reference the engine path: $helperPath"
+              }
+            }
+            if (-not (Test-MachinePathEntry -ExpectedPath $installDir)) {
+              throw "installed MSI did not add the install directory to machine PATH: $installDir"
+            }
+            if (-not (Test-Path -LiteralPath $uninstallScript -PathType Leaf)) {
+              throw "installed MSI has no uninstall script at $uninstallScript"
+            }
             $engineTimer = [Diagnostics.Stopwatch]::StartNew()
             $installedVersion = (& $installedEngine.FullName --version | Select-Object -First 1)
             $engineTimer.Stop()
@@ -1387,12 +1466,14 @@ jobs:
               if ($appProcess.HasExited) {
                 throw 'installed Windows tray exited before creating autostart state'
               }
-              $runValue = Get-ItemPropertyValue -Path $runKey -Name $runName `
+              $runValue = Get-ItemPropertyValue -LiteralPath $runKey -Name $runName `
                 -ErrorAction SilentlyContinue
               # The tray may be mid-write; a torn read means "not yet", not failure.
-              try { $observedProfile = Get-Content -Raw $state | ConvertFrom-Json }
+              try { $observedProfile = Get-Content -Raw -LiteralPath $state | ConvertFrom-Json }
               catch { $observedProfile = $null }
-              if ($null -ne $runValue -and $observedProfile.loginRegistrationState -eq 'enabled') { break }
+              $profileReady = $null -ne $observedProfile -and `
+                $observedProfile.loginRegistrationState -eq 'enabled'
+              if ($null -ne $runValue -and $profileReady) { break }
               Start-Sleep -Seconds 1
               $appProcess.Refresh()
             }
@@ -1411,8 +1492,8 @@ jobs:
             $appProcess = $null
 
             node scripts/verify-desktop-profile.mjs $profileBefore $state $installedEngine.FullName $installedMain.DirectoryName
-            $stateBefore = (Get-FileHash $state -Algorithm SHA256).Hash
-            if ((Get-FileHash $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
+            $stateBefore = (Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash
+            if ((Get-FileHash -LiteralPath $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
               throw 'running the installed tray changed the existing scheduler sentinel'
             }
           }
@@ -1423,7 +1504,7 @@ jobs:
             }
             # The tray owns this exact test-created Run value; MSI uninstall
             # is not expected to remove per-user autostart state.
-            Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+            Remove-ItemProperty -LiteralPath $runKey -Name $runName -ErrorAction SilentlyContinue
             if ($createdRunKey) {
               $remaining = Get-Item -LiteralPath $runKey -ErrorAction SilentlyContinue
               if ($null -ne $remaining -and $remaining.ValueCount -eq 0 -and $remaining.SubKeyCount -eq 0) {
@@ -1431,21 +1512,42 @@ jobs:
               }
             }
             if ($installed) {
-              $remove = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+              $uninstallArgs = @(
                 '/x', "`"$msi`"", '/qn', '/norestart'
               )
+              $remove = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
+                -ArgumentList $uninstallArgs
               if ($remove.ExitCode -notin 0,3010) {
                 throw "MSI uninstall failed with exit $($remove.ExitCode)"
               }
             }
+            elseif (Test-Path -LiteralPath $installDir) {
+              # A failure before the clean install leaves the planted foreign-engine/stale-shim
+              # fixtures behind; a reused runner's next attempt requires an absent install directory.
+              Remove-Item -LiteralPath $installDir -Recurse -Force
+            }
           }
-          if (Get-ChildItem $installDir -Recurse -Include 'connect-tray.exe','anyray-connect.exe' -ErrorAction SilentlyContinue) {
+          if (Test-Path -LiteralPath $installedMainPath -PathType Leaf) {
+            throw 'MSI uninstall left the desktop tray executable behind'
+          }
+          if (Test-Path -LiteralPath $installedEnginePath -PathType Leaf) {
             throw 'MSI uninstall left a desktop executable behind'
           }
-          if ((Get-FileHash $state -Algorithm SHA256).Hash -ne $stateBefore) {
+          foreach ($helperPath in @($credentialShim, $bootstrapShim)) {
+            if (Test-Path -LiteralPath $helperPath -PathType Leaf) {
+              throw "MSI uninstall left a managed helper shim behind: $helperPath"
+            }
+          }
+          if (Test-Path -LiteralPath $uninstallScript -PathType Leaf) {
+            throw "MSI uninstall left the uninstall script behind: $uninstallScript"
+          }
+          if (Test-MachinePathEntry -ExpectedPath $installDir) {
+            throw "MSI uninstall left the install directory in machine PATH: $installDir"
+          }
+          if ((Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash -ne $stateBefore) {
             throw 'MSI install/uninstall changed existing CLI state'
           }
-          if ((Get-FileHash $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
+          if ((Get-FileHash -LiteralPath $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
             throw 'MSI install/uninstall changed the existing scheduler sentinel'
           }
 

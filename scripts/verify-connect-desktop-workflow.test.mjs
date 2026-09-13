@@ -10,6 +10,10 @@ const macSmoke = readFileSync(
   new URL('./smoke-connect-desktop-macos.py', import.meta.url),
   'utf8'
 );
+const fleetFixture = readFileSync(
+  new URL('./build-desktop-fleet-osquery-fixtures.sh', import.meta.url),
+  'utf8'
+);
 
 const job = (name) => {
   const marker = `  ${name}:\n`;
@@ -239,12 +243,12 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(windows, /MSI uninstall failed/);
 
     const linux = job('smoke-linux-installers');
-    assert.match(linux, /\$SUDO dpkg -i/);
+    assert.match(linux, /as_root dpkg -i/);
     assert.match(linux, /smoke_installed_tray "\$deb_main"/);
-    assert.match(linux, /\$SUDO dpkg -r/);
-    assert.match(linux, /\$SUDO rpm --dbpath "\$rpm_database" -i/);
+    assert.match(linux, /"\$uninstall"/);
+    assert.match(linux, /as_root rpm --dbpath "\$rpm_database" -i/);
     assert.match(linux, /smoke_installed_tray "\$rpm_main"/);
-    assert.match(linux, /\$SUDO rpm --dbpath "\$rpm_database" -e/);
+    assert.match(linux, /as_root rpm --dbpath "\$rpm_database" -e/);
     assert.match(linux, /ai\.anyray\.connect-tray\.desktop/);
     assert.match(linux, /dbus-run-session -- xvfb-run -a "\$main"/);
     assert.match(linux, /kill -KILL -- "-\$tray_pid"/);
@@ -368,7 +372,8 @@ test('every native build and bundle uses the pinned child-process toolchain laun
 
 test('Linux adoption smoke uses a real dedicated account and checks owner state', () => {
   const linux = job('smoke-linux-installers');
-  assert.match(linux, /useradd/);
+  assert.match(linux, /account=tester\n\s*existing_home=\/home\/tester/);
+  assert.match(linux, /useradd --create-home/);
   assert.match(linux, /runuser -u/);
   assert.match(linux, /runuser -u "\$account" -- env \\\n+              HOME="\$existing_home" \\\n+              XDG_CONFIG_HOME="\$existing_home\/\.config" \\\n+              XDG_DATA_HOME="\$existing_home\/\.local\/share" \\\n+              XDG_RUNTIME_DIR="\$existing_home\/\.runtime"/);
   assert.match(linux, /engineOwner/);
@@ -386,20 +391,19 @@ test('every smoke allows exactly the verifier\'s ownership fields to change', ()
   assert.deepEqual(linux, fields);
 });
 
-test('Linux package install and uninstall leave pre-existing CLI state byte-identical', () => {
+test('Linux package replacement and native rpm removal leave pre-existing CLI state byte-identical', () => {
   const linux = job('smoke-linux-installers');
   assert.match(linux, /existing-scheduler-sentinel/);
   assert.match(linux, /existing-cli-sentinel/);
   const checkpoints = linux.match(/^\s*assert_existing_state_untouched$/gm) ?? [];
-  assert.equal(checkpoints.length, 6);
+  assert.equal(checkpoints.length, 5);
   let at = linux.indexOf('build-desktop-cli-migration-fixtures.sh');
   for (const step of [
-    '$SUDO dpkg -i "$cli_deb"',
+    'as_root dpkg -i "$cli_deb"',
     'apt-get install -y "$PWD/$deb"',
-    '$SUDO dpkg -r "$deb_name"',
-    'rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"',
-    'rpm --dbpath "$rpm_database" -U --nodeps "$rpm"',
-    'rpm --dbpath "$rpm_database" -e "$rpm_name"',
+    'as_root rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"',
+    'as_root rpm --dbpath "$rpm_database" -U --nodeps "$rpm"',
+    'as_root rpm --dbpath "$rpm_database" -e "$rpm_name"',
   ]) {
     at = linux.indexOf(step, at);
     assert.ok(at > 0, step);
@@ -427,13 +431,75 @@ test('macOS smoke uses a dedicated GUI account and native lifecycle assertions',
 test('Linux upgrades exercise an installed CLI package before the desktop replacement', () => {
   const linux = job('smoke-linux-installers');
   const fixtures = linux.indexOf('build-desktop-cli-migration-fixtures.sh');
-  const cliDeb = linux.indexOf('$SUDO dpkg -i "$cli_deb"');
+  const cliDeb = linux.indexOf('as_root dpkg -i "$cli_deb"');
   const deb = linux.indexOf('apt-get install -y "$PWD/$deb"');
-  const cliRpm = linux.indexOf('rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"');
-  const rpm = linux.indexOf('rpm --dbpath "$rpm_database" -U --nodeps "$rpm"');
+  const cliRpm = linux.indexOf('as_root rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"');
+  const rpm = linux.indexOf('as_root rpm --dbpath "$rpm_database" -U --nodeps "$rpm"');
   assert.ok(fixtures > 0 && fixtures < cliDeb && cliDeb < deb);
   assert.ok(deb < cliRpm && cliRpm < rpm);
   const bootstrapGone = 'test ! -e /etc/xdg/autostart/anyray-connect-managed-enroll.desktop';
   assert.ok(linux.indexOf(bootstrapGone, deb) < cliRpm);
   assert.ok(linux.indexOf(bootstrapGone, rpm) > rpm);
+});
+
+test('Linux fleet fixture builds deb and rpm from one nfpm YAML with no removal script', () => {
+  assert.match(fleetFixture, /^set -euo pipefail$/m);
+  assert.match(fleetFixture, /source ci\/nfpm-tool\.env/);
+  assert.match(fleetFixture, /NFPM_TOOL_VERSION/);
+  assert.match(fleetFixture, /NFPM_LINUX_X64_SHA256.*sha256sum -c -/s);
+  assert.match(fleetFixture, /name: fleet-osquery/);
+  assert.match(fleetFixture, /opt\/orbit\/bin\/orbit/);
+  assert.match(fleetFixture, /usr\/lib\/systemd\/system\/orbit\.service/);
+  assert.match(fleetFixture, /ExecStart=\/bin\/sleep infinity/);
+  assert.match(fleetFixture, /opt\/orbit\/osquery_log\/x\.log/);
+  assert.equal((fleetFixture.match(/NFPM_VERSION=0\.0\.1/g) ?? []).length, 1);
+  assert.equal((fleetFixture.match(/"\$fixture_root\/nfpm\.yaml"/g) ?? []).length, 3);
+  assert.match(fleetFixture, /nfpm" package -f "\$fixture_root\/nfpm\.yaml" -p deb -t/);
+  assert.match(fleetFixture, /nfpm" package -f "\$fixture_root\/nfpm\.yaml" -p rpm -t/);
+  assert.doesNotMatch(fleetFixture, /rpmbuild/);
+  assert.doesNotMatch(fleetFixture, /^\s*(preun|prerm):/m);
+});
+
+test('Linux smoke replaces planted fleet-osquery deb and rpm packages', () => {
+  const linux = job('smoke-linux-installers');
+  const fixture = linux.indexOf('build-desktop-fleet-osquery-fixtures.sh');
+  const fleetDeb = linux.indexOf('as_root dpkg -i "$fleet_deb"');
+  const desktopDeb = linux.indexOf('apt-get install -y "$PWD/$deb"');
+  const fleetRpm = linux.indexOf('as_root rpm --dbpath "$rpm_database" -i --nodeps "$fleet_rpm"');
+  const desktopRpm = linux.indexOf('as_root rpm --dbpath "$rpm_database" -U --nodeps "$rpm"');
+  assert.ok(fixture > 0 && fixture < fleetDeb && fleetDeb < desktopDeb);
+  assert.ok(desktopDeb < fleetRpm && fleetRpm < desktopRpm);
+  assert.match(linux, /systemctl enable --now orbit\.service/);
+  assert.match(linux, /systemd is unavailable; skipping the running orbit\.service assertion/);
+  assert.match(linux, /dpkg-query -W -f='\$\{db:Status-Status\}\\n' fleet-osquery/);
+  assert.match(linux, /rpm --dbpath "\$rpm_database" -q fleet-osquery/);
+  assert.equal((linux.match(/assert_orbit_removed/g) ?? []).length, 3);
+  assert.match(linux, /test -x "\$uninstall"/);
+  assert.match(linux, /dpkg -S \/usr\/bin\/anyray-connect/);
+  assert.match(linux, /rpm --dbpath "\$rpm_database" -qf --queryformat '%\{NAME\}' \/usr\/bin\/anyray-connect/);
+});
+
+test('Linux smoke runs uninstall.sh user cleanup before package removal', () => {
+  const linux = job('smoke-linux-installers');
+  assert.match(linux, /existing_home=\/home\/tester/);
+  assert.match(linux, /engine_help=.*"\$deb_engine" --help/);
+  // Verbatim against the verb regexes uninstall.sh itself uses, so the smoke's
+  // expectation cannot disagree with the script it validates.
+  assert.match(linux, /grep -Eq '\^\[\[:space:\]\]\*uninstall\[\[:space:\]\]'/);
+  assert.match(linux, /grep -Eq '\^\[\[:space:\]\]\*offboard\[\[:space:\]\]'/);
+  assert.match(linux, /expected_user_verb=uninstall/);
+  assert.match(linux, /expected_user_verb=offboard/);
+  assert.match(linux, /any-391-user-layer-marker/);
+  assert.doesNotMatch(linux, /strace/);
+  assert.match(linux, /uninstall_stdout="\$\(as_root "\$uninstall"\)"/);
+  assert.match(linux, /Linux uninstall helper left the desktop deb installed/);
+  const uninstallBranch = linux.indexOf('if [ "$expected_user_verb" = uninstall ]; then');
+  assert.ok(uninstallBranch > 0);
+  const uninstallGrep = linux.indexOf('grep -Fq \'"user":"complete"\'', uninstallBranch);
+  const anyrayGone = linux.indexOf('test ! -e "$existing_home/.anyray"', uninstallBranch);
+  assert.ok(uninstallGrep > uninstallBranch && uninstallGrep < anyrayGone);
+  const offboardGrep = linux.indexOf('grep -Fq \'"verb":"offboard"\'', anyrayGone);
+  const markerSurvives = linux.indexOf('test -f "$user_layer_marker"', anyrayGone);
+  assert.ok(offboardGrep > anyrayGone && offboardGrep < markerSurvives);
+  assert.match(linux, /test ! -e "\$uninstall"/);
 });

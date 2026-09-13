@@ -673,13 +673,21 @@ the real uninstall:
 - Windows silently installs the MSI into a temporary `INSTALLDIR` and validates
   the `ai.anyray.connect-tray` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
-- Ubuntu creates a throwaway Unix account, installs synthetic legacy CLI
-  deb/rpm packages built from `ci/nfpm.yaml` around the candidate engine
-  (test inputs, never release artifacts), replaces them with the desktop
-  package through the package manager, and validates
-  `$HOME/.config/autostart/ai.anyray.connect-tray.desktop`, including its
-  `[Desktop Entry]` header and installed executable path, plus removal of the
-  CLI bootstrap files.
+- Ubuntu runs as a fixed `tester` account it creates and removes each run. It
+  installs synthetic legacy CLI (from `ci/nfpm.yaml`) and `fleet-osquery`
+  (from its own YAML) deb/rpm packages, both built with the same pinned nfpm
+  (test inputs, never release artifacts), around the candidate engine,
+  replaces both with the desktop package through the package manager, and
+  validates that their records, the `orbit.service` unit, and `/opt/orbit`
+  are gone, `/usr/bin/anyray-connect` belongs to the desktop package, and
+  `$HOME/.config/autostart/ai.anyray.connect-tray.desktop` (header and
+  installed executable path) plus the CLI bootstrap files are as expected.
+  It then exercises the fleet uninstall helper
+  (`/usr/lib/anyray-connect/uninstall.sh`) end to end: the helper's own
+  `--json` output on stdout proves whether it ran the engine's `uninstall` or
+  `offboard` user-layer verb, and the desktop deb is gone afterward. The host
+  is Ubuntu (deb only), so this never exercises the rpm branch of
+  `uninstall.sh` (`dnf remove`).
 
 `npm run test:desktop-release` covers the workflow-shape and account-isolation
 regressions for these smokes.

@@ -1667,19 +1667,24 @@ jobs:
       - name: Install native package runtime and inspection tools
         run: |
           set -euo pipefail
-          SUDO=""
-          [ "$(id -u)" -ne 0 ] && SUDO=sudo
-          $SUDO apt-get update
-          $SUDO apt-get install -y --no-install-recommends \
+          as_root() {
+            if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
+          }
+          as_root apt-get update
+          as_root apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
             rpm xvfb xauth dbus-x11 procps passwd python3 curl ca-certificates
       - name: Verify signatures, install/uninstall deb and rpm, preserve CLI state
         run: |
           set -euo pipefail
+          as_root() {
+            if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
+          }
+          # setsid must exec directly (not through the as_root function) so $! captures its session leader.
           SUDO=""
           [ "$(id -u)" -ne 0 ] && SUDO=sudo
           rpm_database=/var/lib/rpm
-          $SUDO mkdir -p "$rpm_database"
+          as_root mkdir -p "$rpm_database"
           export GNUPGHOME="$RUNNER_TEMP/gv"
           mkdir -m 700 "$GNUPGHOME"
           gpg --batch --import signed/anyray-connect-desktop-signing-key.asc
@@ -1691,8 +1696,12 @@ jobs:
           done
 
           # A separate Unix account isolates OS user state as well as files.
-          account="anyray-smoke-$(id -u)-$$"
-          existing_home="$(mktemp -d /tmp/anyray-desktop-smoke.XXXXXX)"
+          account=tester
+          existing_home=/home/tester
+          if id "$account" >/dev/null 2>&1 || [ -e "$existing_home" ]; then
+            echo '::error::the Linux smoke requires an unused tester account and /home/tester'
+            exit 1
+          fi
           state="$existing_home/.anyray/connect.json"
           # A foreign unit beside connect's own (which a correct adopt may remove): nothing may touch it.
           scheduler="$existing_home/.config/systemd/user/anyray-refresh-sentinel.service"
@@ -1708,35 +1717,38 @@ jobs:
           rpm_installed=false
           cli_deb_installed=false
           cli_rpm_installed=false
+          fleet_deb_installed=false
+          fleet_rpm_installed=false
           account_created=false
           cleanup() {
-            if [ "$rpm_installed" = true ]; then $SUDO rpm --dbpath "$rpm_database" -e "$rpm_name" >/dev/null 2>&1 || true; fi
-            if [ "$deb_installed" = true ]; then $SUDO dpkg -r "$deb_name" >/dev/null 2>&1 || true; fi
-            if [ "$cli_deb_installed" = true ]; then $SUDO dpkg -r anyray-connect >/dev/null 2>&1 || true; fi
-            if [ "$cli_rpm_installed" = true ]; then $SUDO rpm --dbpath "$rpm_database" -e anyray-connect >/dev/null 2>&1 || true; fi
+            if [ "$rpm_installed" = true ]; then as_root rpm --dbpath "$rpm_database" -e "$rpm_name" >/dev/null 2>&1 || true; fi
+            if [ "$deb_installed" = true ]; then as_root dpkg -r "$deb_name" >/dev/null 2>&1 || true; fi
+            if [ "$cli_deb_installed" = true ]; then as_root dpkg -r anyray-connect >/dev/null 2>&1 || true; fi
+            if [ "$cli_rpm_installed" = true ]; then as_root rpm --dbpath "$rpm_database" -e anyray-connect >/dev/null 2>&1 || true; fi
+            if [ "$fleet_deb_installed" = true ]; then as_root dpkg -r fleet-osquery >/dev/null 2>&1 || true; fi
+            if [ "$fleet_rpm_installed" = true ]; then as_root rpm --dbpath "$rpm_database" -e fleet-osquery >/dev/null 2>&1 || true; fi
             if [ "$account_created" = true ]; then
-              $SUDO pkill -KILL -u "$account" >/dev/null 2>&1 || true
-              $SUDO userdel "$account" || true
+              as_root pkill -KILL -u "$account" >/dev/null 2>&1 || true
+              as_root userdel "$account" || true
             fi
-            $SUDO rm -rf "$existing_home"
+            as_root rm -rf "$existing_home"
           }
           trap cleanup EXIT
-          $SUDO useradd --no-create-home --home-dir "$existing_home" --shell /bin/bash "$account"
+          as_root useradd --create-home --home-dir "$existing_home" --shell /bin/bash "$account"
           account_created=true
-          $SUDO chown "$account" "$existing_home"
-          $SUDO runuser -u "$account" -- mkdir -p "$(dirname "$scheduler")" "$(dirname "$state")"
-          printf '%s\n' 'existing-scheduler-sentinel' | $SUDO runuser -u "$account" -- tee "$scheduler" >/dev/null
+          as_root runuser -u "$account" -- mkdir -p "$(dirname "$scheduler")" "$(dirname "$state")"
+          printf '%s\n' 'existing-scheduler-sentinel' | as_root runuser -u "$account" -- tee "$scheduler" >/dev/null
           # An unenrolled, opted-out CLI profile exercises native adoption without credentials.
           existing_profile='{"name":"existing-cli-sentinel","managedEnrollmentDisabled":true,"refreshSchedulerEnabled":false}'
           # The only keys adoption may add; mirrors ownerFields in verify-desktop-profile.mjs.
           owner_fields=appHandoverMaintenanceAt,appHandoverState,engineOwner,engineOwnerObservedAt,engineOwnerPath,legacyTrayRetirementState,loginRegistrationAttemptedAt,loginRegistrationObservedAt,loginRegistrationState,persistenceOwner,trayAppPath
-          printf '%s\n' "$existing_profile" | $SUDO runuser -u "$account" -- tee "$state" >/dev/null
-          scheduler_before="$($SUDO sha256sum "$scheduler")"
-          state_before="$($SUDO sha256sum "$state")"
+          printf '%s\n' "$existing_profile" | as_root runuser -u "$account" -- tee "$state" >/dev/null
+          scheduler_before="$(as_root sha256sum "$scheduler")"
+          state_before="$(as_root sha256sum "$state")"
           # Pre-existing CLI state a package (un)install must leave byte-identical.
           assert_existing_state_untouched() {
-            test "$($SUDO sha256sum "$scheduler")" = "$scheduler_before"
-            test "$($SUDO sha256sum "$state")" = "$state_before"
+            test "$(as_root sha256sum "$scheduler")" = "$scheduler_before"
+            test "$(as_root sha256sum "$state")" = "$state_before"
           }
 
           smoke_installed_tray() (
@@ -1816,54 +1828,140 @@ jobs:
             test "$($SUDO sha256sum "$scheduler")" = "$scheduler_before"
           )
 
-          fixture_root="$RUNNER_TEMP/connect-desktop-cli-fixtures"
+          orbit_service_started=false
+          start_orbit_service_if_available() {
+            orbit_service_started=false
+            if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+              as_root systemctl daemon-reload
+              as_root systemctl enable --now orbit.service
+              as_root systemctl is-active --quiet orbit.service
+              orbit_service_started=true
+            else
+              echo '::notice::systemd is unavailable; skipping the running orbit.service assertion'
+            fi
+          }
+          assert_orbit_removed() {
+            test ! -e /usr/lib/systemd/system/orbit.service
+            test ! -e /opt/orbit
+            if [ "$orbit_service_started" = true ]; then
+              if as_root systemctl is-active --quiet orbit.service; then
+                echo '::error::desktop package left orbit.service running'
+                exit 1
+              fi
+            fi
+          }
+
+          fixture_root="$RUNNER_TEMP/connect-desktop-linux-fixtures"
           chmod +x signed/anyray-connect-engine-linux-x64
           bash scripts/build-desktop-cli-migration-fixtures.sh \
-            "$fixture_root" "$PWD/signed/anyray-connect-engine-linux-x64"
-          cli_deb="$(find "$fixture_root/pkgs" -name '*.deb' -print -quit)"
+            "$fixture_root/cli" "$PWD/signed/anyray-connect-engine-linux-x64"
+          bash scripts/build-desktop-fleet-osquery-fixtures.sh "$fixture_root/fleet"
+          cli_deb="$(find "$fixture_root/cli/pkgs" -name '*.deb' -print -quit)"
+          fleet_deb="$(find "$fixture_root/fleet/pkgs" -name '*.deb' -print -quit)"
           test -n "$cli_deb"
-          $SUDO dpkg -i "$cli_deb"
+          test -n "$fleet_deb"
+          as_root dpkg -i "$cli_deb"
           cli_deb_installed=true
+          as_root dpkg -i "$fleet_deb"
+          fleet_deb_installed=true
+          test -x /opt/orbit/bin/orbit
+          test -f /usr/lib/systemd/system/orbit.service
+          test -f /opt/orbit/osquery_log/x.log
+          start_orbit_service_if_available
           assert_existing_state_untouched
-          # apt performs the declared Conflicts/Replaces transaction, retaining the CLI command.
-          $SUDO apt-get install -y "$PWD/$deb"
+          # apt performs both declared Conflicts/Replaces transactions.
+          as_root apt-get install -y "$PWD/$deb"
           deb_installed=true
           cli_deb_installed=false
           assert_existing_state_untouched
+          if dpkg-query -W -f='${db:Status-Status}\n' fleet-osquery 2>/dev/null | grep -Fxq installed; then
+            echo '::error::desktop deb left fleet-osquery installed'
+            exit 1
+          fi
+          fleet_deb_installed=false
+          assert_orbit_removed
           test ! -e /etc/xdg/autostart/anyray-connect-managed-enroll.desktop
           test ! -e /usr/lib/systemd/user/anyray-connect-managed-enroll.service
+          uninstall=/usr/lib/anyray-connect/uninstall.sh
+          test -x "$uninstall"
+          test "$(dpkg -S /usr/bin/anyray-connect)" = "$deb_name: /usr/bin/anyray-connect"
           deb_engine="$(dpkg -L "$deb_name" | grep -E '/anyray-connect$' | head -1)"
           deb_main="$(dpkg -L "$deb_name" | grep -E '/connect-tray$' | head -1)"
           test -x "$deb_engine"
           test -x "$deb_main"
-          test "$($SUDO runuser -u "$account" -- "$deb_engine" --version | head -1)" = "anyray-connect $VERSION"
+          test "$(as_root runuser -u "$account" -- "$deb_engine" --version | head -1)" = "anyray-connect $VERSION"
           smoke_installed_tray "$deb_main" "$deb_engine"
-          state_before="$($SUDO sha256sum "$state")"
-          $SUDO dpkg -r "$deb_name"
+
+          engine_help="$(as_root runuser -u "$account" -- "$deb_engine" --help)"
+          if printf '%s\n' "$engine_help" | grep -Eq '^[[:space:]]*uninstall[[:space:]]'; then
+            expected_user_verb=uninstall
+          elif printf '%s\n' "$engine_help" | grep -Eq '^[[:space:]]*offboard[[:space:]]'; then
+            expected_user_verb=offboard
+          else
+            echo '::error::installed engine exposes neither uninstall nor offboard user cleanup'
+            exit 1
+          fi
+          user_layer_marker="$existing_home/.anyray/any-391-user-layer-marker"
+          printf '%s\n' 'remove-me' | as_root runuser -u "$account" -- tee "$user_layer_marker" >/dev/null
+          # uninstall.sh forwards the engine's --json stdout, proving the branch taken without ptrace.
+          uninstall_stdout="$(as_root "$uninstall")"
+          if dpkg-query -W -f='${db:Status-Status}\n' "$deb_name" 2>/dev/null | grep -Fxq installed; then
+            echo '::error::Linux uninstall helper left the desktop deb installed'
+            exit 1
+          fi
           deb_installed=false
+          if [ "$expected_user_verb" = uninstall ]; then
+            printf '%s\n' "$uninstall_stdout" | grep -Fq '"user":"complete"'
+            test ! -e "$existing_home/.anyray"
+          else
+            printf '%s\n' "$uninstall_stdout" | grep -Fq '"verb":"offboard"'
+            test -f "$user_layer_marker"
+          fi
           test ! -e "$deb_engine"
           test ! -e "$deb_main"
-          assert_existing_state_untouched
+          test ! -e "$uninstall"
+          test "$(as_root sha256sum "$scheduler")" = "$scheduler_before"
 
-          cli_rpm="$(find "$fixture_root/pkgs" -name '*.rpm' -print -quit)"
+          as_root rm -rf "$existing_home/.anyray"
+          as_root runuser -u "$account" -- mkdir -p "$(dirname "$state")"
+          printf '%s\n' "$existing_profile" | as_root runuser -u "$account" -- tee "$state" >/dev/null
+          state_before="$(as_root sha256sum "$state")"
+
+          cli_rpm="$(find "$fixture_root/cli/pkgs" -name '*.rpm' -print -quit)"
+          fleet_rpm="$(find "$fixture_root/fleet/pkgs" -name '*.rpm' -print -quit)"
           test -n "$cli_rpm"
-          $SUDO rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"
+          test -n "$fleet_rpm"
+          as_root rpm --dbpath "$rpm_database" -i --nodeps "$cli_rpm"
           cli_rpm_installed=true
+          as_root rpm --dbpath "$rpm_database" -i --nodeps "$fleet_rpm"
+          fleet_rpm_installed=true
+          test -x /opt/orbit/bin/orbit
+          test -f /usr/lib/systemd/system/orbit.service
+          test -f /opt/orbit/osquery_log/x.log
+          start_orbit_service_if_available
           assert_existing_state_untouched
-          $SUDO rpm --dbpath "$rpm_database" -U --nodeps "$rpm"
+          as_root rpm --dbpath "$rpm_database" -U --nodeps "$rpm"
           rpm_installed=true
           cli_rpm_installed=false
           assert_existing_state_untouched
+          if rpm --dbpath "$rpm_database" -q fleet-osquery; then
+            echo '::error::desktop rpm left fleet-osquery installed'
+            exit 1
+          fi
+          fleet_rpm_installed=false
+          assert_orbit_removed
           test ! -e /etc/xdg/autostart/anyray-connect-managed-enroll.desktop
           test ! -e /usr/lib/systemd/user/anyray-connect-managed-enroll.service
+          test -x /usr/lib/anyray-connect/uninstall.sh
+          test "$(rpm --dbpath "$rpm_database" -qf --queryformat '%{NAME}' /usr/bin/anyray-connect)" = "$rpm_name"
           rpm_engine="$(rpm --dbpath "$rpm_database" -ql "$rpm_name" | grep -E '/anyray-connect$' | head -1)"
           rpm_main="$(rpm --dbpath "$rpm_database" -ql "$rpm_name" | grep -E '/connect-tray$' | head -1)"
           test -x "$rpm_engine"
           test -x "$rpm_main"
-          test "$($SUDO runuser -u "$account" -- "$rpm_engine" --version | head -1)" = "anyray-connect $VERSION"
+          test "$(as_root runuser -u "$account" -- "$rpm_engine" --version | head -1)" = "anyray-connect $VERSION"
           smoke_installed_tray "$rpm_main" "$rpm_engine"
-          state_before="$($SUDO sha256sum "$state")"
-          $SUDO rpm --dbpath "$rpm_database" -e "$rpm_name"
+          state_before="$(as_root sha256sum "$state")"
+          as_root rpm --dbpath "$rpm_database" -e "$rpm_name"
           rpm_installed=false
           test ! -e "$rpm_engine"
           test ! -e "$rpm_main"

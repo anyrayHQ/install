@@ -138,7 +138,7 @@ before sending traffic.
 ## Upgrade
 
 ```bash
-git pull && docker compose pull && docker compose up -d
+git fetch && git reset --keep origin/main && docker compose pull && docker compose up -d
 ```
 
 Use the full command for releases reported as a hard/template update; do not

@@ -47,6 +47,6 @@ domains. The bootstrap completes those steps and is safe to re-run:
 
 ## Upgrades
 
-`git pull && railway config apply` — the tag in `.railway/railway.ts` tracks the latest
-release (bumped in CI), so a pull + apply rolls the stack forward. Secrets and domains
+`git fetch && git reset --keep origin/main && railway config apply` — the tag in `.railway/railway.ts` tracks the latest
+release (bumped in CI), so a refresh + apply rolls the stack forward. Secrets and domains
 are preserved.

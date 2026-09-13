@@ -105,12 +105,12 @@ images. To converge manually, or to select a compatible immutable tag:
 ```bash
 gcloud compute ssh anyray --zone us-central1-a --tunnel-through-iap
 cd /opt/anyray
-sudo git pull --ff-only
+sudo git fetch && sudo git reset --keep origin/main
 sudo ./gcp/gce/upgrade.sh
 # Optional immutable-tag override: sudo ./gcp/gce/upgrade.sh vX.Y.Z
 ```
 
-The `git pull` keeps the running install on the checked-out template.
+The refresh keeps the running install on the checked-out template.
 `upgrade.sh` also replaces the image pin that first-time GCE setup wrote to
 `.env`; leaving the old pin would override the refreshed template. A reboot
 intentionally resumes the checked-out template without updating it.

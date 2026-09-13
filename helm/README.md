@@ -143,7 +143,7 @@ assumes `default`.
 ## Upgrade
 
 ```bash
-git pull
+git fetch && git reset --keep origin/main
 # Run before the first upgrade from an older Secret. Safe to repeat.
 ./setup.sh --k8s --connect adt_XXXX --host <your-hostname-or-ip> --namespace "$ANYRAY_NAMESPACE"
 kubectl apply -n "$ANYRAY_NAMESPACE" -f anyray-secrets.yaml

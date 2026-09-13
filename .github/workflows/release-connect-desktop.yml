@@ -366,11 +366,21 @@ jobs:
           mkdir -p out
           ditto -c -k --keepParent "$app" out/connect-desktop-unsigned.zip
 
+      - name: Stage the pkg scripts from the reviewed source
+        run: |
+          set -euo pipefail
+          mkdir -p out/pkg-scripts
+          # Rides with the artifact so the pkg is built from the same source SHA as the app.
+          test -f private-source/connect-tray/src-tauri/macos/postinstall
+          test -f private-source/connect-tray/src-tauri/macos/uninstall.sh
+          cp private-source/connect-tray/src-tauri/macos/postinstall out/pkg-scripts/postinstall
+          cp private-source/connect-tray/src-tauri/macos/uninstall.sh out/pkg-scripts/uninstall.sh
+
       - uses: ./.github/actions/s3-artifact-upload
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-unsigned
-          path: out/connect-desktop-unsigned.zip
+          path: out/connect-desktop-unsigned.zip out/pkg-scripts
           if-no-files-found: error
 
   sign-macos:
@@ -396,7 +406,6 @@ jobs:
         with:
           sparse-checkout: |
             .github/actions
-            scripts/desktop-pkg
           sparse-checkout-cone-mode: false
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
@@ -527,9 +536,18 @@ jobs:
             "$root/usr/local/lib/anyray-connect" \
             "$scripts"
           ditto "$app" "$root/Applications/Anyray Connect.app"
-          install -m 0755 scripts/desktop-pkg/uninstall.sh \
+
+          pkg_scripts_src="unsigned/pkg-scripts"
+          test -f "$pkg_scripts_src/postinstall"
+          test -f "$pkg_scripts_src/uninstall.sh"
+          for pkg_script in "$pkg_scripts_src/postinstall" "$pkg_scripts_src/uninstall.sh"; do
+            /bin/sh -n "$pkg_script"
+            head -1 "$pkg_script" | grep -qx '#!/bin/sh'
+            grep -q 'Managed by anyray-connect desktop helper' "$pkg_script"
+          done
+          install -m 0755 "$pkg_scripts_src/uninstall.sh" \
             "$root/usr/local/lib/anyray-connect/uninstall.sh"
-          install -m 0755 scripts/desktop-pkg/postinstall "$scripts/postinstall"
+          install -m 0755 "$pkg_scripts_src/postinstall" "$scripts/postinstall"
 
           pkgbuild --analyze --root "$root" "$component_plist"
           plutil -replace 0.BundleIsRelocatable -bool false "$component_plist"

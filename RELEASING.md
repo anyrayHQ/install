@@ -611,18 +611,24 @@ source or GitHub App credential:
 
 - **macOS:** `provision-mac` allocates the ephemeral CodeBuild Mac right after
   preflight; `build-macos-unsigned` compiles one unsigned universal `.app` on
-  it. The artifact-only `sign-macos` job signs the bundled Bun engine (hardened
-  runtime + minimal `allow-jit` entitlement), signs the outer app, requires
-  Apple Team ID `V53XMA78UF` and bundle identifier
+  it, then copies `postinstall` and `uninstall.sh` from the reviewed
+  `private-source/connect-tray/src-tauri/macos/` checkout into the unsigned
+  artifact's `pkg-scripts/` directory — those scripts are product behaviour
+  and live in the monorepo next to their Windows and Linux installer twins,
+  so this lane only carries them along, byte-identical, from the same source
+  SHA as the app. The artifact-only `sign-macos` job signs the bundled Bun
+  engine (hardened runtime + minimal `allow-jit` entitlement), signs the
+  outer app, requires Apple Team ID `V53XMA78UF` and bundle identifier
   `ai.anyray.connect-tray`, notarizes and staples it, packs the stapled app as
   a space-free `.app.tar.gz` for the updater, then builds a non-relocatable
-  installer `.pkg` (postinstall creates the `/usr/local/bin` symlink and
-  shims and installs `uninstall.sh`), signs it with the Developer ID Installer
-  certificate, and notarizes and staples it. A credential-free
-  `verify-macos-signed` job on the same fleet installs and exercises the final
-  pkg. Teardown follows the signed smoke with `always()`. The Mac host is
-  reused inside its paid 24h window, so the signing job deletes its keychain
-  and key files in an `always()` step and the build never sees a secret.
+  installer `.pkg` from the downloaded `pkg-scripts/` (postinstall creates the
+  `/usr/local/bin` symlink and shims and installs `uninstall.sh`), signs it
+  with the Developer ID Installer certificate, and notarizes and staples it. A
+  credential-free `verify-macos-signed` job on the same fleet installs and
+  exercises the final pkg. Teardown follows the signed smoke with `always()`.
+  The Mac host is reused inside its paid 24h window, so the signing job
+  deletes its keychain and key files in an `always()` step and the build
+  never sees a secret.
 - **Windows x64:** compile the raw Tauri main executable and bundled engine on
   Windows; sign and verify both through the existing Azure Artifact Signing
   script on Linux; restore those signed bytes on Windows and create the MSI

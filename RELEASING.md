@@ -519,8 +519,8 @@ retained
 does not make the release public/stable; it creates the explicit versioned
 staging prerelease and re-points the staging-only updater feed.
 
-The retained/published set contains one signed/notarized universal macOS DMG,
-one universal `.app.tar.gz` containing the signed and stapled app, one
+The retained/published set contains one signed/notarized universal macOS
+`.pkg`, one universal `.app.tar.gz` containing the signed and stapled app, one
 Authenticode-signed Windows x64 MSI, the two signed Windows inner executables
 for audit, Linux x64 deb/rpm packages plus the two raw inner executables,
 detached GPG signatures and public key, signed `SHA256SUMS`, and a signed
@@ -569,13 +569,19 @@ requires all of the following before source-controlled build code executes:
 - `connect/package.json`, the tray's `Cargo.toml`, `Cargo.lock`, and
   `tauri.conf.json` all equal `version`;
 - Tauri's `bundle.externalBin` is exactly `binaries/anyray-connect`;
-- Tauri's macOS minimum is `13.0`. Signed DMG and updater bundle verification
+- Tauri's macOS minimum is `13.0`. Signed pkg and updater bundle verification
   also checks the generated `LSMinimumSystemVersion`.
 
-The private checkout is local to that native job and is **never uploaded**.
-Only compiled executables and packages cross a job boundary. Provision a GitHub
-App installed only on the private monorepo, grant it repository Contents
-read-only, and set these install-repository secrets:
+The private checkout is local to that native job and is **never uploaded** as
+source. The one exception is the three macOS pkg maintainer scripts
+(`preinstall`, `postinstall`, `uninstall.sh`): they are plain POSIX shell, not
+compiled, and the unsigned build job copies them byte-identical from the
+reviewed source SHA into the unsigned macOS artifact so `sign-macos` can build
+the installer from them. They carry the same bucket, access, and retention as
+the compiled app in that artifact. No TypeScript or Rust source ever crosses a
+job boundary. Provision a GitHub App installed only on the private monorepo,
+grant it repository Contents read-only, and set these install-repository
+secrets:
 
 | Secret | Value |
 | --- | --- |
@@ -611,16 +617,25 @@ source or GitHub App credential:
 
 - **macOS:** `provision-mac` allocates the ephemeral CodeBuild Mac right after
   preflight; `build-macos-unsigned` compiles one unsigned universal `.app` on
-  it. The artifact-only `sign-macos` job signs the bundled Bun engine (hardened
-  runtime + minimal `allow-jit` entitlement), signs the outer app, requires
-  Apple Team ID `V53XMA78UF` and bundle identifier
-  `ai.anyray.connect-tray`, notarizes and staples it, then creates, signs,
-  notarizes, and staples one universal `.dmg`. The stapled app is also packed
-  as a space-free `.app.tar.gz`. A credential-free
-  `verify-macos-signed` job on the same fleet mounts and exercises the final
-  DMG. Teardown follows the signed smoke with `always()`. The Mac host is
-  reused inside its paid 24h window, so the signing job deletes its keychain
-  and key files in an `always()` step and the build never sees a secret.
+  it, then copies `preinstall`, `postinstall`, and `uninstall.sh` from the
+  reviewed `private-source/connect-tray/src-tauri/macos/` checkout alongside
+  the unsigned app in the same artifact — those scripts are product behaviour
+  and live in the monorepo next to their Windows and Linux installer twins,
+  so this lane only carries them along, byte-identical, from the same source
+  SHA as the app. The artifact-only `sign-macos` job signs the bundled Bun
+  engine (hardened runtime + minimal `allow-jit` entitlement), signs the
+  outer app, requires Apple Team ID `V53XMA78UF` and bundle identifier
+  `ai.anyray.connect-tray`, notarizes and staples it, packs the stapled app as
+  a space-free `.app.tar.gz` for the updater, then builds a non-relocatable
+  installer `.pkg` from the downloaded scripts (preinstall refuses foreign
+  launchers/shims before Installer writes the payload, postinstall creates the
+  `/usr/local/bin` symlink and shims and installs `uninstall.sh`), signs it
+  with the Developer ID Installer certificate, and notarizes and staples it. A
+  credential-free `verify-macos-signed` job on the same fleet installs and
+  exercises the final pkg. Teardown follows the signed smoke with `always()`.
+  The Mac host is reused inside its paid 24h window, so the signing job
+  deletes its keychain and key files in an `always()` step and the build
+  never sees a secret.
 - **Windows x64:** compile the raw Tauri main executable and bundled engine on
   Windows; sign and verify both through the existing Azure Artifact Signing
   script on Linux; restore those signed bytes on Windows and create the MSI
@@ -643,8 +658,8 @@ up to 30 seconds for its exact stable autostart artifact, validates that artifac
 points at the installed main executable, force-kills the tray, and then performs
 the real uninstall:
 
-- macOS copies the app from the DMG into a temporary Applications analogue and
-  runs `scripts/smoke-connect-desktop-macos.py` in a dedicated GUI account: fresh
+- macOS installs the pkg with `installer -pkg` and runs
+  `scripts/smoke-connect-desktop-macos.py` in a dedicated GUI account: fresh
   native login registration, migration from the legacy LaunchAgent, preserved
   disabled consent, stop/restart, and unregister. The Mac runner needs the
   repository variable `DESKTOP_MAC_TEST_USER` naming a dedicated non-root
@@ -690,12 +705,12 @@ prerelease tag that holds the artifacts.
 
 ### Required infrastructure and first-run validation
 
-The existing Apple Application certificate/password and notarization trio,
-four Azure variables, Linux GPG key/passphrase, and Mac-fleet role listed
-earlier in this document are mandatory; preflight fails closed and names
-anything absent. (A DMG uses the Application identity, so this lane does not
-consume the separate Apple Installer certificate used by `.pkg`.) The lane also
-needs only the two GitHub App secrets above.
+The existing Apple Application certificate/password, the Apple Installer
+certificate/password, the notarization trio, four Azure variables, Linux GPG
+key/passphrase, and Mac-fleet role listed earlier in this document are
+mandatory; preflight fails closed and names anything absent. The pkg is signed
+with the Installer identity, separate from the Application identity used for
+the app and engine. The lane also needs only the two GitHub App secrets above.
 
 Do not turn a missing credential into an unsigned skip.
 

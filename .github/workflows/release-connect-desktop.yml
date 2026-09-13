@@ -532,11 +532,14 @@ jobs:
           scripts="$RUNNER_TEMP/connect-desktop-pkgscripts"
           component_plist="$RUNNER_TEMP/connect-desktop-components.plist"
           component_pkg="$RUNNER_TEMP/connect-desktop-component.pkg"
+          distribution_xml="$RUNNER_TEMP/connect-desktop-distribution.xml"
+          distribution_resources="$RUNNER_TEMP/connect-desktop-distribution-resources"
           unsigned_pkg="$RUNNER_TEMP/connect-desktop-unsigned.pkg"
           mkdir -p \
             "$root/Applications" \
             "$root/usr/local/lib/anyray-connect" \
-            "$scripts"
+            "$scripts" \
+            "$distribution_resources"
           ditto "$app" "$root/Applications/Anyray Connect.app"
 
           test -f unsigned/preinstall
@@ -566,9 +569,46 @@ jobs:
             --install-location / \
             --ownership recommended \
             "$component_pkg"
+          cat > "$distribution_resources/connect-desktop-readme.html" <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <body>
+          <p>If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent.</p>
+          <ul>
+          <li>Anyray Connect CLI package (ai.anyray.connect)</li>
+          <li>fleetd (com.fleetdm.orbit.base.pkg)</li>
+          </ul>
+          </body>
+          </html>
+          HTML
+          {
+            printf '%s\n' \
+              '<?xml version="1.0" encoding="utf-8"?>' \
+              '<installer-gui-script minSpecVersion="1">' \
+              '  <title>Anyray Connect</title>' \
+              '  <readme file="connect-desktop-readme.html" mime-type="text/html"/>' \
+              '  <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>' \
+              '  <choices-outline>' \
+              '    <line choice="default">' \
+              '      <line choice="ai.anyray.connect-tray"/>' \
+              '    </line>' \
+              '  </choices-outline>' \
+              '  <choice id="default"/>' \
+              '  <choice id="ai.anyray.connect-tray" visible="false">' \
+              '    <pkg-ref id="ai.anyray.connect-tray"/>' \
+              '  </choice>'
+            printf '  <pkg-ref id="ai.anyray.connect-tray" version="%s" onConclusion="none">connect-desktop-component.pkg</pkg-ref>\n' \
+              "$VERSION"
+            printf '%s\n' '</installer-gui-script>'
+          } > "$distribution_xml"
+          xmllint --noout "$distribution_xml"
           # MDM InstallApplication only installs distribution packages; a bare
           # component package is acknowledged by Jamf and then silently dropped.
-          productbuild --package "$component_pkg" "$unsigned_pkg"
+          productbuild \
+            --distribution "$distribution_xml" \
+            --resources "$distribution_resources" \
+            --package-path "$RUNNER_TEMP" \
+            "$unsigned_pkg"
 
           keychain="$RUNNER_TEMP/connect-desktop-signing.keychain-db"
           keychain_password_file="$RUNNER_TEMP/connect-desktop-keychain-password"
@@ -626,7 +666,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          rm -f \
+          rm -rf \
             "$RUNNER_TEMP/connect-desktop-cert.p12" \
             "$RUNNER_TEMP/connect-desktop-installer-cert.p12" \
             "$RUNNER_TEMP/connect-desktop-notary-key.p8" \
@@ -635,6 +675,8 @@ jobs:
             "$RUNNER_TEMP/connect-desktop-notary.zip" \
             "$RUNNER_TEMP/connect-desktop-components.plist" \
             "$RUNNER_TEMP/connect-desktop-component.pkg" \
+            "$RUNNER_TEMP/connect-desktop-distribution.xml" \
+            "$RUNNER_TEMP/connect-desktop-distribution-resources" \
             "$RUNNER_TEMP/connect-desktop-unsigned.pkg"
           if [ -f "$RUNNER_TEMP/connect-desktop-signing.keychain-db" ]; then
             security delete-keychain "$RUNNER_TEMP/connect-desktop-signing.keychain-db"
@@ -713,6 +755,17 @@ jobs:
             | grep -Eq '^\.?/?usr/local/lib/anyray-connect/uninstall\.sh$'
           expanded_pkg="$RUNNER_TEMP/connect-desktop-expanded-pkg"
           pkgutil --expand-full "$pkg" "$expanded_pkg"
+          distribution="$expanded_pkg/Distribution"
+          test -f "$distribution"
+          test "$(xmllint --xpath 'string(/installer-gui-script/readme/@file)' "$distribution")" \
+            = 'connect-desktop-readme.html'
+          readme="$(find "$expanded_pkg" -type f -name connect-desktop-readme.html -print -quit)"
+          [ -n "$readme" ] || { echo '::error::PKG contains no Installer readme'; exit 1; }
+          grep -Fq \
+            'If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent.' \
+            "$readme"
+          grep -Fq 'ai.anyray.connect' "$readme"
+          grep -Fq 'com.fleetdm.orbit.base.pkg' "$readme"
           package_info="$(find "$expanded_pkg" -type f -name PackageInfo -print -quit)"
           [ -n "$package_info" ] || { echo '::error::PKG contains no component PackageInfo'; exit 1; }
           test "$(xmllint --xpath 'string(/pkg-info/bundle/@path)' "$package_info")" \
@@ -739,6 +792,10 @@ jobs:
           credential_helper='/usr/local/bin/anyray-credential-helper'
           bootstrap_helper='/usr/local/bin/anyray-bootstrap-headers-helper'
           uninstall='/usr/local/lib/anyray-connect/uninstall.sh'
+          retired_plist='/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist'
+          retired_root="$RUNNER_TEMP/connect-desktop-retired-root"
+          retired_pkg="$RUNNER_TEMP/connect-desktop-retired.pkg"
+          retired_stub="$RUNNER_TEMP/connect-desktop-retired-anyray-connect"
           for path in \
             "$installed_app" \
             "$launcher" \
@@ -748,6 +805,11 @@ jobs:
             sudo test ! -e "$path"
             sudo test ! -L "$path"
           done
+          sudo test ! -e "$retired_plist"
+          if pkgutil --pkg-info ai.anyray.connect >/dev/null 2>&1; then
+            echo '::error::dedicated Mac runner already has the retired CLI receipt'
+            exit 1
+          fi
 
           foreign="$RUNNER_TEMP/foreign-anyray-connect"
           printf '%s\n' '#!/bin/sh' 'exit 23' > "$foreign"
@@ -774,6 +836,13 @@ jobs:
             if [ "$foreign_owned" = true ]; then
               sudo rm -f "$launcher"
             fi
+            if sudo test -f "$launcher" \
+              && sudo test ! -L "$launcher" \
+              && sudo cmp -s "$retired_stub" "$launcher"; then
+              sudo rm -f "$launcher"
+            fi
+            sudo rm -f "$retired_plist"
+            sudo pkgutil --forget ai.anyray.connect >/dev/null 2>&1 || true
             sudo pkgutil --forget ai.anyray.connect-tray >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
@@ -795,8 +864,51 @@ jobs:
           sudo rm -f "$launcher"
           foreign_owned=false
 
+          mkdir -p \
+            "$retired_root/usr/local/bin" \
+            "$retired_root/Library/LaunchAgents"
+          printf '%s\n' '#!/bin/sh' 'exit 17' > "$retired_stub"
+          install -m 0755 "$retired_stub" "$retired_root/usr/local/bin/anyray-connect"
+          cat > "$retired_root$retired_plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>ai.anyray.connect.managed-enroll</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/usr/local/bin/anyray-connect</string>
+            </array>
+            <key>RunAtLoad</key>
+            <false/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$retired_root$retired_plist"
+          pkgbuild \
+            --root "$retired_root" \
+            --identifier ai.anyray.connect \
+            --version 0.0.0 \
+            --install-location / \
+            --ownership recommended \
+            "$retired_pkg"
+          sudo installer -pkg "$retired_pkg" -target /
+          pkgutil --pkg-info ai.anyray.connect >/dev/null
+          sudo cmp "$retired_stub" "$launcher"
+          sudo test -f "$retired_plist"
+
           sudo installer -pkg "$pkg" -target /
           pkgutil --pkg-info ai.anyray.connect-tray >/dev/null
+          if pkgutil --pkg-info ai.anyray.connect >/dev/null 2>&1; then
+            echo '::error::desktop PKG left the retired CLI receipt behind'
+            exit 1
+          fi
+          sudo test ! -e "$retired_plist"
+          if sudo launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then
+            echo '::error::desktop PKG left the fleetd daemon loaded'
+            exit 1
+          fi
           sudo test -L "$launcher"
           test "$(sudo readlink "$launcher")" \
             = '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'

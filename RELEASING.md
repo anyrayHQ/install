@@ -670,9 +670,15 @@ the real uninstall:
   the UI Quit action, a real logout/login, enrollment, key renewal, or an EDR
   policy; record those in the monorepo's `connect-tray/ACCEPTANCE.md` against
   the exact candidate;
-- Windows silently installs the MSI into a temporary `INSTALLDIR` and validates
-  the `ai.anyray.connect-tray` value under
-  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
+- Windows first plants an unsigned foreign engine at
+  `C:\Program Files\Anyray\anyray-connect.exe`, requires the MSI to refuse it
+  with exit 1603 without changing it, then plants a stale managed credential
+  shim and installs cleanly into that fixed directory. The smoke verifies the
+  installed engine's Authenticode signature, both regenerated managed shims and
+  their engine target, the machine `PATH` entry, `uninstall.ps1`, and the
+  `ai.anyray.connect-tray` value under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; MSI uninstall must
+  remove both shims and the machine `PATH` entry;
 - Ubuntu creates a throwaway Unix account, installs synthetic legacy CLI
   deb/rpm packages built from `ci/nfpm.yaml` around the candidate engine
   (test inputs, never release artifacts), replaces them with the desktop

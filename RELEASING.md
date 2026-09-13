@@ -631,8 +631,14 @@ source or GitHub App credential:
   launchers/shims before Installer writes the payload, postinstall creates the
   `/usr/local/bin` symlink and shims and installs `uninstall.sh`), signs it
   with the Developer ID Installer certificate, and notarizes and staples it. A
-  credential-free `verify-macos-signed` job on the same fleet installs and
-  exercises the final pkg. Teardown follows the signed smoke with `always()`.
+  static Installer readme tells interactive users that the deprecated Anyray
+  Connect CLI package and fleetd are removed when present. A credential-free
+  `verify-macos-signed` job on the same fleet first installs a synthetic
+  `ai.anyray.connect` package containing a stub launcher and the retired
+  managed-enroll LaunchAgent plist, then installs the final desktop pkg and
+  requires the legacy receipt and plist to be gone, the launcher to be the
+  desktop symlink, and no fleetd daemon to be loaded. Teardown follows the
+  signed smoke with `always()`.
   The Mac host is reused inside its paid 24h window, so the signing job
   deletes its keychain and key files in an `always()` step and the build
   never sees a secret.

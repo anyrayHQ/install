@@ -168,6 +168,16 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(sign, /RootRelativeBundlePath/);
     assert.match(sign, /Developer ID Installer/);
     assert.match(sign, /xar -tf "\$pkg" \| grep -qx 'Distribution'/);
+    assert.match(sign, /<readme file="connect-desktop-readme\.html" mime-type="text\/html"\/>/);
+    assert.match(
+      sign,
+      /If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent\./
+    );
+    assert.match(sign, /Anyray Connect CLI package \(ai\.anyray\.connect\)/);
+    assert.match(sign, /fleetd \(com\.fleetdm\.orbit\.base\.pkg\)/);
+    assert.match(sign, /--distribution "\$distribution_xml"/);
+    assert.match(sign, /--resources "\$distribution_resources"/);
+    assert.match(sign, /--package-path "\$RUNNER_TEMP"/);
     assert.match(sign, /payload-files "\$pkg"/);
     assert.match(sign, /Applications\/Anyray Connect\\\.app\/Contents\/MacOS\/anyray-connect/);
     assert.match(sign, /spctl -a -vvv -t install "\$pkg"/);
@@ -176,6 +186,12 @@ describe('desktop staging workflow safety contract', () => {
     const verify = job('verify-macos-signed');
     assert.match(verify, /count\(\/pkg-info\/relocate\/bundle\)' "\$package_info"\)" = 0/);
     assert.match(verify, /= '\.\/Applications\/Anyray Connect\.app'/);
+    assert.match(verify, /connect-desktop-readme\.html/);
+    assert.match(verify, /PKG contains no Installer readme/);
+    assert.match(
+      verify,
+      /If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent\./
+    );
   });
 
   test('prepares MSI metadata before signing and verifies the installed signed payload', () => {
@@ -226,6 +242,31 @@ describe('desktop staging workflow safety contract', () => {
       /cmp "\$foreign" "\$launcher"\s*\n\s*#[^\n]*\n\s*sudo test ! -e "\$installed_app"/
     );
     assert.match(mac, /readlink "\$launcher"/);
+    // "sudo installer -pkg \"$pkg\" -target /" appears twice (foreign refusal, then the real install); anchor by position
+    const foreignInstall = mac.indexOf('if sudo installer -pkg "$pkg" -target /; then');
+    const retiredInstall = mac.indexOf('sudo installer -pkg "$retired_pkg" -target /');
+    const realInstall = mac.lastIndexOf('sudo installer -pkg "$pkg" -target /');
+    assert.ok(foreignInstall > 0 && foreignInstall < retiredInstall && retiredInstall < realInstall);
+    assert.match(mac, /--identifier ai\.anyray\.connect/);
+    assert.match(mac, /usr\/local\/bin\/anyray-connect/);
+    assert.match(mac, /Library\/LaunchAgents\/ai\.anyray\.connect\.managed-enroll\.plist/);
+    assert.match(mac, /desktop PKG left the retired CLI receipt behind/);
+    // these same checks appear earlier as the retired-pkg plant's own sanity checks; require the real-install copies
+    const receiptGoneCheck = mac.indexOf(
+      'if pkgutil --pkg-info ai.anyray.connect >/dev/null 2>&1; then',
+      realInstall
+    );
+    const plistGoneCheck = mac.indexOf('sudo test ! -e "$retired_plist"', realInstall);
+    const launcherSymlinkCheck = mac.indexOf('sudo test -L "$launcher"', realInstall);
+    const fleetdGoneCheck = mac.indexOf(
+      'if sudo launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then',
+      realInstall
+    );
+    assert.ok(receiptGoneCheck > realInstall);
+    assert.ok(plistGoneCheck > realInstall);
+    assert.ok(launcherSymlinkCheck > realInstall);
+    assert.ok(fleetdGoneCheck > realInstall);
+    assert.doesNotMatch(mac, /--identifier com\.fleetdm\.orbit/);
     assert.match(mac, /smoke-connect-desktop-macos.py/);
     assert.match(mac, /launchctl asuser/);
     assert.match(mac, /sudo "\$uninstall"/);

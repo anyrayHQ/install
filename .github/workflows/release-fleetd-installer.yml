@@ -171,12 +171,16 @@ jobs:
             exit 1
           fi
 
-      - name: Install fleetctl (pinned + checksum-verified)
+      - name: Fetch fleetctl (pinned + checksum-verified)
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://github.com/fleetdm/fleet/releases/download/fleet-v${{ env.FLEETCTL_VERSION }}/fleetctl_v${{ env.FLEETCTL_VERSION }}_macos.tar.gz
+          sha256: ${{ env.FLEETCTL_SHA256 }}
+          dest: ${{ runner.temp }}/fleetctl.tar.gz
+
+      - name: Install fleetctl
         run: |
           set -euo pipefail
-          url="https://github.com/fleetdm/fleet/releases/download/fleet-v${FLEETCTL_VERSION}/fleetctl_v${FLEETCTL_VERSION}_macos.tar.gz"
-          curl -fsSL -o "$RUNNER_TEMP/fleetctl.tar.gz" "$url"
-          echo "${FLEETCTL_SHA256}  $RUNNER_TEMP/fleetctl.tar.gz" | shasum -a 256 -c -
           tar -xzf "$RUNNER_TEMP/fleetctl.tar.gz" -C "$RUNNER_TEMP"
           # Into RUNNER_TEMP, not /usr/local/bin: the Mac fleet runner is not
           # root and that directory is not reliably writable there. GITHUB_PATH
@@ -574,11 +578,11 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Fetch pinned jsign
-        run: |
-          set -euo pipefail
-          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
-            "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
-          echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://github.com/ebourg/jsign/releases/download/${{ env.JSIGN_VERSION }}/jsign-${{ env.JSIGN_VERSION }}.jar
+          sha256: ${{ env.JSIGN_SHA256 }}
+          dest: ${{ runner.temp }}/jsign.jar
       - name: Sign fleetd MSI through Azure Artifact Signing
         env:
           JSIGN_JAR: ${{ runner.temp }}/jsign.jar
@@ -710,6 +714,7 @@ jobs:
       id-token: write # assume the CI-artifacts role for the S3 handoff
       contents: write # create the release + upload assets
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -717,18 +722,24 @@ jobs:
           aws-region: eu-central-1
       # The CodeBuild AL2 runner image ships no gh CLI — installed pinned by
       # version + sha256, same as the connect release job.
+      - name: Fetch gh CLI (pinned + checksum-verified)
+        env:
+          GH_VERSION: '2.76.1'
+          GH_SHA256: 18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://github.com/cli/cli/releases/download/v${{ env.GH_VERSION }}/gh_${{ env.GH_VERSION }}_linux_amd64.tar.gz
+          sha256: ${{ env.GH_SHA256 }}
+          dest: /tmp/gh.tgz
       - name: Install gh CLI
+        env:
+          GH_VERSION: '2.76.1'
         run: |
           set -euo pipefail
-          V=2.76.1
-          SHA=18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
-          curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v${V}/gh_${V}_linux_amd64.tar.gz"
-          echo "${SHA}  /tmp/gh.tgz" | sha256sum -c -
           tar -xzf /tmp/gh.tgz -C /tmp
-          install -m 0755 "/tmp/gh_${V}_linux_amd64/bin/gh" /usr/local/bin/gh
+          install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
           gh --version
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/s3-artifact-download
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}

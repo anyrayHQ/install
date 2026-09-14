@@ -203,6 +203,16 @@ jobs:
           # outlive the checkout step at all.
           persist-credentials: false
 
+      # This job's primary checkout above is the MONOREPO, not this repo, so
+      # ./.github/actions/fetch-pinned is not on disk unless fetched
+      # separately (into its own path — a checkout at the default path would
+      # be wiped by the one above).
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+          path: install-repo-actions
+
       - name: Install Linux webview and tray dependencies
         run: |
           set -euo pipefail
@@ -213,14 +223,29 @@ jobs:
             libwebkit2gtk-4.1-dev build-essential libssl-dev libxdo-dev \
             libayatana-appindicator3-dev librsvg2-dev
 
+      - name: Check for an existing Rust toolchain
+        id: rustup-check
+        run: |
+          set -euo pipefail
+          if command -v rustup >/dev/null 2>&1; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch pinned rustup-init (checksum-verified)
+        if: steps.rustup-check.outputs.present != 'true'
+        uses: ./install-repo-actions/.github/actions/fetch-pinned
+        with:
+          url: https://static.rust-lang.org/rustup/archive/${{ env.RUSTUP_VERSION }}/x86_64-unknown-linux-gnu/rustup-init
+          sha256: ${{ env.RUSTUP_INIT_SHA256 }}
+          dest: rustup-init
+          mode: '0755'
+
       - name: Rust toolchain (pinned rustup-init, checksum-verified)
         run: |
           set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
-            curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
-            echo "${RUSTUP_INIT_SHA256}  rustup-init" | sha256sum -c -
-            chmod +x rustup-init
+          if [ "${{ steps.rustup-check.outputs.present }}" != 'true' ]; then
             ./rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
             rm -f rustup-init
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -645,6 +670,23 @@ jobs:
           lipo -archs "$root/usr/local/bin/anyray-connect" | grep -q 'arm64'
           lipo -archs "$root/usr/local/bin/anyray-connect" | grep -q 'x86_64'
 
+      # Fresh ephemeral Mac runners do not reliably carry Apple's Developer ID
+      # intermediates, so they are fetched and checksum-verified here.
+      - name: Fetch Apple Developer ID CA (pinned + checksum-verified)
+        if: env.APPLE_SIGNING_CERT_P12 != ''
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://www.apple.com/certificateauthority/DeveloperIDCA.cer
+          sha256: 7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f
+          dest: ${{ runner.temp }}/apple-developer-id-ca/DeveloperIDCA.cer
+      - name: Fetch Apple Developer ID G2 CA (pinned + checksum-verified)
+        if: env.APPLE_SIGNING_CERT_P12 != ''
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          sha256: f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+          dest: ${{ runner.temp }}/apple-developer-id-ca/DeveloperIDG2CA.cer
+
       - name: Sign the darwin binaries and package payload (Developer ID Application)
         if: env.APPLE_SIGNING_CERT_P12 != ''
         run: |
@@ -671,24 +713,10 @@ jobs:
           # --sign <hash>` reports "no identity found". Make the throwaway
           # keychain the default and put it on the session search list.
           security default-keychain -s "$KEYCHAIN"
-          # Fresh ephemeral Mac runners do not reliably carry Apple's Developer
-          # ID intermediates. Import the two public Apple intermediates after
-          # checksum verification, and keep the system root keychain in the
-          # search list so codesign can build the complete trusted chain.
+          # Keep the system root keychain in the search list so codesign can
+          # build the complete trusted chain from the two intermediates
+          # fetched (and checksum-verified) in the steps above.
           apple_ca_dir="$RUNNER_TEMP/apple-developer-id-ca"
-          mkdir -p "$apple_ca_dir"
-          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            https://www.apple.com/certificateauthority/DeveloperIDCA.cer \
-            --output "$apple_ca_dir/DeveloperIDCA.cer"
-          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
-            --output "$apple_ca_dir/DeveloperIDG2CA.cer"
-          printf '%s  %s\n' \
-            '7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f' \
-            "$apple_ca_dir/DeveloperIDCA.cer" \
-            'f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a' \
-            "$apple_ca_dir/DeveloperIDG2CA.cer" \
-            | shasum -a 256 -c -
           security import "$apple_ca_dir/DeveloperIDCA.cer" -k "$KEYCHAIN"
           security import "$apple_ca_dir/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
           rm -rf "$apple_ca_dir"
@@ -1123,11 +1151,11 @@ jobs:
 
       - name: Install jsign (pinned + checksum-verified)
         if: env.AZURE_SIGNING_CLIENT_ID != ''
-        run: |
-          set -euo pipefail
-          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
-            "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
-          echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://github.com/ebourg/jsign/releases/download/${{ env.JSIGN_VERSION }}/jsign-${{ env.JSIGN_VERSION }}.jar
+          sha256: ${{ env.JSIGN_SHA256 }}
+          dest: ${{ runner.temp }}/jsign.jar
 
       # DELIBERATELY hand-rolled instead of `azure/login` or
       # `azure/trusted-signing-action`. connect 0.11.140-142 published to npm
@@ -1281,21 +1309,27 @@ jobs:
       # here only for the TSA. If the first real run fails at "does not chain to
       # the pinned trust anchor" while jsign reports success, read the chain out
       # of the signature and re-pin — do NOT drop the anchor to make it pass.
-      - name: Verify the signature
+      - name: Fetch the Microsoft trust anchor (pinned + checksum-verified)
         if: env.AZURE_SIGNING_CLIENT_ID != ''
         env:
           # Published at aka.ms/RootCerts. Pinned by digest: a trust anchor
           # fetched over the network and used unverified is not an anchor.
-          MS_ROOT_URL: 'https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt'
           MS_ROOT_SHA256: 5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt
+          sha256: ${{ env.MS_ROOT_SHA256 }}
+          dest: ${{ runner.temp }}/ms-root.crt
+
+      - name: Verify the signature
+        if: env.AZURE_SIGNING_CLIENT_ID != ''
+        env:
           # The legal entity behind the Completed identity validation. This
           # account carries several validations, so a profile built against the
           # wrong one signs perfectly well under the wrong company name.
           EXPECT_PUBLISHER: 'Othentic Labs LTD'
         run: |
           set -euo pipefail
-          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/ms-root.crt" "$MS_ROOT_URL"
-          echo "${MS_ROOT_SHA256}  $RUNNER_TEMP/ms-root.crt" | sha256sum -c -
           # Distributed as DER; openssl verify wants PEM.
           openssl x509 -inform DER -in "$RUNNER_TEMP/ms-root.crt" \
             -out "$RUNNER_TEMP/ms-root.pem"
@@ -1346,14 +1380,22 @@ jobs:
           name: binaries-unsigned
           path: out
 
-      - name: Fetch nfpm (pinned by version + checksum)
+      - name: Load pinned nfpm version and checksum
         run: |
           set -euo pipefail
           source ci/nfpm-tool.env
-          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/nfpm.tgz" \
-            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_TOOL_VERSION}/nfpm_${NFPM_TOOL_VERSION}_Linux_x86_64.tar.gz"
-          echo "${NFPM_LINUX_X64_SHA256}  ${RUNNER_TEMP}/nfpm.tgz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/nfpm.tgz" -C "$RUNNER_TEMP" nfpm
+          echo "NFPM_TOOL_VERSION=$NFPM_TOOL_VERSION" >> "$GITHUB_ENV"
+          echo "NFPM_LINUX_X64_SHA256=$NFPM_LINUX_X64_SHA256" >> "$GITHUB_ENV"
+
+      - name: Fetch nfpm (pinned by version + checksum)
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://github.com/goreleaser/nfpm/releases/download/v${{ env.NFPM_TOOL_VERSION }}/nfpm_${{ env.NFPM_TOOL_VERSION }}_Linux_x86_64.tar.gz
+          sha256: ${{ env.NFPM_LINUX_X64_SHA256 }}
+          dest: ${{ runner.temp }}/nfpm.tgz
+
+      - name: Install nfpm
+        run: tar -xzf "$RUNNER_TEMP/nfpm.tgz" -C "$RUNNER_TEMP" nfpm
 
       - name: Build .deb/.rpm packages
         env:
@@ -1422,6 +1464,9 @@ jobs:
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
+      # Also needed for the local fetch-pinned action below (a gh release
+      # create checkout was already required later in this job).
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -1429,19 +1474,23 @@ jobs:
           aws-region: eu-central-1
       # The CodeBuild AL2 runner image ships no gh CLI (hosted ubuntu does) —
       # install it pinned by version + sha256, same discipline as nfpm below.
+      - name: Fetch gh CLI (pinned + checksum-verified)
+        env:
+          GH_VERSION: '2.76.1'
+          GH_SHA256: 18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://github.com/cli/cli/releases/download/v${{ env.GH_VERSION }}/gh_${{ env.GH_VERSION }}_linux_amd64.tar.gz
+          sha256: ${{ env.GH_SHA256 }}
+          dest: /tmp/gh.tgz
       - name: Install gh CLI
+        env:
+          GH_VERSION: '2.76.1'
         run: |
           set -euo pipefail
-          V=2.76.1
-          SHA=18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
-          curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v${V}/gh_${V}_linux_amd64.tar.gz"
-          echo "${SHA}  /tmp/gh.tgz" | sha256sum -c -
           tar -xzf /tmp/gh.tgz -C /tmp
-          install -m 0755 "/tmp/gh_${V}_linux_amd64/bin/gh" /usr/local/bin/gh
+          install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
           gh --version
-
-      # gh release create needs a git checkout to resolve the repo + create the tag.
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Assemble the release assets: unsigned set first, then the signed
       # darwin/windows binaries overwrite their unsigned copies, the signed and

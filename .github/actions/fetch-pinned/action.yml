@@ -1,0 +1,125 @@
+name: Fetch a pinned, checksum-verified file
+description: >-
+  A workflow curls a pinned tool/cert by URL and shasums it before trusting the
+  bytes: jsign, rustup-init, nfpm, fleetctl, gh, the Microsoft root cert, gitleaks.
+  Before this action each site hand-rolled its own retry policy — three sites
+  (jsign, ms-root) picked up `--retry-all-errors` after GitHub Releases 504s
+  broke a release (#494) while the rest had none — and the checksum check was
+  a copy-pasted `sha256sum -c -`/`shasum -a 256 -c -` line a new download site
+  could easily ship without. Centralizing both here means every pinned
+  download gets the same retry policy and cannot skip verification.
+
+inputs:
+  url:
+    description: HTTPS URL to download. Non-https is refused.
+    required: true
+  sha256:
+    description: Expected SHA-256 of the downloaded bytes, 64 lowercase hex characters.
+    required: true
+  dest:
+    description: Where to place the verified file (absolute or runner-relative). Parent directories are created.
+    required: true
+  mode:
+    description: 'Optional file mode applied after verification (e.g. "0755"). Default: leave as fetched.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Keyed on the expected hash: a hit is checked below before it is trusted,
+    # and a bad entry is refetched instead of failing the run (entries are
+    # immutable, so a poisoned key costs a download per run, never a release).
+    - name: Restore from cache
+      id: cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.dest }}
+        key: fetch-pinned-${{ runner.os }}-${{ inputs.sha256 }}
+    - name: Check the restored file
+      id: restored
+      if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        FETCH_SHA256: ${{ inputs.sha256 }}
+        FETCH_DEST: ${{ inputs.dest }}
+      run: |
+        set -euo pipefail
+        # A missing or unreadable restored file is a bad entry too, not a job failure.
+        actual=''
+        if [ -f "$FETCH_DEST" ]; then
+          if command -v shasum >/dev/null 2>&1; then
+            actual="$(shasum -a 256 "$FETCH_DEST" 2>/dev/null | awk '{print $1}')" || actual=''
+          else
+            actual="$(sha256sum "$FETCH_DEST" 2>/dev/null | awk '{print $1}')" || actual=''
+          fi
+        fi
+        if [ -n "$actual" ] && [ "$actual" = "$FETCH_SHA256" ]; then
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::cached ${FETCH_DEST} is missing or failed its checksum; refetching"
+          rm -f "$FETCH_DEST"
+          echo "valid=false" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Download on a cache miss or a bad entry
+      id: download
+      if: steps.cache.outputs.cache-hit != 'true' || steps.restored.outputs.valid != 'true'
+      shell: bash
+      env:
+        FETCH_URL: ${{ inputs.url }}
+        FETCH_SHA256: ${{ inputs.sha256 }}
+        FETCH_DEST: ${{ inputs.dest }}
+        FETCH_MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+
+        case "$FETCH_URL" in
+          https://*) ;;
+          *) echo '::error::fetch-pinned refuses a non-https url' && exit 1 ;;
+        esac
+
+        [[ "$FETCH_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+          || { echo '::error::fetch-pinned sha256 input must be 64 lowercase hex characters'; exit 1; }
+
+        mkdir -p "$(dirname "$FETCH_DEST")"
+        tmp="${FETCH_DEST}.tmp"
+
+        # Bounded: an attempt is at most 2 minutes and no retry starts after
+        # 3 minutes, so the worst case is about 5 minutes, never an open loop.
+        curl -fsSL --proto '=https' --tlsv1.2 \
+          --connect-timeout 10 --max-time 120 \
+          --retry 3 --retry-delay 5 --retry-max-time 180 --retry-all-errors \
+          -o "$tmp" "$FETCH_URL"
+
+        mv "$tmp" "$FETCH_DEST"
+    # Runs on a hit too: the cache is convenience, the hash is the trust.
+    - name: Verify checksum and mode
+      shell: bash
+      env:
+        FETCH_URL: ${{ inputs.url }}
+        FETCH_SHA256: ${{ inputs.sha256 }}
+        FETCH_DEST: ${{ inputs.dest }}
+        FETCH_MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        # macOS runners ship shasum, not sha256sum; Linux runners have both.
+        if command -v shasum >/dev/null 2>&1; then
+          actual="$(shasum -a 256 "$FETCH_DEST" | awk '{print $1}')"
+        else
+          actual="$(sha256sum "$FETCH_DEST" | awk '{print $1}')"
+        fi
+        if [ "$actual" != "$FETCH_SHA256" ]; then
+          echo "::error::checksum mismatch for ${FETCH_URL}: expected ${FETCH_SHA256}, got ${actual}"
+          rm -f "$FETCH_DEST"
+          exit 1
+        fi
+        if [ -n "$FETCH_MODE" ]; then
+          chmod "$FETCH_MODE" "$FETCH_DEST"
+        fi
+    # Saved only after a fresh download passed verification; never on a hit.
+    - name: Save to cache
+      if: steps.download.outcome == 'success'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.dest }}
+        key: fetch-pinned-${{ runner.os }}-${{ inputs.sha256 }}

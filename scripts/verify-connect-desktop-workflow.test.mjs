@@ -448,12 +448,23 @@ describe('desktop staging workflow safety contract', () => {
       'sudo test -f "$fleet_osquery_log"',
       'sudo test -f "$fleet_var_log"',
       'sudo test -d /usr/local/bin',
+      "usr_local_bin_after=\"$(stat -f '%i %u %g %Lp' /usr/local/bin)\"",
       "test \"$usr_local_bin_after\" = \"$usr_local_bin_before\" || {",
       'sudo test -f "$locked_cli_file"',
       'sudo grep -Fqx -- "$locked_cli_file" "$residue_marker"',
     ]) {
       between(assertion, ownedInstall, exercisedUninstall);
     }
+    // The /usr/local/bin gate: snapshot before the install, snapshot after, and a
+    // mismatch that names both values and fails, in that order.
+    const binBefore = mac.indexOf("usr_local_bin_before=\"$(stat -f '%i %u %g %Lp' /usr/local/bin)\"");
+    const binAfter = mac.indexOf("usr_local_bin_after=\"$(stat -f '%i %u %g %Lp' /usr/local/bin)\"");
+    const binCompare = mac.indexOf('test "$usr_local_bin_after" = "$usr_local_bin_before" || {');
+    const binDiag = mac.indexOf("echo \"::error::/usr/local/bin changed across the install (inode uid gid mode): before '$usr_local_bin_before', after '$usr_local_bin_after'\"");
+    const binExit = mac.indexOf('exit 1', binDiag);
+    assert.ok(binBefore > 0 && binBefore < ownedInstall, 'snapshot must precede the owned real install');
+    assert.ok(binAfter > ownedInstall && binCompare > binAfter && binDiag > binCompare && binExit > binDiag);
+    assert.ok(binExit - binDiag < 200, 'the mismatch must exit 1 right after the diagnostic');
 
     const plistBuild = after('build_fleet_pkg', exercisedUninstall);
     const plistPlant = after(

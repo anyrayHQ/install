@@ -685,13 +685,21 @@ the real uninstall:
 - Windows silently installs the MSI into a temporary `INSTALLDIR` and validates
   the `ai.anyray.connect-tray` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
-- Ubuntu creates a throwaway Unix account, installs synthetic legacy CLI
-  deb/rpm packages built from `ci/nfpm.yaml` around the candidate engine
-  (test inputs, never release artifacts), replaces them with the desktop
-  package through the package manager, and validates
-  `$HOME/.config/autostart/ai.anyray.connect-tray.desktop`, including its
-  `[Desktop Entry]` header and installed executable path, plus removal of the
-  CLI bootstrap files.
+- Ubuntu runs as a fixed `tester` account it creates and removes each run. It
+  installs synthetic legacy CLI (from `ci/nfpm.yaml`) and `fleet-osquery`
+  (from its own YAML) deb/rpm packages, both built with the same pinned nfpm
+  (test inputs, never release artifacts), around the candidate engine,
+  replaces both with the desktop package through the package manager, and
+  validates that their records, the `orbit.service` unit, and `/opt/orbit`
+  are gone, `/usr/bin/anyray-connect` belongs to the desktop package, and
+  `$HOME/.config/autostart/ai.anyray.connect-tray.desktop` (header and
+  installed executable path) plus the CLI bootstrap files are as expected.
+  It then exercises the fleet uninstall helper
+  (`/usr/lib/anyray-connect/uninstall.sh`) end to end: the helper's own
+  `--json` output on stdout proves whether it ran the engine's `uninstall` or
+  `offboard` user-layer verb, and the desktop deb is gone afterward. The host
+  is Ubuntu (deb only), so this never exercises the rpm branch of
+  `uninstall.sh` (`dnf remove`).
 
 `npm run test:desktop-release` covers the workflow-shape and account-isolation
 regressions for these smokes.
@@ -706,9 +714,12 @@ and the login-registration fields): verification requires app ownership, an
 engine path and tray app path that resolve to the installed app, and valid
 RFC 3339 timestamps, while preserving every other profile field. It waits up to
 30 seconds for ownership adoption before stopping the tray. Scheduler state must
-remain byte-identical everywhere, and package install and uninstall must leave
-the pre-existing profile byte-identical. Path checks compare canonical paths to
-accept runner symlinks.
+remain byte-identical everywhere. Package install, and a package-manager-only
+uninstall (Windows `msiexec /x`, Linux `rpm -e`), must leave the pre-existing
+profile byte-identical; the Linux fleet uninstall helper's own `uninstall`
+user-layer verb is the deliberate exception, removing `~/.anyray` (the profile
+included), while its `offboard` verb leaves it in place. Path checks compare
+canonical paths to accept runner symlinks.
 
 `SHA256SUMS` is generated only after Apple/Azure signing, because those signers
 rewrite their artifacts. The staging manifest binds every checksum to the

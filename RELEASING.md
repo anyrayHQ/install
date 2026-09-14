@@ -632,13 +632,19 @@ source or GitHub App credential:
   `/usr/local/bin` symlink and shims and installs `uninstall.sh`), signs it
   with the Developer ID Installer certificate, and notarizes and staples it. A
   static Installer readme tells interactive users that the deprecated Anyray
-  Connect CLI package and fleetd are removed when present. A credential-free
-  `verify-macos-signed` job on the same fleet first installs a synthetic
-  `ai.anyray.connect` package containing a stub launcher and the retired
-  managed-enroll LaunchAgent plist, then installs the final desktop pkg and
-  requires the legacy receipt and plist to be gone, the launcher to be the
-  desktop symlink, and no fleetd daemon to be loaded. Teardown follows the
-  signed smoke with `always()`.
+  Connect CLI package and fleetd are removed when present. The credential-free
+  `verify-macos-signed` job proves the final pkg refuses a foreign launcher,
+  then sweeps a retired CLI receipt whose launcher is a copy of the signed
+  engine while reporting locked residue. It plants an installed and loaded
+  Anyray-owned fleetd receipt/runtime (secret file present) and asserts the
+  receipt, daemon, plist, secret, and `/usr/local/bin/orbit` symlink are all
+  gone while the audit logs and `/usr/local/bin` itself (birth time unchanged)
+  are retained. It then plants fleetd ownership via a plist reference alone,
+  with no secret file, and asserts that case is swept the same way. Finally it
+  leaves a separately installed and loaded foreign Fleet agent, receipt, and
+  `/usr/local/bin/orbit` symlink untouched; it then exercises the real desktop
+  install, GUI migration smoke, symlink/helpers, and uninstall. Teardown
+  follows the signed smoke with `always()`.
   The Mac host is reused inside its paid 24h window, so the signing job
   deletes its keychain and key files in an `always()` step and the build
   never sees a secret.

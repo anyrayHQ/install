@@ -796,32 +796,29 @@ jobs:
           retired_root="$RUNNER_TEMP/connect-desktop-retired-root"
           retired_pkg="$RUNNER_TEMP/connect-desktop-retired.pkg"
           retired_stub="$RUNNER_TEMP/connect-desktop-retired-anyray-connect"
-          for path in \
-            "$installed_app" \
-            "$launcher" \
-            "$credential_helper" \
-            "$bootstrap_helper" \
-            /usr/local/lib/anyray-connect; do
-            sudo test ! -e "$path"
-            sudo test ! -L "$path"
-          done
-          sudo test ! -e "$retired_plist"
-          if pkgutil --pkg-info ai.anyray.connect >/dev/null 2>&1; then
-            echo '::error::dedicated Mac runner already has the retired CLI receipt'
-            exit 1
-          fi
-
+          locked_cli_file='/usr/local/lib/anyray-connect-retired/locked.txt'
+          residue_marker='/Library/Application Support/Anyray/preinstall-residue.txt'
+          fleet_receipt='com.fleetdm.orbit.base.pkg'
+          fleet_plist='/Library/LaunchDaemons/com.fleetdm.orbit.plist'
+          fleet_root='/opt/orbit'
+          fleet_secret='/opt/orbit/anyray-enroll-secret.txt'
+          fleet_binary='/opt/orbit/bin/orbit/macos/stable/orbit'
+          fleet_osquery_log='/opt/orbit/osquery_log/x.log'
+          fleet_var_log='/var/log/orbit/orbit.log'
+          owned_fleet_root="$RUNNER_TEMP/connect-desktop-owned-fleet-root"
+          owned_fleet_pkg="$RUNNER_TEMP/connect-desktop-owned-fleet.pkg"
+          plist_fleet_root="$RUNNER_TEMP/connect-desktop-plist-fleet-root"
+          plist_fleet_pkg="$RUNNER_TEMP/connect-desktop-plist-fleet.pkg"
+          foreign_fleet_root="$RUNNER_TEMP/connect-desktop-foreign-fleet-root"
+          foreign_fleet_pkg="$RUNNER_TEMP/connect-desktop-foreign-fleet.pkg"
           foreign="$RUNNER_TEMP/foreign-anyray-connect"
-          printf '%s\n' '#!/bin/sh' 'exit 23' > "$foreign"
-          chmod 0755 "$foreign"
-          # A fresh Apple Silicon host has no /usr/local/bin yet.
-          sudo install -d -m 0755 /usr/local/bin
-          sudo install -m 0755 "$foreign" "$launcher"
-          foreign_owned=true
+          foreign_owned=false
           cleanup() {
+            sudo /bin/launchctl bootout system/com.fleetdm.orbit >/dev/null 2>&1 || true
             if sudo test -x "$uninstall"; then
               sudo "$uninstall" >/dev/null 2>&1 || true
             fi
+            sudo /usr/bin/chflags nouchg "$locked_cli_file" >/dev/null 2>&1 || true
             sudo rm -rf "$installed_app" /usr/local/lib/anyray-connect
             for helper in "$credential_helper" "$bootstrap_helper"; do
               if sudo test -f "$helper" \
@@ -841,12 +838,102 @@ jobs:
               && sudo cmp -s "$retired_stub" "$launcher"; then
               sudo rm -f "$launcher"
             fi
-            sudo rm -f "$retired_plist"
+            sudo rm -rf \
+              "$fleet_root" \
+              /var/lib/orbit \
+              /var/log/orbit \
+              /usr/local/lib/anyray-connect-retired
+            sudo rm -f "$fleet_plist" /usr/local/bin/orbit "$retired_plist" "$residue_marker"
             sudo pkgutil --forget ai.anyray.connect >/dev/null 2>&1 || true
+            sudo pkgutil --forget "$fleet_receipt" >/dev/null 2>&1 || true
             sudo pkgutil --forget ai.anyray.connect-tray >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
+          build_fleet_pkg() {
+            fleet_component_root=$1
+            fleet_component_pkg=$2
+            fleet_secret_argument=$3
+            mkdir -p \
+              "$fleet_component_root/Library/LaunchDaemons" \
+              "$fleet_component_root/opt/orbit/bin/orbit/macos/stable" \
+              "$fleet_component_root/opt/orbit/osquery_log" \
+              "$fleet_component_root/usr/local/bin" \
+              "$fleet_component_root/var/lib/orbit" \
+              "$fleet_component_root/var/log/orbit"
+            printf '%s\n' '#!/bin/sh' 'exec /bin/sleep 3600' \
+              > "$fleet_component_root/opt/orbit/bin/orbit/macos/stable/orbit"
+            chmod 0755 "$fleet_component_root/opt/orbit/bin/orbit/macos/stable/orbit"
+            cp \
+              "$fleet_component_root/opt/orbit/bin/orbit/macos/stable/orbit" \
+              "$fleet_component_root/opt/orbit/bin/orbit/orbit"
+            printf '%s\n' 'retained osquery evidence' \
+              > "$fleet_component_root/opt/orbit/osquery_log/x.log"
+            printf '%s\n' 'retained osquery results' \
+              > "$fleet_component_root/opt/orbit/osquery_log/osqueryd.results.log"
+            printf '%s\n' 'retained orbit log' \
+              > "$fleet_component_root/var/log/orbit/orbit.log"
+            ln -s /opt/orbit "$fleet_component_root/usr/local/bin/orbit"
+            cat > "$fleet_component_root$fleet_plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>com.fleetdm.orbit</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/opt/orbit/bin/orbit/macos/stable/orbit</string>
+              <string>$fleet_secret_argument</string>
+            </array>
+            <key>RunAtLoad</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+            chmod 0644 "$fleet_component_root$fleet_plist"
+            plutil -lint "$fleet_component_root$fleet_plist"
+            pkgbuild \
+              --root "$fleet_component_root" \
+              --identifier "$fleet_receipt" \
+              --version 0.0.0 \
+              --install-location / \
+              --ownership recommended \
+              "$fleet_component_pkg"
+          }
+          for path in \
+            "$installed_app" \
+            "$launcher" \
+            "$credential_helper" \
+            "$bootstrap_helper" \
+            /usr/local/lib/anyray-connect \
+            /usr/local/lib/anyray-connect-retired \
+            "$fleet_plist" \
+            "$fleet_root" \
+            "$residue_marker"; do
+            sudo test ! -e "$path"
+            sudo test ! -L "$path"
+          done
+          sudo test ! -e "$retired_plist"
+          if pkgutil --pkg-info ai.anyray.connect >/dev/null 2>&1; then
+            echo '::error::dedicated Mac runner already has the retired CLI receipt'
+            exit 1
+          fi
+          if pkgutil --pkg-info "$fleet_receipt" >/dev/null 2>&1; then
+            echo '::error::dedicated Mac runner already has the Anyray fleetd receipt'
+            exit 1
+          fi
+          if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then
+            echo '::error::dedicated Mac runner already has a loaded fleetd daemon'
+            exit 1
+          fi
+
+          printf '%s\n' '#!/bin/sh' 'exit 23' > "$foreign"
+          chmod 0755 "$foreign"
+          # A fresh Apple Silicon host has no /usr/local/bin yet.
+          sudo install -d -m 0755 /usr/local/bin
+          sudo install -m 0755 "$foreign" "$launcher"
+          foreign_owned=true
           if sudo installer -pkg "$pkg" -target /; then
             echo '::error::PKG overwrote a foreign /usr/local/bin/anyray-connect'
             exit 1
@@ -866,9 +953,12 @@ jobs:
 
           mkdir -p \
             "$retired_root/usr/local/bin" \
+            "$retired_root/usr/local/lib/anyray-connect-retired" \
             "$retired_root/Library/LaunchAgents"
-          printf '%s\n' '#!/bin/sh' 'exit 17' > "$retired_stub"
+          cp "$updater_app/Contents/MacOS/anyray-connect" "$retired_stub"
           install -m 0755 "$retired_stub" "$retired_root/usr/local/bin/anyray-connect"
+          printf '%s\n' 'locked retired CLI residue' \
+            > "$retired_root/usr/local/lib/anyray-connect-retired/locked.txt"
           cat > "$retired_root$retired_plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -885,6 +975,7 @@ jobs:
           </dict>
           </plist>
           PLIST
+          chmod 0644 "$retired_root$retired_plist"
           plutil -lint "$retired_root$retired_plist"
           pkgbuild \
             --root "$retired_root" \
@@ -897,6 +988,20 @@ jobs:
           pkgutil --pkg-info ai.anyray.connect >/dev/null
           sudo cmp "$retired_stub" "$launcher"
           sudo test -f "$retired_plist"
+          sudo /usr/bin/chflags uchg "$locked_cli_file"
+
+          build_fleet_pkg \
+            "$owned_fleet_root" \
+            "$owned_fleet_pkg" \
+            '/opt/orbit/anyray-enroll-secret.txt'
+          sudo installer -pkg "$owned_fleet_pkg" -target /
+          printf '%s\n' 'Anyray-owned fixture' | sudo tee "$fleet_secret" >/dev/null
+          sudo chmod 0600 "$fleet_secret"
+          sudo /bin/launchctl bootstrap system "$fleet_plist"
+
+          # A delete-and-recreate of /usr/local/bin changes its birth time even
+          # though "sudo test -d /usr/local/bin" still passes afterward.
+          usr_local_bin_before="$(stat -f '%B %u %g %Lp' /usr/local/bin)"
 
           sudo installer -pkg "$pkg" -target /
           pkgutil --pkg-info ai.anyray.connect-tray >/dev/null
@@ -905,10 +1010,25 @@ jobs:
             exit 1
           fi
           sudo test ! -e "$retired_plist"
-          if sudo launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then
-            echo '::error::desktop PKG left the fleetd daemon loaded'
+          if pkgutil --pkg-info "$fleet_receipt" >/dev/null 2>&1; then
+            echo '::error::desktop PKG left the Anyray fleetd receipt behind'
             exit 1
           fi
+          if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then
+            echo '::error::desktop PKG left the Anyray fleetd daemon loaded'
+            exit 1
+          fi
+          sudo test ! -e "$fleet_plist"
+          sudo test ! -e "$fleet_root/bin"
+          sudo test ! -e "$fleet_secret"
+          sudo test ! -e /usr/local/bin/orbit
+          sudo test ! -L /usr/local/bin/orbit
+          sudo test -f "$fleet_osquery_log"
+          sudo test -f "$fleet_var_log"
+          sudo test -d /usr/local/bin
+          test "$(stat -f '%B %u %g %Lp' /usr/local/bin)" = "$usr_local_bin_before"
+          sudo test -f "$locked_cli_file"
+          sudo grep -Fqx -- "$locked_cli_file" "$residue_marker"
           sudo test -L "$launcher"
           test "$(sudo readlink "$launcher")" \
             = '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'
@@ -956,6 +1076,73 @@ jobs:
             echo '::error::uninstall left the PKG receipt behind'
             exit 1
           fi
+
+          build_fleet_pkg \
+            "$plist_fleet_root" \
+            "$plist_fleet_pkg" \
+            '/opt/orbit/anyray-enroll-secret.txt'
+          sudo installer -pkg "$plist_fleet_pkg" -target /
+          sudo /bin/launchctl bootstrap system "$fleet_plist"
+
+          sudo installer -pkg "$pkg" -target /
+          pkgutil --pkg-info ai.anyray.connect-tray >/dev/null
+          if pkgutil --pkg-info "$fleet_receipt" >/dev/null 2>&1; then
+            echo '::error::desktop PKG left the plist-referenced fleetd receipt behind'
+            exit 1
+          fi
+          if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then
+            echo '::error::desktop PKG left the plist-referenced fleetd daemon loaded'
+            exit 1
+          fi
+          sudo test ! -e "$fleet_plist"
+          sudo test ! -e "$fleet_root/bin"
+          sudo test ! -e "$fleet_secret"
+          sudo test ! -e /usr/local/bin/orbit
+          sudo test ! -L /usr/local/bin/orbit
+          sudo test -f "$fleet_osquery_log"
+          sudo test -f "$fleet_var_log"
+          sudo test -L "$launcher"
+          test "$(sudo readlink "$launcher")" \
+            = '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'
+
+          sudo "$uninstall"
+          sudo test ! -e "$installed_app"
+          sudo test ! -e "$launcher"
+          sudo test ! -L "$launcher"
+          sudo test ! -e "$credential_helper"
+          sudo test ! -e "$bootstrap_helper"
+          sudo test ! -e /usr/local/lib/anyray-connect
+          if pkgutil --pkg-info ai.anyray.connect-tray >/dev/null 2>&1; then
+            echo '::error::uninstall left the PKG receipt behind'
+            exit 1
+          fi
+
+          build_fleet_pkg \
+            "$foreign_fleet_root" \
+            "$foreign_fleet_pkg" \
+            '/opt/orbit/foreign-enroll-secret.txt'
+          sudo installer -pkg "$foreign_fleet_pkg" -target /
+          sudo /bin/launchctl bootstrap system "$fleet_plist"
+
+          sudo installer -pkg "$pkg" -target /
+          pkgutil --pkg-info ai.anyray.connect-tray >/dev/null
+          pkgutil --pkg-info "$fleet_receipt" >/dev/null
+          sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null
+          sudo test -f "$fleet_plist"
+          sudo test -d "$fleet_root/bin"
+          sudo cmp \
+            "$foreign_fleet_root/opt/orbit/bin/orbit/macos/stable/orbit" \
+            "$fleet_binary"
+          sudo cmp "$foreign_fleet_root$fleet_plist" "$fleet_plist"
+          sudo test ! -e "$fleet_secret"
+          sudo test -f "$fleet_osquery_log"
+          sudo test -f "$fleet_var_log"
+          sudo test -d /var/lib/orbit
+          sudo test -L /usr/local/bin/orbit
+          test "$(sudo readlink /usr/local/bin/orbit)" = /opt/orbit
+          sudo test -L "$launcher"
+          test "$(sudo readlink "$launcher")" \
+            = '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'
 
   teardown-mac:
     needs: [provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed]

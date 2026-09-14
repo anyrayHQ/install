@@ -208,6 +208,54 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(job('verify-windows-signatures'), /MSI changed signed payload/);
   });
 
+  test('exercises Windows foreign-engine refusal, managed layout, and uninstall cleanup', () => {
+    const windows = job('verify-windows-signatures');
+    assert.match(windows, /\$installDir = Join-Path \$env:ProgramFiles 'Anyray'/);
+    assert.doesNotMatch(windows, /INSTALLDIR=/);
+
+    assert.match(windows, /Set-Content -NoNewline -LiteralPath \$installedEnginePath -Value 'foreign-engine-sentinel'/);
+    assert.match(windows, /Get-AuthenticodeSignature -LiteralPath \$installedEnginePath/);
+    assert.match(windows, /SignatureStatus\]::Valid/);
+    assert.match(windows, /\$foreignInstallArgs = @\(/);
+    assert.match(windows, /-ArgumentList \$foreignInstallArgs/);
+    assert.match(windows, /\$foreignInstall\.ExitCode -ne 1603/);
+    assert.match(windows, /MSI foreign-engine refusal removed the foreign engine/);
+    assert.match(windows, /MSI foreign-engine refusal changed the foreign engine/);
+
+    const refusalCheck = windows.indexOf('$foreignInstall.ExitCode -ne 1603');
+    const engineRemoved = windows.indexOf('Remove-Item -LiteralPath $installedEnginePath');
+    const staleShim = windows.indexOf("'echo stale-helper-sentinel'");
+    const cleanInstall = windows.indexOf('$installArgs = @(');
+    assert.ok(refusalCheck > 0 && refusalCheck < engineRemoved);
+    assert.ok(engineRemoved > 0 && engineRemoved < staleShim);
+    assert.ok(staleShim > 0 && staleShim < cleanInstall);
+    assert.match(windows, /anyray-credential-helper\.cmd/);
+    assert.match(windows, /anyray-bootstrap-headers-helper\.cmd/);
+    assert.match(windows, /Managed by anyray-connect desktop helper; do not edit\./);
+    assert.match(windows, /'desktop', 'helper', '--print', '--platform', 'windows',/);
+    // --bin must reach the engine as one argument despite the space in Program Files.
+    assert.match(windows, /'--wrapper', \$wrapperKind, '--bin', \('"' \+ \$installedEnginePath \+ '"'\)/);
+    // Cleanup removes the install directory only when this smoke created it.
+    assert.match(windows, /\$createdInstallDir = \$false/);
+    assert.match(windows, /\$createdInstallDir = \$true/);
+    assert.match(windows, /elseif \(\$createdInstallDir -and \(Test-Path -LiteralPath \$installDir\)\)/);
+    assert.match(windows, /-RedirectStandardOutput \$expectedShimPath -NoNewWindow -Wait -PassThru/);
+    assert.match(windows, /installed engine failed to print the \$wrapperKind wrapper/);
+    assert.match(windows, /installed helper shim does not match desktop helper --print output/);
+    assert.match(windows, /\$installedEngine = Get-Item -LiteralPath \$installedEnginePath/);
+    assert.match(windows, /verify-authenticode-windows\.ps1 -Path \$installedEngine\.FullName/);
+    assert.match(windows, /\[System\.EnvironmentVariableTarget\]::Machine/);
+    assert.match(windows, /Test-MachinePathEntry -ExpectedPath \$installDir/);
+    assert.match(windows, /installed MSI has no uninstall script/);
+
+    assert.match(windows, /\$uninstallArgs = @\(/);
+    assert.match(windows, /-ArgumentList \$uninstallArgs/);
+    assert.match(windows, /MSI uninstall left a managed helper shim behind/);
+    assert.match(windows, /MSI uninstall left the uninstall script behind/);
+    assert.match(windows, /MSI uninstall left the install directory in machine PATH/);
+    assert.doesNotMatch(windows, /Invoke-Expression/);
+  });
+
   test('signs Windows inner executables before MSI packaging and the MSI after', () => {
     assert.match(job('bundle-windows-unsigned'), /needs: \[preflight, sign-windows-inner\]/);
     assert.match(job('bundle-windows-unsigned'), /tauri\.js" bundle .*--bundles msi/);
@@ -230,7 +278,7 @@ describe('desktop staging workflow safety contract', () => {
     const firstCheck = windows.indexOf('node scripts/verify-desktop-profile.mjs');
     assert.ok(firstCheck > 0);
     assert.match(windows, /verify-desktop-profile\.mjs \$profileBefore \$state \$installedEngine\.FullName \$installedMain\.DirectoryName/);
-    assert.match(windows, /try \{ \$observedProfile = Get-Content -Raw \$state \| ConvertFrom-Json \}/);
+    assert.match(windows, /try \{ \$observedProfile = Get-Content -Raw -LiteralPath \$state \| ConvertFrom-Json \}/);
     assert.ok(firstCheck < windows.indexOf('Stop-Process -Id $appProcess.Id -Force'));
     assert.ok(windows.indexOf('$stateBefore = (Get-FileHash') > firstCheck);
   });
@@ -305,7 +353,7 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(windows, /Start-Process -FilePath \$installedMain\.FullName/);
     assert.match(windows, /ai\.anyray\.connect-tray/);
     assert.match(windows, /Stop-Process -Id \$appProcess\.Id -Force/);
-    assert.match(windows, /Remove-ItemProperty -Path \$runKey -Name \$runName/);
+    assert.match(windows, /Remove-ItemProperty -LiteralPath \$runKey -Name \$runName/);
     assert.match(windows, /MSI uninstall failed/);
 
     const linux = job('smoke-linux-installers');

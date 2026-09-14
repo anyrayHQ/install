@@ -319,14 +319,29 @@ jobs:
 
       # The fleet image is expected to ship Rust; this only fills the gap if it
       # does not, from a pinned rustup-init verified against its digest.
+      - name: Check for an existing Rust toolchain
+        id: rustup-check
+        run: |
+          set -euo pipefail
+          if command -v rustup >/dev/null 2>&1; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch pinned rustup-init (checksum-verified)
+        if: steps.rustup-check.outputs.present != 'true'
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://static.rust-lang.org/rustup/archive/${{ env.RUSTUP_VERSION }}/aarch64-apple-darwin/rustup-init
+          sha256: ${{ env.RUSTUP_INIT_SHA256_DARWIN_ARM64 }}
+          dest: rustup-init
+          mode: '0755'
+
       - name: Rust toolchain (pinned rustup-init when the image has none)
         run: |
           set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/aarch64-apple-darwin/rustup-init"
-            curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
-            echo "${RUSTUP_INIT_SHA256_DARWIN_ARM64}  rustup-init" | shasum -a 256 -c -
-            chmod +x rustup-init
+          if [ "${{ steps.rustup-check.outputs.present }}" != 'true' ]; then
             ./rustup-init -y --no-modify-path --profile minimal --default-toolchain none
             rm -f rustup-init
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -420,6 +435,21 @@ jobs:
           name: connect-desktop-macos-unsigned
           path: unsigned
 
+      # Fresh ephemeral Mac runners do not reliably carry Apple's Developer ID
+      # intermediates, so they are fetched and checksum-verified here.
+      - name: Fetch Apple Developer ID CA (pinned + checksum-verified)
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://www.apple.com/certificateauthority/DeveloperIDCA.cer
+          sha256: 7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f
+          dest: ${{ runner.temp }}/apple-developer-id-ca/DeveloperIDCA.cer
+      - name: Fetch Apple Developer ID G2 CA (pinned + checksum-verified)
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          sha256: f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+          dest: ${{ runner.temp }}/apple-developer-id-ca/DeveloperIDG2CA.cer
+
       - name: Import the Developer ID Application identity
         run: |
           set -euo pipefail
@@ -432,19 +462,6 @@ jobs:
           security default-keychain -s "$KEYCHAIN"
 
           ca_dir="$RUNNER_TEMP/apple-developer-id-ca"
-          mkdir -p "$ca_dir"
-          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            https://www.apple.com/certificateauthority/DeveloperIDCA.cer \
-            --output "$ca_dir/DeveloperIDCA.cer"
-          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
-            --output "$ca_dir/DeveloperIDG2CA.cer"
-          printf '%s  %s\n' \
-            '7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f' \
-            "$ca_dir/DeveloperIDCA.cer" \
-            'f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a' \
-            "$ca_dir/DeveloperIDG2CA.cer" \
-            | shasum -a 256 -c -
           security import "$ca_dir/DeveloperIDCA.cer" -k "$KEYCHAIN"
           security import "$ca_dir/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
 
@@ -1331,16 +1348,22 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Fetch pinned jsign and Microsoft trust anchor
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "$RUNNER_TEMP/jsign.jar" \
-            "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
-          echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
-          curl -fsSL --proto '=https' --retry 6 --retry-delay 5 --retry-all-errors -o "$RUNNER_TEMP/ms-root.crt" \
-            'https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt'
-          echo "5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270  $RUNNER_TEMP/ms-root.crt" | sha256sum -c -
-          openssl x509 -inform DER -in "$RUNNER_TEMP/ms-root.crt" -out "$RUNNER_TEMP/ms-root.pem"
+      - name: Fetch pinned jsign
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://github.com/ebourg/jsign/releases/download/${{ env.JSIGN_VERSION }}/jsign-${{ env.JSIGN_VERSION }}.jar
+          sha256: ${{ env.JSIGN_SHA256 }}
+          dest: ${{ runner.temp }}/jsign.jar
+      - name: Fetch the Microsoft trust anchor
+        env:
+          MS_ROOT_SHA256: 5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt
+          sha256: ${{ env.MS_ROOT_SHA256 }}
+          dest: ${{ runner.temp }}/ms-root.crt
+      - name: Convert the Microsoft trust anchor to PEM
+        run: openssl x509 -inform DER -in "$RUNNER_TEMP/ms-root.crt" -out "$RUNNER_TEMP/ms-root.pem"
       - name: Authenticode-sign and independently verify both inner executables
         env:
           JSIGN_JAR: ${{ runner.temp }}/jsign.jar
@@ -1530,11 +1553,11 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Fetch pinned jsign
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "$RUNNER_TEMP/jsign.jar" \
-            "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
-          echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://github.com/ebourg/jsign/releases/download/${{ env.JSIGN_VERSION }}/jsign-${{ env.JSIGN_VERSION }}.jar
+          sha256: ${{ env.JSIGN_SHA256 }}
+          dest: ${{ runner.temp }}/jsign.jar
       - name: Authenticode-sign the MSI installer (verified natively in the next job)
         env:
           JSIGN_JAR: ${{ runner.temp }}/jsign.jar
@@ -1935,13 +1958,16 @@ jobs:
 
       # Same pinned rustup-init pattern as the monorepo tray gate: file
       # download + digest check, never rustup.rs piped into sh.
+      - name: Fetch pinned rustup-init (checksum-verified)
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://static.rust-lang.org/rustup/archive/${{ env.RUSTUP_VERSION }}/x86_64-unknown-linux-gnu/rustup-init
+          sha256: ${{ env.RUSTUP_INIT_SHA256_LINUX_X64 }}
+          dest: rustup-init
+          mode: '0755'
       - name: Rust toolchain (pinned rustup-init, no third-party action)
         run: |
           set -euo pipefail
-          url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init"
-          curl --proto '=https' --tlsv1.2 -sSfL "$url" -o rustup-init
-          echo "${RUSTUP_INIT_SHA256_LINUX_X64}  rustup-init" | sha256sum -c -
-          chmod +x rustup-init
           ./rustup-init -y --no-modify-path --profile minimal --default-toolchain none
           rm -f rustup-init
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
@@ -2548,22 +2574,30 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
     steps:
+      # Also needed for the local fetch-pinned action below (the s3-artifact-
+      # download checkout was already required later in this job).
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
           role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
           aws-region: eu-central-1
+      - name: Fetch pinned gh CLI (checksum-verified)
+        env:
+          GH_VERSION: '2.76.1'
+          GH_SHA256: 18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
+        uses: ./.github/actions/fetch-pinned
+        with:
+          url: https://github.com/cli/cli/releases/download/v${{ env.GH_VERSION }}/gh_${{ env.GH_VERSION }}_linux_amd64.tar.gz
+          sha256: ${{ env.GH_SHA256 }}
+          dest: /tmp/gh.tgz
       - name: Install pinned gh CLI
+        env:
+          GH_VERSION: '2.76.1'
         run: |
           set -euo pipefail
-          V=2.76.1
-          SHA=18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
-          curl -fsSL -o /tmp/gh.tgz \
-            "https://github.com/cli/cli/releases/download/v${V}/gh_${V}_linux_amd64.tar.gz"
-          echo "${SHA}  /tmp/gh.tgz" | sha256sum -c -
           tar -xzf /tmp/gh.tgz -C /tmp
-          install -m 0755 "/tmp/gh_${V}_linux_amd64/bin/gh" /usr/local/bin/gh
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+          install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
       - uses: ./.github/actions/s3-artifact-download
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}

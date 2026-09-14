@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -127,5 +130,88 @@ describe('the curl detector sees every output form', () => {
   test('a status probe that writes nothing is not a download', () => {
     assert.ok(!curlWritesFile("code=\"$(curl -sL -w '%{http_code}' https://a/b)\""));
     assert.ok(!curlWritesFile('curl -fsS https://a/b | tar -xz'));
+  });
+});
+
+// The `run:` body of a named step in the action, dedented so bash can execute it.
+function stepBody(name) {
+  const lines = action.split('\n');
+  const at = lines.findIndex((l) => l.trim() === `- name: ${name}`);
+  assert.ok(at >= 0, `step ${name} missing`);
+  const runAt = lines.findIndex((l, i) => i > at && /^\s*run: \|/.test(l));
+  const indent = lines[runAt].match(/^ */)[0].length + 2;
+  const body = [];
+  for (let i = runAt + 1; i < lines.length; i++) {
+    if (lines[i].trim() !== '' && lines[i].match(/^ */)[0].length < indent) break;
+    body.push(lines[i].slice(indent));
+  }
+  return body.join('\n');
+}
+
+function runStep(name, env) {
+  const dir = mkdtempSync(join(tmpdir(), 'fetch-pinned-'));
+  const out = join(dir, 'output');
+  writeFileSync(out, '');
+  const result = spawnSync('bash', ['-c', stepBody(name)], {
+    encoding: 'utf8',
+    env: { ...process.env, ...env, GITHUB_OUTPUT: out },
+  });
+  const outputs = readFileSync(out, 'utf8');
+  rmSync(dir, { recursive: true, force: true });
+  return { ...result, outputs };
+}
+
+describe('fetch-pinned step bodies behave (executed, not pattern-matched)', () => {
+  const sha0 = '0'.repeat(64);
+  test('a missing restored file is an invalid entry, not a job failure', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fetch-pinned-'));
+    const r = runStep('Check the restored file', { FETCH_SHA256: sha0, FETCH_DEST: join(dir, 'absent') });
+    rmSync(dir, { recursive: true, force: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.outputs, /valid=false/);
+  });
+  test('a restored file with the wrong hash is removed and marked invalid', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fetch-pinned-'));
+    const dest = join(dir, 'tool');
+    writeFileSync(dest, 'stale bytes');
+    const r = runStep('Check the restored file', { FETCH_SHA256: sha0, FETCH_DEST: dest });
+    const gone = !readdirSync(dir).includes('tool');
+    rmSync(dir, { recursive: true, force: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.outputs, /valid=false/);
+    assert.ok(gone);
+  });
+  test('a restored file with the right hash is valid and kept', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fetch-pinned-'));
+    const dest = join(dir, 'tool');
+    writeFileSync(dest, 'known bytes\n');
+    const sha = spawnSync('shasum', ['-a', '256', dest], { encoding: 'utf8' }).stdout.split(' ')[0];
+    const r = runStep('Check the restored file', { FETCH_SHA256: sha, FETCH_DEST: dest });
+    const kept = readdirSync(dir).includes('tool');
+    rmSync(dir, { recursive: true, force: true });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.outputs, /valid=true/);
+    assert.ok(kept);
+  });
+  test('verification after download fails loudly and removes a mismatching file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fetch-pinned-'));
+    const dest = join(dir, 'tool');
+    writeFileSync(dest, 'wrong bytes');
+    const r = runStep('Verify checksum and mode', { FETCH_URL: 'https://example.invalid/x', FETCH_SHA256: sha0, FETCH_DEST: dest, FETCH_MODE: '' });
+    const gone = !readdirSync(dir).includes('tool');
+    rmSync(dir, { recursive: true, force: true });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stdout + r.stderr, /checksum mismatch/);
+    assert.ok(gone);
+  });
+  test('the download step refuses a non-https url and a malformed hash before any fetch', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fetch-pinned-'));
+    const http = runStep('Download on a cache miss or a bad entry', { FETCH_URL: 'http://example.invalid/x', FETCH_SHA256: sha0, FETCH_DEST: join(dir, 'x'), FETCH_MODE: '' });
+    const badSha = runStep('Download on a cache miss or a bad entry', { FETCH_URL: 'https://example.invalid/x', FETCH_SHA256: 'ABC', FETCH_DEST: join(dir, 'x'), FETCH_MODE: '' });
+    rmSync(dir, { recursive: true, force: true });
+    assert.notEqual(http.status, 0);
+    assert.match(http.stdout + http.stderr, /refuses a non-https url/);
+    assert.notEqual(badSha.status, 0);
+    assert.match(badSha.stdout + badSha.stderr, /64 lowercase hex/);
   });
 });

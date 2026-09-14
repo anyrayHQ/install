@@ -45,15 +45,19 @@ runs:
         FETCH_DEST: ${{ inputs.dest }}
       run: |
         set -euo pipefail
-        if command -v shasum >/dev/null 2>&1; then
-          actual="$(shasum -a 256 "$FETCH_DEST" | awk '{print $1}')"
-        else
-          actual="$(sha256sum "$FETCH_DEST" | awk '{print $1}')"
+        # A missing or unreadable restored file is a bad entry too, not a job failure.
+        actual=''
+        if [ -f "$FETCH_DEST" ]; then
+          if command -v shasum >/dev/null 2>&1; then
+            actual="$(shasum -a 256 "$FETCH_DEST" 2>/dev/null | awk '{print $1}')" || actual=''
+          else
+            actual="$(sha256sum "$FETCH_DEST" 2>/dev/null | awk '{print $1}')" || actual=''
+          fi
         fi
-        if [ "$actual" = "$FETCH_SHA256" ]; then
+        if [ -n "$actual" ] && [ "$actual" = "$FETCH_SHA256" ]; then
           echo "valid=true" >> "$GITHUB_OUTPUT"
         else
-          echo "::warning::cached ${FETCH_DEST} failed its checksum; refetching"
+          echo "::warning::cached ${FETCH_DEST} is missing or failed its checksum; refetching"
           rm -f "$FETCH_DEST"
           echo "valid=false" >> "$GITHUB_OUTPUT"
         fi
@@ -74,16 +78,14 @@ runs:
           *) echo '::error::fetch-pinned refuses a non-https url' && exit 1 ;;
         esac
 
-        case "$FETCH_SHA256" in
-          [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-          *) echo '::error::fetch-pinned sha256 input must be 64 lowercase hex characters' && exit 1 ;;
-        esac
+        [[ "$FETCH_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+          || { echo '::error::fetch-pinned sha256 input must be 64 lowercase hex characters'; exit 1; }
 
         mkdir -p "$(dirname "$FETCH_DEST")"
         tmp="${FETCH_DEST}.tmp"
 
-        # Bounded: one attempt is at most 2 minutes and the whole retry loop at most
-        # 3 minutes, so a stalled upstream cannot hold a paid runner open.
+        # Bounded: an attempt is at most 2 minutes and no retry starts after
+        # 3 minutes, so the worst case is about 5 minutes, never an open loop.
         curl -fsSL --proto '=https' --tlsv1.2 \
           --connect-timeout 10 --max-time 120 \
           --retry 3 --retry-delay 5 --retry-max-time 180 --retry-all-errors \

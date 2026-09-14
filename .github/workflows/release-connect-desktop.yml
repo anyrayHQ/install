@@ -1432,7 +1432,12 @@ jobs:
             }
             ./scripts/verify-authenticode-windows.ps1 -Path $installedEngine.FullName
             ./scripts/verify-authenticode-windows.ps1 -Path $installedMain.FullName
-            foreach ($helperPath in @($credentialShim, $bootstrapShim)) {
+            foreach ($pair in @(
+              @($credentialShim, 'credential'),
+              @($bootstrapShim, 'bootstrap-headers')
+            )) {
+              $helperPath = $pair[0]
+              $wrapperKind = $pair[1]
               if (-not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
                 throw "installed MSI has no managed helper shim: $helperPath"
               }
@@ -1440,9 +1445,26 @@ jobs:
               if ($helperHead.Count -ne 2 -or $helperHead[0] -ne '@echo off' -or $helperHead[1] -ne "REM $helperMarker") {
                 throw "installed helper shim has no management marker: $helperPath"
               }
-              $helperContent = Get-Content -Raw -LiteralPath $helperPath
-              if ($helperContent.IndexOf($installedEnginePath, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-                throw "installed helper shim does not reference the engine path: $helperPath"
+              # The header check above is a fast failure; this regenerates the exact
+              # wrapper bytes from the installed engine and diffs the full file, so a
+              # shim pinned to a stale --bin or a stale credential protocol fails here
+              # instead of a substring match silently passing a wrong wrapper.
+              $expectedShimPath = Join-Path $env:RUNNER_TEMP "connect-desktop-expected-$wrapperKind.cmd"
+              $printArgs = @(
+                'desktop', 'helper', '--print', '--platform', 'windows',
+                '--wrapper', $wrapperKind, '--bin', $installedEnginePath
+              )
+              # RedirectStandardOutput writes the child's raw bytes with no text-mode
+              # translation, so both files carry the engine's own CRLF line endings.
+              $printProc = Start-Process -FilePath $installedEnginePath -ArgumentList $printArgs `
+                -RedirectStandardOutput $expectedShimPath -NoNewWindow -Wait -PassThru
+              if ($printProc.ExitCode -ne 0) {
+                throw "installed engine failed to print the $wrapperKind wrapper: exit $($printProc.ExitCode)"
+              }
+              $expectedBytes = [System.IO.File]::ReadAllBytes($expectedShimPath)
+              $actualBytes = [System.IO.File]::ReadAllBytes($helperPath)
+              if ([Convert]::ToBase64String($expectedBytes) -ne [Convert]::ToBase64String($actualBytes)) {
+                throw "installed helper shim does not match desktop helper --print output: $helperPath"
               }
             }
             if (-not (Test-MachinePathEntry -ExpectedPath $installDir)) {

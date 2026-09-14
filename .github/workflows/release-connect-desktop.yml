@@ -1837,13 +1837,32 @@ jobs:
               as_root systemctl is-active --quiet orbit.service
               orbit_service_started=true
             else
-              echo '::notice::systemd is unavailable; skipping the running orbit.service assertion'
+              echo '::notice::systemd is unavailable; skipping the running/enabled orbit.service assertions'
             fi
           }
           assert_orbit_removed() {
             test ! -e /usr/lib/systemd/system/orbit.service
             test ! -e /opt/orbit
+            # `systemctl enable` writes this wants-target symlink outside the
+            # package's own file list, so removal must be checked explicitly; the
+            # check is a plain file test and needs no systemd. `-e` alone is not
+            # enough: once its target unit file is gone the symlink is dangling,
+            # and `-e` follows links, so a stale link would false-pass that test.
+            wants_link=/etc/systemd/system/multi-user.target.wants/orbit.service
+            if [ -e "$wants_link" ] || [ -L "$wants_link" ]; then
+              echo "::error::desktop package left an orbit.service wants-target symlink behind: $wants_link"
+              exit 1
+            fi
             if [ "$orbit_service_started" = true ]; then
+              orbit_enabled_state="$(as_root systemctl is-enabled orbit.service 2>&1)" || true
+              case "$orbit_enabled_state" in
+                disabled|*'No such file or directory'*|*'not-found'*)
+                  ;;
+                *)
+                  echo "::error::desktop package left orbit.service enabled: $orbit_enabled_state"
+                  exit 1
+                  ;;
+              esac
               if as_root systemctl is-active --quiet orbit.service; then
                 echo '::error::desktop package left orbit.service running'
                 exit 1

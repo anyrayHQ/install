@@ -470,7 +470,12 @@ test('Linux smoke replaces planted fleet-osquery deb and rpm packages', () => {
   assert.ok(fixture > 0 && fixture < fleetDeb && fleetDeb < desktopDeb);
   assert.ok(desktopDeb < fleetRpm && fleetRpm < desktopRpm);
   assert.match(linux, /systemctl enable --now orbit\.service/);
-  assert.match(linux, /systemd is unavailable; skipping the running orbit\.service assertion/);
+  assert.match(linux, /systemd is unavailable; skipping the running\/enabled orbit\.service assertions/);
+  assert.match(linux, /wants_link=\/etc\/systemd\/system\/multi-user\.target\.wants\/orbit\.service/);
+  assert.match(linux, /if \[ -e "\$wants_link" \] \|\| \[ -L "\$wants_link" \]; then/);
+  assert.match(linux, /desktop package left an orbit\.service wants-target symlink behind: \$wants_link/);
+  assert.match(linux, /orbit_enabled_state="\$\(as_root systemctl is-enabled orbit\.service 2>&1\)" \|\| true/);
+  assert.match(linux, /desktop package left orbit\.service enabled: \$orbit_enabled_state/);
   assert.match(linux, /dpkg-query -W -f='\$\{db:Status-Status\}\\n' fleet-osquery/);
   assert.match(linux, /rpm --dbpath "\$rpm_database" -q fleet-osquery/);
   assert.equal((linux.match(/assert_orbit_removed/g) ?? []).length, 3);

@@ -1,0 +1,72 @@
+name: Fetch a pinned, checksum-verified file
+description: >-
+  A workflow curls a pinned tool/cert by URL and shasums it before trusting the
+  bytes: jsign, rustup-init, nfpm, fleetctl, gh, the Microsoft root cert, gitleaks.
+  Before this action each site hand-rolled its own retry policy — three sites
+  (jsign, ms-root) picked up `--retry-all-errors` after GitHub Releases 504s
+  broke a release (#494) while the rest had none — and the checksum check was
+  a copy-pasted `sha256sum -c -`/`shasum -a 256 -c -` line a new download site
+  could easily ship without. Centralizing both here means every pinned
+  download gets the same retry policy and cannot skip verification.
+
+inputs:
+  url:
+    description: HTTPS URL to download. Non-https is refused.
+    required: true
+  sha256:
+    description: Expected SHA-256 of the downloaded bytes, 64 lowercase hex characters.
+    required: true
+  dest:
+    description: Where to place the verified file (absolute or runner-relative). Parent directories are created.
+    required: true
+  mode:
+    description: 'Optional file mode applied after verification (e.g. "0755"). Default: leave as fetched.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify checksum
+      shell: bash
+      env:
+        FETCH_URL: ${{ inputs.url }}
+        FETCH_SHA256: ${{ inputs.sha256 }}
+        FETCH_DEST: ${{ inputs.dest }}
+        FETCH_MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+
+        case "$FETCH_URL" in
+          https://*) ;;
+          *) echo '::error::fetch-pinned refuses a non-https url' && exit 1 ;;
+        esac
+
+        case "$FETCH_SHA256" in
+          [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+          *) echo '::error::fetch-pinned sha256 input must be 64 lowercase hex characters' && exit 1 ;;
+        esac
+
+        mkdir -p "$(dirname "$FETCH_DEST")"
+        tmp="${FETCH_DEST}.tmp"
+
+        curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-delay 5 --retry-all-errors \
+          -o "$tmp" "$FETCH_URL"
+
+        # macOS runners ship shasum, not sha256sum; Linux runners have both.
+        if command -v shasum >/dev/null 2>&1; then
+          actual="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+        else
+          actual="$(sha256sum "$tmp" | awk '{print $1}')"
+        fi
+
+        if [ "$actual" != "$FETCH_SHA256" ]; then
+          echo "::error::checksum mismatch for ${FETCH_URL}: expected ${FETCH_SHA256}, got ${actual}"
+          rm -f "$tmp"
+          exit 1
+        fi
+
+        mv "$tmp" "$FETCH_DEST"
+        if [ -n "$FETCH_MODE" ]; then
+          chmod "$FETCH_MODE" "$FETCH_DEST"
+        fi

@@ -1508,8 +1508,10 @@ jobs:
           node scripts/prepare-desktop-msi.mjs $main --check
           $before = (Get-FileHash $main -Algorithm SHA256).Hash
           Push-Location private-source/connect-tray/src-tauri
+          # --verbose makes the bundler relay candle/light output; without it a
+          # WiX link failure logs only "failed to run light.exe".
           node "$env:GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --target $env:TARGET_TRIPLE --bundles msi `
-            --ci --no-sign
+            --ci --no-sign --verbose
           Pop-Location
           $after = (Get-FileHash $main -Algorithm SHA256).Hash
           if ($after -ne $before) { throw 'Tauri bundle rewrote the already-signed main executable' }

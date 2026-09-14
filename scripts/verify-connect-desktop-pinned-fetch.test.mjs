@@ -67,6 +67,14 @@ describe('every checksum-verified download goes through fetch-pinned', () => {
 describe('the fetch-pinned action itself', () => {
   test('retries transient failures over HTTPS only', () => {
     assert.match(action, /--retry-all-errors/);
+    // Bounded per attempt and overall, so a stalled upstream cannot hold a runner.
+    assert.match(action, /--connect-timeout 10 --max-time 120/);
+    assert.match(action, /--retry 3 --retry-delay 5 --retry-max-time 180/);
+    // The verified file is cached by hash; the hash is still checked on a hit.
+    assert.match(action, /uses: actions\/cache@[0-9a-f]{40} # v/);
+    assert.match(action, /key: fetch-pinned-\$\{\{ runner\.os \}\}-\$\{\{ inputs\.sha256 \}\}/);
+    assert.match(action, /if: steps\.cache\.outputs\.cache-hit != 'true'/);
+    assert.ok(action.indexOf('name: Verify checksum and mode') > action.indexOf('name: Download on a cache miss'));
     assert.match(action, /--proto '=https'/);
   });
 

@@ -826,7 +826,7 @@ jobs:
             if sudo test -x "$uninstall"; then
               sudo "$uninstall" >/dev/null 2>&1 || true
             fi
-            sudo /usr/bin/chflags -R noschg /usr/local/lib/anyray-connect-retired >/dev/null 2>&1 || true
+            sudo /usr/bin/chflags noschg "$locked_cli_file" >/dev/null 2>&1 || true
             sudo rm -rf "$installed_app" /usr/local/lib/anyray-connect
             for helper in "$credential_helper" "$bootstrap_helper"; do
               if sudo test -f "$helper" \

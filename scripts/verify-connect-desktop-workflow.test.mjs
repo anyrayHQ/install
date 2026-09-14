@@ -525,7 +525,7 @@ describe('desktop staging workflow safety contract', () => {
     for (const cleanup of [
       'sudo /bin/launchctl bootout system/com.fleetdm.orbit',
       'sudo "$uninstall"',
-      'sudo /usr/bin/chflags nouchg "$locked_cli_file"',
+      'sudo /usr/bin/chflags noschg "$locked_cli_file"',
       'sudo pkgutil --forget ai.anyray.connect',
       'sudo pkgutil --forget "$fleet_receipt"',
       'sudo pkgutil --forget ai.anyray.connect-tray',

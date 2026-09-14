@@ -631,8 +631,20 @@ source or GitHub App credential:
   launchers/shims before Installer writes the payload, postinstall creates the
   `/usr/local/bin` symlink and shims and installs `uninstall.sh`), signs it
   with the Developer ID Installer certificate, and notarizes and staples it. A
-  credential-free `verify-macos-signed` job on the same fleet installs and
-  exercises the final pkg. Teardown follows the signed smoke with `always()`.
+  static Installer readme tells interactive users that the deprecated Anyray
+  Connect CLI package and fleetd are removed when present. The credential-free
+  `verify-macos-signed` job proves the final pkg refuses a foreign launcher,
+  then sweeps a retired CLI receipt whose launcher is a copy of the signed
+  engine while reporting locked residue. It plants an installed and loaded
+  Anyray-owned fleetd receipt/runtime (secret file present) and asserts the
+  receipt, daemon, plist, secret, and `/usr/local/bin/orbit` symlink are all
+  gone while the audit logs and `/usr/local/bin` itself (birth time unchanged)
+  are retained. It then plants fleetd ownership via a plist reference alone,
+  with no secret file, and asserts that case is swept the same way. Finally it
+  leaves a separately installed and loaded foreign Fleet agent, receipt, and
+  `/usr/local/bin/orbit` symlink untouched; it then exercises the real desktop
+  install, GUI migration smoke, symlink/helpers, and uninstall. Teardown
+  follows the signed smoke with `always()`.
   The Mac host is reused inside its paid 24h window, so the signing job
   deletes its keychain and key files in an `always()` step and the build
   never sees a secret.
@@ -679,13 +691,21 @@ the real uninstall:
   `ai.anyray.connect-tray` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; MSI uninstall must
   remove both shims and the machine `PATH` entry;
-- Ubuntu creates a throwaway Unix account, installs synthetic legacy CLI
-  deb/rpm packages built from `ci/nfpm.yaml` around the candidate engine
-  (test inputs, never release artifacts), replaces them with the desktop
-  package through the package manager, and validates
-  `$HOME/.config/autostart/ai.anyray.connect-tray.desktop`, including its
-  `[Desktop Entry]` header and installed executable path, plus removal of the
-  CLI bootstrap files.
+- Ubuntu runs as a fixed `tester` account it creates and removes each run. It
+  installs synthetic legacy CLI (from `ci/nfpm.yaml`) and `fleet-osquery`
+  (from its own YAML) deb/rpm packages, both built with the same pinned nfpm
+  (test inputs, never release artifacts), around the candidate engine,
+  replaces both with the desktop package through the package manager, and
+  validates that their records, the `orbit.service` unit, and `/opt/orbit`
+  are gone, `/usr/bin/anyray-connect` belongs to the desktop package, and
+  `$HOME/.config/autostart/ai.anyray.connect-tray.desktop` (header and
+  installed executable path) plus the CLI bootstrap files are as expected.
+  It then exercises the fleet uninstall helper
+  (`/usr/lib/anyray-connect/uninstall.sh`) end to end: the helper's own
+  `--json` output on stdout proves whether it ran the engine's `uninstall` or
+  `offboard` user-layer verb, and the desktop deb is gone afterward. The host
+  is Ubuntu (deb only), so this never exercises the rpm branch of
+  `uninstall.sh` (`dnf remove`).
 
 `npm run test:desktop-release` covers the workflow-shape and account-isolation
 regressions for these smokes.
@@ -700,9 +720,12 @@ and the login-registration fields): verification requires app ownership, an
 engine path and tray app path that resolve to the installed app, and valid
 RFC 3339 timestamps, while preserving every other profile field. It waits up to
 30 seconds for ownership adoption before stopping the tray. Scheduler state must
-remain byte-identical everywhere, and package install and uninstall must leave
-the pre-existing profile byte-identical. Path checks compare canonical paths to
-accept runner symlinks.
+remain byte-identical everywhere. Package install, and a package-manager-only
+uninstall (Windows `msiexec /x`, Linux `rpm -e`), must leave the pre-existing
+profile byte-identical; the Linux fleet uninstall helper's own `uninstall`
+user-layer verb is the deliberate exception, removing `~/.anyray` (the profile
+included), while its `offboard` verb leaves it in place. Path checks compare
+canonical paths to accept runner symlinks.
 
 `SHA256SUMS` is generated only after Apple/Azure signing, because those signers
 rewrite their artifacts. The staging manifest binds every checksum to the

@@ -34,12 +34,12 @@ Pulls are anonymous — nothing to authenticate.
 trace content by default, so the store grows for three months before the first
 prune reclaims anything, and the size lands in a StatefulSet
 `volumeClaimTemplate` that Kubernetes makes immutable. A fresh install below
-`postgres.minStorageGi` (50Gi) is refused at render time rather than
+`postgres.minStorageGi` (150Gi) is refused at render time rather than
 provisioning a volume that wedges later:
 
 ```yaml
 postgres:
-  storage: 50Gi     # or your own measured 90-day figure
+  storage: 150Gi    # or your own measured 90-day figure
 ```
 
 Running a smaller volume deliberately (short `ANYRAY_SPEND_RETENTION_DAYS`, or

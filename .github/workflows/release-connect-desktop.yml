@@ -723,9 +723,7 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
           path: signed
-      - name: Verify signed installation and native login migration
-        env:
-          DESKTOP_MAC_TEST_USER: ${{ vars.DESKTOP_MAC_TEST_USER }}
+      - name: Verify signed installation, sweep cases and uninstall
         run: |
           set -euo pipefail
           trap 'echo "::error::macOS verification failed at script line $LINENO"' ERR
@@ -773,20 +771,6 @@ jobs:
           # pkg-info/@relocatable is always "false"; a relocatable pkg instead lists a bundle under <relocate>.
           test "$(xmllint --xpath 'count(/pkg-info/relocate/bundle)' "$package_info")" = 0
 
-          # Native Service Management uses the account's real GUI session, not HOME.
-          test_user="$DESKTOP_MAC_TEST_USER"
-          [[ "$test_user" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || {
-            echo '::error::configure DESKTOP_MAC_TEST_USER as a dedicated GUI test account'
-            exit 1
-          }
-          test_uid="$(id -u "$test_user")"
-          test "$test_uid" -ne 0
-          test_home="$(dscl . -read "/Users/$test_user" NFSHomeDirectory | sed 's/^NFSHomeDirectory: //')"
-          test -d "$test_home"
-          test "$(stat -f %u /dev/console)" = "$test_uid" || {
-            echo '::error::the dedicated test account must have a real GUI login session'
-            exit 1
-          }
           installed_app='/Applications/Anyray Connect.app'
           launcher='/usr/local/bin/anyray-connect'
           credential_helper='/usr/local/bin/anyray-credential-helper'
@@ -813,7 +797,14 @@ jobs:
           foreign_fleet_pkg="$RUNNER_TEMP/connect-desktop-foreign-fleet.pkg"
           foreign="$RUNNER_TEMP/foreign-anyray-connect"
           foreign_owned=false
+          # A throwaway non-root account proves an ordinary user can read and run
+          # what the pkg installs; it needs no GUI session.
+          smoke_user='anyray-smoke'
+          smoke_user_created=false
           cleanup() {
+            if [ "$smoke_user_created" = true ]; then
+              sudo /usr/sbin/sysadminctl -deleteUser "$smoke_user" >/dev/null 2>&1 || true
+            fi
             sudo /bin/launchctl bootout system/com.fleetdm.orbit >/dev/null 2>&1 || true
             if sudo test -x "$uninstall"; then
               sudo "$uninstall" >/dev/null 2>&1 || true
@@ -1053,18 +1044,24 @@ jobs:
           spctl -a -vvv -t exec "$app"
           lipo -archs "$engine" | grep -q arm64
           lipo -archs "$engine" | grep -q x86_64
-          test "$(sudo -H -u "$test_user" "$engine" --version | head -1)" = "anyray-connect $VERSION"
-          # Use a shared readable script path; the runner checkout may be private.
-          smoke_script="$(mktemp /tmp/anyray-desktop-smoke.XXXXXX)"
-          cp scripts/smoke-connect-desktop-macos.py "$smoke_script"
-          chmod 644 "$smoke_script"
-          if sudo launchctl asuser "$test_uid" sudo -H -u "$test_user" \
-            /usr/bin/python3 "$smoke_script" "$installed_app"; then
-            rm -f "$smoke_script"
-          else
-            rm -f "$smoke_script"
+          test "$("$engine" --version | head -1)" = "anyray-connect $VERSION"
+          if /usr/bin/id -u "$smoke_user" >/dev/null 2>&1; then
+            echo "::error::dedicated Mac runner already has the $smoke_user account"
             exit 1
           fi
+          sudo /usr/sbin/sysadminctl -addUser "$smoke_user" -password "$(/usr/bin/uuidgen)" \
+            -home "/Users/$smoke_user" -shell /bin/sh >/dev/null 2>&1
+          smoke_user_created=true
+          smoke_uid="$(/usr/bin/id -u "$smoke_user")"
+          test "$smoke_uid" -ne 0
+          test "$(sudo -H -u "$smoke_user" "$engine" --version | head -1)" = "anyray-connect $VERSION"
+          test "$(sudo -H -u "$smoke_user" "$launcher" --version | head -1)" = "anyray-connect $VERSION"
+          for helper in "$credential_helper" "$bootstrap_helper"; do
+            sudo -H -u "$smoke_user" /bin/sh -n "$helper"
+            sudo -H -u "$smoke_user" /usr/bin/head -1 "$helper" | grep -qx '#!/bin/sh'
+          done
+          # The CodeBuild Mac is headless (no console session), so the native
+          # login-item lifecycle is a manual acceptance check (connect-tray/ACCEPTANCE.md).
           sudo "$uninstall"
           sudo test ! -e "$installed_app"
           sudo test ! -e "$launcher"
@@ -1337,10 +1334,10 @@ jobs:
       - name: Fetch pinned jsign and Microsoft trust anchor
         run: |
           set -euo pipefail
-          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
+          curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "$RUNNER_TEMP/jsign.jar" \
             "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
           echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
-          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/ms-root.crt" \
+          curl -fsSL --proto '=https' --retry 6 --retry-delay 5 --retry-all-errors -o "$RUNNER_TEMP/ms-root.crt" \
             'https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt'
           echo "5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270  $RUNNER_TEMP/ms-root.crt" | sha256sum -c -
           openssl x509 -inform DER -in "$RUNNER_TEMP/ms-root.crt" -out "$RUNNER_TEMP/ms-root.pem"
@@ -1535,7 +1532,7 @@ jobs:
       - name: Fetch pinned jsign
         run: |
           set -euo pipefail
-          curl -fsSL -o "$RUNNER_TEMP/jsign.jar" \
+          curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "$RUNNER_TEMP/jsign.jar" \
             "https://github.com/ebourg/jsign/releases/download/${JSIGN_VERSION}/jsign-${JSIGN_VERSION}.jar"
           echo "${JSIGN_SHA256}  $RUNNER_TEMP/jsign.jar" | sha256sum -c -
       - name: Authenticode-sign the MSI installer (verified natively in the next job)

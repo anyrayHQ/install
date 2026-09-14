@@ -1336,6 +1336,7 @@ jobs:
           $log = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi.log'
           $foreignLog = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi-foreign.log'
           $installed = $false
+          $createdInstallDir = $false
           $appProcess = $null
           $createdRunKey = $false
 
@@ -1364,6 +1365,7 @@ jobs:
               throw "Windows install smoke found a pre-existing machine PATH entry: $installDir"
             }
             New-Item -ItemType Directory -Path $installDir | Out-Null
+            $createdInstallDir = $true
             Set-Content -NoNewline -LiteralPath $installedEnginePath -Value 'foreign-engine-sentinel'
             $foreignSignature = Get-AuthenticodeSignature -LiteralPath $installedEnginePath
             if ($foreignSignature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
@@ -1452,8 +1454,10 @@ jobs:
               $expectedShimPath = Join-Path $env:RUNNER_TEMP "connect-desktop-expected-$wrapperKind.cmd"
               $printArgs = @(
                 'desktop', 'helper', '--print', '--platform', 'windows',
-                '--wrapper', $wrapperKind, '--bin', $installedEnginePath
+                '--wrapper', $wrapperKind, '--bin', ('"' + $installedEnginePath + '"')
               )
+              # Start-Process joins -ArgumentList with spaces and does not quote, so the
+              # Program Files path is quoted here to reach --bin as one argument.
               # RedirectStandardOutput writes the child's raw bytes with no text-mode
               # translation, so both files carry the engine's own CRLF line endings.
               $printProc = Start-Process -FilePath $installedEnginePath -ArgumentList $printArgs `
@@ -1543,9 +1547,9 @@ jobs:
                 throw "MSI uninstall failed with exit $($remove.ExitCode)"
               }
             }
-            elseif (Test-Path -LiteralPath $installDir) {
-              # A failure before the clean install leaves the planted foreign-engine/stale-shim
-              # fixtures behind; a reused runner's next attempt requires an absent install directory.
+            elseif ($createdInstallDir -and (Test-Path -LiteralPath $installDir)) {
+              # Only a directory this smoke created is removed: a failure before the clean
+              # install leaves planted fixtures behind, and a reused runner requires it absent.
               Remove-Item -LiteralPath $installDir -Recurse -Force
             }
           }

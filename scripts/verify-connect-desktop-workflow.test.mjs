@@ -213,7 +213,12 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(windows, /anyray-bootstrap-headers-helper\.cmd/);
     assert.match(windows, /Managed by anyray-connect desktop helper; do not edit\./);
     assert.match(windows, /'desktop', 'helper', '--print', '--platform', 'windows',/);
-    assert.match(windows, /'--wrapper', \$wrapperKind, '--bin', \$installedEnginePath/);
+    // --bin must reach the engine as one argument despite the space in Program Files.
+    assert.match(windows, /'--wrapper', \$wrapperKind, '--bin', \('"' \+ \$installedEnginePath \+ '"'\)/);
+    // Cleanup removes the install directory only when this smoke created it.
+    assert.match(windows, /\$createdInstallDir = \$false/);
+    assert.match(windows, /\$createdInstallDir = \$true/);
+    assert.match(windows, /elseif \(\$createdInstallDir -and \(Test-Path -LiteralPath \$installDir\)\)/);
     assert.match(windows, /-RedirectStandardOutput \$expectedShimPath -NoNewWindow -Wait -PassThru/);
     assert.match(windows, /installed engine failed to print the \$wrapperKind wrapper/);
     assert.match(windows, /installed helper shim does not match desktop helper --print output/);

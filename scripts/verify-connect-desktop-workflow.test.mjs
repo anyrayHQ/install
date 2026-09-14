@@ -115,7 +115,7 @@ describe('desktop staging workflow safety contract', () => {
     }
     const build = job('build-linux-unsigned');
     assert.match(build, /rustup-init\.sha256|RUSTUP_INIT_SHA256_LINUX_X64/);
-    assert.match(build, /sha256sum -c -/);
+    assert.match(build, /uses: \.\/\.github\/actions\/fetch-pinned/);
     assert.doesNotMatch(build, /curl[^\n]*\| *sh/);
   });
 
@@ -698,12 +698,14 @@ test('Linux package replacement and native rpm removal leave pre-existing CLI st
 });
 
 
-test('Windows signing fetches retry transient GitHub and Microsoft errors', () => {
+test('Windows signing fetches go through the shared fetch-pinned action (retry policy lives there)', () => {
   const inner = job('sign-windows-inner');
-  assert.match(inner, /curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "\$RUNNER_TEMP\/jsign\.jar"/);
-  assert.match(inner, /--proto '=https' --retry 6 --retry-delay 5 --retry-all-errors -o "\$RUNNER_TEMP\/ms-root\.crt"/);
+  assert.equal((inner.match(/uses: \.\/\.github\/actions\/fetch-pinned/g) ?? []).length, 2);
+  assert.match(inner, /jsign-\$\{\{ env\.JSIGN_VERSION \}\}\.jar/);
+  assert.match(inner, /ms-root\.crt/);
   const installer = job('sign-windows-installer');
-  assert.match(installer, /curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "\$RUNNER_TEMP\/jsign\.jar"/);
+  assert.match(installer, /uses: \.\/\.github\/actions\/fetch-pinned/);
+  assert.match(installer, /jsign-\$\{\{ env\.JSIGN_VERSION \}\}\.jar/);
 });
 
 test('macOS native login-item smoke stays a manual acceptance script, not a CI step', () => {

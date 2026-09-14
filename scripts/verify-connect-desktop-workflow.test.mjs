@@ -267,7 +267,10 @@ describe('desktop staging workflow safety contract', () => {
     const mac = job('verify-macos-signed');
     assert.match(mac, /actions\/setup-node@/);
     assert.match(mac, /sparse-checkout: \|\n            .github\/actions\n            scripts/);
-    assert.ok(mac.indexOf('smoke-connect-desktop-macos.py') < mac.lastIndexOf('sudo "$uninstall"'));
+    // The CodeBuild Mac is headless: the engine version check runs as root and the
+    // native login-item lifecycle is a manual acceptance check, never a CI smoke.
+    assert.doesNotMatch(mac, /smoke-connect-desktop-macos\.py|launchctl asuser|DESKTOP_MAC_TEST_USER|\/dev\/console/);
+    assert.match(mac, /test "\$\("\$engine" --version \| head -1\)" = "anyray-connect \$VERSION"/);
     const macOwnership = macSmoke.indexOf("profile.get('engineOwner') == 'app'");
     const macStop = macSmoke.indexOf('            stop()', macOwnership);
     assert.ok(macOwnership > 0 && macOwnership < macStop);
@@ -344,8 +347,6 @@ describe('desktop staging workflow safety contract', () => {
     assert.ok(launcherSymlinkCheck > realInstall && launcherSymlinkCheck < ownedRealUninstall);
     assert.ok(fleetdGoneCheck > realInstall && fleetdGoneCheck < ownedRealUninstall);
     assert.match(mac, /--identifier "\$fleet_receipt"/);
-    assert.match(mac, /smoke-connect-desktop-macos.py/);
-    assert.match(mac, /launchctl asuser/);
     assert.match(mac, /sudo "\$uninstall"/);
 
     const windows = job('verify-windows-signatures');
@@ -690,11 +691,17 @@ test('Linux package replacement and native rpm removal leave pre-existing CLI st
 });
 
 
-test('macOS smoke uses a dedicated GUI account and native lifecycle assertions', () => {
+test('Windows signing fetches retry transient GitHub and Microsoft errors', () => {
+  const inner = job('sign-windows-inner');
+  assert.match(inner, /curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "\$RUNNER_TEMP\/jsign\.jar"/);
+  assert.match(inner, /--proto '=https' --retry 6 --retry-delay 5 --retry-all-errors -o "\$RUNNER_TEMP\/ms-root\.crt"/);
+  const installer = job('sign-windows-installer');
+  assert.match(installer, /curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors -o "\$RUNNER_TEMP\/jsign\.jar"/);
+});
+
+test('macOS native login-item smoke stays a manual acceptance script, not a CI step', () => {
   const mac = job('verify-macos-signed');
-  assert.match(mac, /DESKTOP_MAC_TEST_USER/);
-  assert.match(mac, /launchctl asuser/);
-  assert.match(mac, /smoke-connect-desktop-macos.py/);
+  assert.doesNotMatch(mac, /DESKTOP_MAC_TEST_USER|launchctl asuser|smoke-connect-desktop-macos.py/);
   assert.doesNotMatch(mac, /HOME="\$existing_home"|did not create its LaunchAgent/);
   assert.match(macSmoke, /existing-scheduler-sentinel/);
   assert.match(macSmoke, /check_adopted_profile\(profile, app, expected\)/);

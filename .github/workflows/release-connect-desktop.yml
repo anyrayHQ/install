@@ -1007,9 +1007,9 @@ jobs:
           sudo chmod 0600 "$fleet_secret"
           sudo /bin/launchctl bootstrap system "$fleet_plist"
 
-          # A delete-and-recreate of /usr/local/bin changes its birth time even
-          # though "sudo test -d /usr/local/bin" still passes afterward.
-          usr_local_bin_before="$(stat -f '%B %u %g %Lp' /usr/local/bin)"
+          # The inode changes on a delete-and-recreate and the owner or mode on an
+          # Installer ownership reset; either would break a Homebrew-owned bin dir.
+          usr_local_bin_before="$(stat -f '%i %u %g %Lp' /usr/local/bin)"
 
           sudo installer -pkg "$pkg" -target /
           pkgutil --pkg-info ai.anyray.connect-tray >/dev/null
@@ -1034,7 +1034,11 @@ jobs:
           sudo test -f "$fleet_osquery_log"
           sudo test -f "$fleet_var_log"
           sudo test -d /usr/local/bin
-          test "$(stat -f '%B %u %g %Lp' /usr/local/bin)" = "$usr_local_bin_before"
+          usr_local_bin_after="$(stat -f '%i %u %g %Lp' /usr/local/bin)"
+          test "$usr_local_bin_after" = "$usr_local_bin_before" || {
+            echo "::error::/usr/local/bin changed across the install (inode uid gid mode): before '$usr_local_bin_before', after '$usr_local_bin_after'"
+            exit 1
+          }
           sudo test -f "$locked_cli_file"
           sudo grep -Fqx -- "$locked_cli_file" "$residue_marker"
           sudo test -L "$launcher"

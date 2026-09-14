@@ -448,7 +448,7 @@ describe('desktop staging workflow safety contract', () => {
       'sudo test -f "$fleet_osquery_log"',
       'sudo test -f "$fleet_var_log"',
       'sudo test -d /usr/local/bin',
-      "test \"$(stat -f '%B %u %g %Lp' /usr/local/bin)\" = \"$usr_local_bin_before\"",
+      "test \"$usr_local_bin_after\" = \"$usr_local_bin_before\" || {",
       'sudo test -f "$locked_cli_file"',
       'sudo grep -Fqx -- "$locked_cli_file" "$residue_marker"',
     ]) {

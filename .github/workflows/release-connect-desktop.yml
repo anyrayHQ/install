@@ -797,7 +797,14 @@ jobs:
           foreign_fleet_pkg="$RUNNER_TEMP/connect-desktop-foreign-fleet.pkg"
           foreign="$RUNNER_TEMP/foreign-anyray-connect"
           foreign_owned=false
+          # A throwaway non-root account proves an ordinary user can read and run
+          # what the pkg installs; it needs no GUI session.
+          smoke_user='anyray-smoke'
+          smoke_user_created=false
           cleanup() {
+            if [ "$smoke_user_created" = true ]; then
+              sudo /usr/sbin/sysadminctl -deleteUser "$smoke_user" >/dev/null 2>&1 || true
+            fi
             sudo /bin/launchctl bootout system/com.fleetdm.orbit >/dev/null 2>&1 || true
             if sudo test -x "$uninstall"; then
               sudo "$uninstall" >/dev/null 2>&1 || true
@@ -1038,6 +1045,21 @@ jobs:
           lipo -archs "$engine" | grep -q arm64
           lipo -archs "$engine" | grep -q x86_64
           test "$("$engine" --version | head -1)" = "anyray-connect $VERSION"
+          if /usr/bin/id -u "$smoke_user" >/dev/null 2>&1; then
+            echo "::error::dedicated Mac runner already has the $smoke_user account"
+            exit 1
+          fi
+          sudo /usr/sbin/sysadminctl -addUser "$smoke_user" -password "$(/usr/bin/uuidgen)" \
+            -home "/Users/$smoke_user" -shell /bin/sh >/dev/null 2>&1
+          smoke_user_created=true
+          smoke_uid="$(/usr/bin/id -u "$smoke_user")"
+          test "$smoke_uid" -ne 0
+          test "$(sudo -H -u "$smoke_user" "$engine" --version | head -1)" = "anyray-connect $VERSION"
+          test "$(sudo -H -u "$smoke_user" "$launcher" --version | head -1)" = "anyray-connect $VERSION"
+          for helper in "$credential_helper" "$bootstrap_helper"; do
+            sudo -H -u "$smoke_user" /bin/sh -n "$helper"
+            sudo -H -u "$smoke_user" /usr/bin/head -1 "$helper" | grep -qx '#!/bin/sh'
+          done
           # The CodeBuild Mac is headless (no console session), so the native
           # login-item lifecycle is a manual acceptance check (connect-tray/ACCEPTANCE.md).
           sudo "$uninstall"

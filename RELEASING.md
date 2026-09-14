@@ -670,18 +670,16 @@ up to 30 seconds for its exact stable autostart artifact, validates that artifac
 points at the installed main executable, force-kills the tray, and then performs
 the real uninstall:
 
-- macOS installs the pkg with `installer -pkg` and runs
-  `scripts/smoke-connect-desktop-macos.py` in a dedicated GUI account: fresh
-  native login registration, migration from the legacy LaunchAgent, preserved
-  disabled consent, stop/restart, and unregister. The Mac runner needs the
-  repository variable `DESKTOP_MAC_TEST_USER` naming a dedicated non-root
-  account that is logged in with a real GUI session and holds no Anyray
-  profile, process, or login registration; the smoke fails if that account
-  does not own the console. Changing `HOME` is not isolation for Service
-  Management, so never run the smoke on a developer account. It does not cover
-  the UI Quit action, a real logout/login, enrollment, key renewal, or an EDR
-  policy; record those in the monorepo's `connect-tray/ACCEPTANCE.md` against
-  the exact candidate;
+- macOS installs the pkg with `installer -pkg` as root and checks the bundle,
+  engine, launcher, helpers, receipts and the sweep cases. The CodeBuild Mac is
+  headless (no console session), so the native login-item lifecycle is not
+  exercised in CI. Run `scripts/smoke-connect-desktop-macos.py` by hand on a
+  Mac with a real GUI login, in a dedicated non-root account that holds no
+  Anyray profile, process, or login registration, and record the result in the
+  monorepo's `connect-tray/ACCEPTANCE.md` against the exact candidate. Changing
+  `HOME` is not isolation for Service Management, so never run it on a
+  developer account. The same manual pass covers the UI Quit action, a real
+  logout/login, enrollment, key renewal, and an EDR policy;
 - Windows first plants an unsigned foreign engine at
   `C:\Program Files\Anyray\anyray-connect.exe`, requires the MSI to refuse it
   with exit 1603 without changing it, then plants a stale managed credential

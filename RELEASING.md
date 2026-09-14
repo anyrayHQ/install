@@ -702,9 +702,12 @@ and the login-registration fields): verification requires app ownership, an
 engine path and tray app path that resolve to the installed app, and valid
 RFC 3339 timestamps, while preserving every other profile field. It waits up to
 30 seconds for ownership adoption before stopping the tray. Scheduler state must
-remain byte-identical everywhere, and package install and uninstall must leave
-the pre-existing profile byte-identical. Path checks compare canonical paths to
-accept runner symlinks.
+remain byte-identical everywhere. Package install, and a package-manager-only
+uninstall (Windows `msiexec /x`, Linux `rpm -e`), must leave the pre-existing
+profile byte-identical; the Linux fleet uninstall helper's own `uninstall`
+user-layer verb is the deliberate exception, removing `~/.anyray` (the profile
+included), while its `offboard` verb leaves it in place. Path checks compare
+canonical paths to accept runner symlinks.
 
 `SHA256SUMS` is generated only after Apple/Azure signing, because those signers
 rewrite their artifacts. The staging manifest binds every checksum to the

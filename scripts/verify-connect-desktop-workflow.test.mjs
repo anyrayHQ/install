@@ -271,6 +271,13 @@ describe('desktop staging workflow safety contract', () => {
     // native login-item lifecycle is a manual acceptance check, never a CI smoke.
     assert.doesNotMatch(mac, /smoke-connect-desktop-macos\.py|launchctl asuser|DESKTOP_MAC_TEST_USER|\/dev\/console/);
     assert.match(mac, /test "\$\("\$engine" --version \| head -1\)" = "anyray-connect \$VERSION"/);
+    // An ordinary user must be able to run the engine, the launcher and read the shims.
+    assert.match(mac, /sysadminctl -addUser "\$smoke_user"/);
+    assert.match(mac, /sudo -H -u "\$smoke_user" "\$engine" --version/);
+    assert.match(mac, /sudo -H -u "\$smoke_user" "\$launcher" --version/);
+    assert.match(mac, /sudo -H -u "\$smoke_user" \/bin\/sh -n "\$helper"/);
+    assert.match(mac, /sysadminctl -deleteUser "\$smoke_user"/);
+    assert.ok(mac.indexOf('sysadminctl -deleteUser "$smoke_user"') < mac.indexOf('trap cleanup EXIT'));
     const macOwnership = macSmoke.indexOf("profile.get('engineOwner') == 'app'");
     const macStop = macSmoke.indexOf('            stop()', macOwnership);
     assert.ok(macOwnership > 0 && macOwnership < macStop);

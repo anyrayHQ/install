@@ -168,6 +168,16 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(sign, /RootRelativeBundlePath/);
     assert.match(sign, /Developer ID Installer/);
     assert.match(sign, /xar -tf "\$pkg" \| grep -qx 'Distribution'/);
+    assert.match(sign, /<readme file="connect-desktop-readme\.html" mime-type="text\/html"\/>/);
+    assert.match(
+      sign,
+      /If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent\./
+    );
+    assert.match(sign, /Anyray Connect CLI package \(ai\.anyray\.connect\)/);
+    assert.match(sign, /fleetd \(com\.fleetdm\.orbit\.base\.pkg\)/);
+    assert.match(sign, /--distribution "\$distribution_xml"/);
+    assert.match(sign, /--resources "\$distribution_resources"/);
+    assert.match(sign, /--package-path "\$RUNNER_TEMP"/);
     assert.match(sign, /payload-files "\$pkg"/);
     assert.match(sign, /Applications\/Anyray Connect\\\.app\/Contents\/MacOS\/anyray-connect/);
     assert.match(sign, /spctl -a -vvv -t install "\$pkg"/);
@@ -176,6 +186,12 @@ describe('desktop staging workflow safety contract', () => {
     const verify = job('verify-macos-signed');
     assert.match(verify, /count\(\/pkg-info\/relocate\/bundle\)' "\$package_info"\)" = 0/);
     assert.match(verify, /= '\.\/Applications\/Anyray Connect\.app'/);
+    assert.match(verify, /connect-desktop-readme\.html/);
+    assert.match(verify, /PKG contains no Installer readme/);
+    assert.match(
+      verify,
+      /If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent\./
+    );
   });
 
   test('prepares MSI metadata before signing and verifies the installed signed payload', () => {
@@ -226,6 +242,56 @@ describe('desktop staging workflow safety contract', () => {
       /cmp "\$foreign" "\$launcher"\s*\n\s*#[^\n]*\n\s*sudo test ! -e "\$installed_app"/
     );
     assert.match(mac, /readlink "\$launcher"/);
+    // Anchor the legacy assertions to the install that follows both retired-package plants.
+    const foreignInstall = mac.indexOf('if sudo installer -pkg "$pkg" -target /; then');
+    const retiredInstall = mac.indexOf('sudo installer -pkg "$retired_pkg" -target /');
+    const ownedFleetInstall = mac.indexOf(
+      'sudo installer -pkg "$owned_fleet_pkg" -target /',
+      retiredInstall
+    );
+    const ownedFleetBootstrap = mac.indexOf(
+      'sudo /bin/launchctl bootstrap system "$fleet_plist"',
+      ownedFleetInstall
+    );
+    const realInstall = mac.indexOf(
+      'sudo installer -pkg "$pkg" -target /',
+      ownedFleetBootstrap
+    );
+    assert.ok(
+      foreignInstall > 0 &&
+        foreignInstall < retiredInstall &&
+        retiredInstall < ownedFleetInstall &&
+        ownedFleetInstall < ownedFleetBootstrap &&
+        ownedFleetBootstrap < realInstall
+    );
+    assert.match(mac, /--identifier ai\.anyray\.connect/);
+    assert.match(
+      mac,
+      /cp "\$updater_app\/Contents\/MacOS\/anyray-connect" "\$retired_stub"/
+    );
+    assert.match(mac, /usr\/local\/bin\/anyray-connect/);
+    assert.match(mac, /Library\/LaunchAgents\/ai\.anyray\.connect\.managed-enroll\.plist/);
+    assert.match(mac, /desktop PKG left the retired CLI receipt behind/);
+    // these same checks appear earlier as the retired-pkg plant's own sanity checks; require the real-install copies
+    const receiptGoneCheck = mac.indexOf(
+      'if pkgutil --pkg-info ai.anyray.connect >/dev/null 2>&1; then',
+      realInstall
+    );
+    const plistGoneCheck = mac.indexOf('sudo test ! -e "$retired_plist"', realInstall);
+    const launcherSymlinkCheck = mac.indexOf('sudo test -L "$launcher"', realInstall);
+    const fleetdGoneCheck = mac.indexOf(
+      'if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then',
+      realInstall
+    );
+    // Bound every real-install assertion above by the uninstall that exercises this
+    // case, or a foreign-block copy of the same line would satisfy these checks too.
+    const ownedRealUninstall = mac.indexOf('sudo "$uninstall"', realInstall);
+    assert.ok(ownedRealUninstall > realInstall);
+    assert.ok(receiptGoneCheck > realInstall && receiptGoneCheck < ownedRealUninstall);
+    assert.ok(plistGoneCheck > realInstall && plistGoneCheck < ownedRealUninstall);
+    assert.ok(launcherSymlinkCheck > realInstall && launcherSymlinkCheck < ownedRealUninstall);
+    assert.ok(fleetdGoneCheck > realInstall && fleetdGoneCheck < ownedRealUninstall);
+    assert.match(mac, /--identifier "\$fleet_receipt"/);
     assert.match(mac, /smoke-connect-desktop-macos.py/);
     assert.match(mac, /launchctl asuser/);
     assert.match(mac, /sudo "\$uninstall"/);
@@ -253,6 +319,168 @@ describe('desktop staging workflow safety contract', () => {
       job('assemble-signed-staging'),
       /- verify-macos-signed[\s\S]*- verify-windows-signatures[\s\S]*- smoke-linux-installers/
     );
+  });
+
+  test('exercises owned and foreign fleetd branches after planting real receipts', () => {
+    const mac = job('verify-macos-signed');
+    const after = (needle, anchor) => {
+      const index = mac.indexOf(needle, anchor);
+      assert.ok(index > anchor, `missing after anchored install: ${needle}`);
+      return index;
+    };
+
+    assert.match(
+      mac,
+      /build_fleet_pkg\(\)[\s\S]*<string>\$fleet_secret_argument<\/string>/
+    );
+    const retiredPlant = mac.indexOf('sudo installer -pkg "$retired_pkg" -target /');
+    const ownedSecret = mac.indexOf(
+      "'/opt/orbit/anyray-enroll-secret.txt'",
+      retiredPlant
+    );
+    const foreignSecret = mac.indexOf(
+      "'/opt/orbit/foreign-enroll-secret.txt'",
+      ownedSecret
+    );
+    const ownedBuild = mac.lastIndexOf('build_fleet_pkg', ownedSecret);
+    const foreignBuild = mac.lastIndexOf('build_fleet_pkg', foreignSecret);
+    assert.ok(ownedBuild > 0);
+    assert.ok(foreignBuild > ownedBuild);
+    assert.doesNotMatch(
+      mac.slice(
+        foreignBuild,
+        mac.indexOf('sudo installer -pkg "$foreign_fleet_pkg"', foreignBuild)
+      ),
+      /anyray-enroll-secret/
+    );
+
+    const ownedPlant = after(
+      'sudo installer -pkg "$owned_fleet_pkg" -target /',
+      ownedBuild
+    );
+    const ownedBootstrap = after(
+      'sudo /bin/launchctl bootstrap system "$fleet_plist"',
+      ownedPlant
+    );
+    const ownedInstall = after(
+      'sudo installer -pkg "$pkg" -target /',
+      ownedBootstrap
+    );
+    // Bound below AND above by the install/uninstall pair for this case, or a
+    // foreign-block copy of the same line (or a later case's) would pass too.
+    const exercisedUninstall = after('sudo "$uninstall"', ownedInstall);
+    const between = (needle, lower, upper) => {
+      const index = mac.indexOf(needle, lower);
+      assert.ok(
+        index > lower && index < upper,
+        `missing between anchors: ${needle}`
+      );
+      return index;
+    };
+    for (const assertion of [
+      'if pkgutil --pkg-info "$fleet_receipt" >/dev/null 2>&1; then',
+      'if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then',
+      'sudo test ! -e "$fleet_plist"',
+      'sudo test ! -e "$fleet_root/bin"',
+      'sudo test ! -e "$fleet_secret"',
+      'sudo test ! -e /usr/local/bin/orbit',
+      'sudo test ! -L /usr/local/bin/orbit',
+      'sudo test -f "$fleet_osquery_log"',
+      'sudo test -f "$fleet_var_log"',
+      'sudo test -d /usr/local/bin',
+      "test \"$(stat -f '%B %u %g %Lp' /usr/local/bin)\" = \"$usr_local_bin_before\"",
+      'sudo test -f "$locked_cli_file"',
+      'sudo grep -Fqx -- "$locked_cli_file" "$residue_marker"',
+    ]) {
+      between(assertion, ownedInstall, exercisedUninstall);
+    }
+
+    const plistBuild = after('build_fleet_pkg', exercisedUninstall);
+    const plistPlant = after(
+      'sudo installer -pkg "$plist_fleet_pkg" -target /',
+      plistBuild
+    );
+    const plistBootstrap = after(
+      'sudo /bin/launchctl bootstrap system "$fleet_plist"',
+      plistPlant
+    );
+    const plistInstall = after(
+      'sudo installer -pkg "$pkg" -target /',
+      plistBootstrap
+    );
+    const plistUninstall = after('sudo "$uninstall"', plistInstall);
+    for (const assertion of [
+      'if pkgutil --pkg-info "$fleet_receipt" >/dev/null 2>&1; then',
+      'if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then',
+      'sudo test ! -e "$fleet_plist"',
+      'sudo test ! -e "$fleet_root/bin"',
+      'sudo test ! -e "$fleet_secret"',
+      'sudo test ! -e /usr/local/bin/orbit',
+      'sudo test ! -L /usr/local/bin/orbit',
+      'sudo test -f "$fleet_osquery_log"',
+      'sudo test -f "$fleet_var_log"',
+    ]) {
+      between(assertion, plistInstall, plistUninstall);
+    }
+
+    const foreignPlant = after(
+      'sudo installer -pkg "$foreign_fleet_pkg" -target /',
+      plistUninstall
+    );
+    const foreignBootstrap = after(
+      'sudo /bin/launchctl bootstrap system "$fleet_plist"',
+      foreignPlant
+    );
+    const foreignInstall = after(
+      'sudo installer -pkg "$pkg" -target /',
+      foreignBootstrap
+    );
+    for (const assertion of [
+      'pkgutil --pkg-info ai.anyray.connect-tray >/dev/null',
+      'pkgutil --pkg-info "$fleet_receipt" >/dev/null',
+      'sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null',
+      'sudo test -f "$fleet_plist"',
+      'sudo test -d "$fleet_root/bin"',
+      String.raw`sudo cmp \
+            "$foreign_fleet_root/opt/orbit/bin/orbit/macos/stable/orbit" \
+            "$fleet_binary"`,
+      'sudo cmp "$foreign_fleet_root$fleet_plist" "$fleet_plist"',
+      'sudo test ! -e "$fleet_secret"',
+      'sudo test -f "$fleet_osquery_log"',
+      'sudo test -f "$fleet_var_log"',
+      'sudo test -d /var/lib/orbit',
+      'sudo test -L /usr/local/bin/orbit',
+      'test "$(sudo readlink /usr/local/bin/orbit)" = /opt/orbit',
+      'sudo test -L "$launcher"',
+      String.raw`test "$(sudo readlink "$launcher")" \
+            = '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'`,
+    ]) {
+      after(assertion, foreignInstall);
+    }
+
+    const trapInstall = mac.indexOf('trap cleanup EXIT');
+    const firstPlant = mac.indexOf('sudo install -m 0755 "$foreign" "$launcher"');
+    const cleanupStart = mac.indexOf('cleanup() {');
+    assert.ok(trapInstall > 0 && trapInstall < firstPlant);
+    for (const cleanup of [
+      'sudo /bin/launchctl bootout system/com.fleetdm.orbit',
+      'sudo "$uninstall"',
+      'sudo /usr/bin/chflags nouchg "$locked_cli_file"',
+      'sudo pkgutil --forget ai.anyray.connect',
+      'sudo pkgutil --forget "$fleet_receipt"',
+      'sudo pkgutil --forget ai.anyray.connect-tray',
+      '"$fleet_plist"',
+      '/usr/local/bin/orbit',
+      '/usr/local/lib/anyray-connect-retired',
+      '"$retired_plist"',
+      '"$fleet_root"',
+      '/var/lib/orbit',
+      '/var/log/orbit',
+      '"$residue_marker"',
+    ]) {
+      const cleanupIndex = mac.indexOf(cleanup, cleanupStart);
+      assert.ok(cleanupIndex > cleanupStart && cleanupIndex < trapInstall);
+    }
   });
 
   test('passes validator outputs through quoted step environments', () => {

@@ -27,17 +27,39 @@ inputs:
 runs:
   using: composite
   steps:
-    # Keyed on the url and the expected hash, so a hit is the verified bytes and
-    # a wrong entry fails the checksum below and is refetched; the common run
-    # never touches the upstream host.
+    # Keyed on the expected hash: a hit is checked below before it is trusted,
+    # and a bad entry is refetched instead of failing the run (entries are
+    # immutable, so a poisoned key costs a download per run, never a release).
     - name: Restore from cache
       id: cache
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ inputs.dest }}
         key: fetch-pinned-${{ runner.os }}-${{ inputs.sha256 }}
-    - name: Download on a cache miss
-      if: steps.cache.outputs.cache-hit != 'true'
+    - name: Check the restored file
+      id: restored
+      if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        FETCH_SHA256: ${{ inputs.sha256 }}
+        FETCH_DEST: ${{ inputs.dest }}
+      run: |
+        set -euo pipefail
+        if command -v shasum >/dev/null 2>&1; then
+          actual="$(shasum -a 256 "$FETCH_DEST" | awk '{print $1}')"
+        else
+          actual="$(sha256sum "$FETCH_DEST" | awk '{print $1}')"
+        fi
+        if [ "$actual" = "$FETCH_SHA256" ]; then
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::cached ${FETCH_DEST} failed its checksum; refetching"
+          rm -f "$FETCH_DEST"
+          echo "valid=false" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Download on a cache miss or a bad entry
+      id: download
+      if: steps.cache.outputs.cache-hit != 'true' || steps.restored.outputs.valid != 'true'
       shell: bash
       env:
         FETCH_URL: ${{ inputs.url }}
@@ -92,3 +114,10 @@ runs:
         if [ -n "$FETCH_MODE" ]; then
           chmod "$FETCH_MODE" "$FETCH_DEST"
         fi
+    # Saved only after a fresh download passed verification; never on a hit.
+    - name: Save to cache
+      if: steps.download.outcome == 'success'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.dest }}
+        key: fetch-pinned-${{ runner.os }}-${{ inputs.sha256 }}

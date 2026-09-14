@@ -38,7 +38,7 @@ trap 'rm -f "$OVERLAY"' EXIT
 # (ci/check-storage-defaults.sh gates the copies).
 # shellcheck source=../ci/storage-defaults.env
 [ -f "$REPO_ROOT/ci/storage-defaults.env" ] && . "$REPO_ROOT/ci/storage-defaults.env"
-DB_STORAGE_GB="${ANYRAY_DB_STORAGE_GB:-50}"
+DB_STORAGE_GB="${ANYRAY_DB_STORAGE_GB:-150}"
 
 # ---- Defaults / inputs ------------------------------------------------------
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-}"

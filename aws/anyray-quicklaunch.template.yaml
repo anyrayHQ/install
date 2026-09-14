@@ -100,7 +100,7 @@ Parameters:
       multiple with commas.
   ImageTag:
     Type: String
-    Default: v1.10.387
+    Default: v1.10.392
     AllowedPattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
     ConstraintDescription: Must be an immutable Anyray release tag such as v1.10.120.
     Description: >-
@@ -283,17 +283,17 @@ Parameters:
     Description: RDS PostgreSQL instance class.
   DbAllocatedStorage:
     Type: Number
-    Default: 50
+    Default: 150
     MinValue: 20
     Description: >-
       RDS allocated storage in GiB. The gateway keeps 90 days of trace content
       by default, so the database grows for its first three months before the
-      first prune reclaims anything; 50 GiB holds that window for a typical
-      team. Heavy whole-team + CI usage can add ~1 GB/day, which storage
-      autoscaling absorbs up to DbMaxAllocatedStorage.
+      first prune reclaims anything; 150 GiB holds that window with headroom.
+      Heavy whole-team + CI usage can add ~1 GB/day, which storage autoscaling
+      absorbs up to DbMaxAllocatedStorage.
   DbMaxAllocatedStorage:
     Type: Number
-    Default: 100
+    Default: 400
     MinValue: 21
     Description: >-
       Upper bound for RDS storage autoscaling in GiB (must exceed allocated

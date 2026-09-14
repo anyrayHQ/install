@@ -18,7 +18,7 @@ set -euo pipefail
 STORAGE_DEFAULTS="$(dirname "$0")/ci/storage-defaults.env"
 # shellcheck source=ci/storage-defaults.env
 [ -f "$STORAGE_DEFAULTS" ] && . "$STORAGE_DEFAULTS"
-DB_STORAGE_GB="${ANYRAY_DB_STORAGE_GB:-50}"
+DB_STORAGE_GB="${ANYRAY_DB_STORAGE_GB:-150}"
 
 HOST=""
 K8S=0
@@ -381,6 +381,7 @@ write_values_stub() {
     echo "# allowVolumeExpansion), and a full volume stops Postgres."
     echo "# Heavy whole-team + CI usage can add ~1 GB/day; see the sizing table in"
     echo "# https://docs.anyray.ai/get-started/install/kubernetes"
+    echo "# Err high: storage is a few dollars a month, a full volume is an outage."
     echo "postgres:"
     echo "  storage: ${DB_STORAGE_GB}Gi"
     echo ""

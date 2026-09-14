@@ -47,7 +47,7 @@ MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-2}"
 # (ci/check-storage-defaults.sh gates the copies).
 # shellcheck source=../../ci/storage-defaults.env
 [ -f "$HERE/../../ci/storage-defaults.env" ] && . "$HERE/../../ci/storage-defaults.env"
-DISK_SIZE="${DISK_SIZE:-${ANYRAY_VM_DATA_DISK_GB:-50}GB}"
+DISK_SIZE="${DISK_SIZE:-${ANYRAY_VM_DATA_DISK_GB:-200}GB}"
 IMAGE_TAG="${IMAGE_TAG:-policy-stable}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}"
 NETWORK="${NETWORK:-default}"

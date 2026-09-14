@@ -47,17 +47,17 @@ jobs:
           token: ${{ github.token }}
 
       - name: Lint
-        run: helm lint helm --set host=anyray.example.com --set postgres.storage=50Gi
+        run: helm lint helm --set host=anyray.example.com --set postgres.storage=150Gi
 
       - name: Chart renders with default values, at scale, and autoscaled
         run: |
           set -euo pipefail
-          helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi > /dev/null
-          helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
+          helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi > /dev/null
+          helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
             --set gateway.persistence.enabled=false --set gateway.replicas=2 \
             --set optimizer.persistence.enabled=false --set optimizer.replicas=2 \
             > /dev/null
-          helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
+          helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
             --set gateway.persistence.enabled=false --set gateway.autoscaling.enabled=true \
             --set optimizer.persistence.enabled=false --set optimizer.autoscaling.enabled=true \
             > /dev/null
@@ -76,7 +76,7 @@ jobs:
       - name: Default render pins every app image to appVersion
         run: |
           set -euo pipefail
-          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi)"
+          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi)"
           fail=0
           for c in gateway optimizer proxy endpoint-control; do
             if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:${APP_VERSION}"; then
@@ -99,7 +99,7 @@ jobs:
           # produce the moving tag, the re-pull policy, AND the roll. If any of
           # the three stops following from that one value, the documented
           # instruction silently half-works.
-          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
+          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
             --set-string image.tag=policy-stable)"
           fail=0
           for c in gateway optimizer proxy endpoint-control; do
@@ -123,7 +123,7 @@ jobs:
         run: |
           set -euo pipefail
           render() {
-            helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi "$@"
+            helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi "$@"
           }
           # NOTE: render once into a variable and match with grep on a here-string.
           # `helm ... | grep -q` is a trap under pipefail: grep -q exits at the
@@ -175,7 +175,7 @@ jobs:
             echo "note: could not pull the published chart; skipping the diff"
             exit 0
           }
-          args=(--set host=anyray.example.com --set postgres.storage=50Gi)
+          args=(--set host=anyray.example.com --set postgres.storage=150Gi)
           # appVersion legitimately differs between the two charts, so compare
           # with the image tags normalised: this asserts the SHAPE is unchanged.
           norm() { sed -E 's#(anyray/[a-z-]+):v[0-9]+\.[0-9]+\.[0-9]+#\1:PINNED#g'; }
@@ -234,7 +234,7 @@ jobs:
       - name: policy-stable is the only supported moving channel
         run: |
           set -euo pipefail
-          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=50Gi \
+          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
             --set-string image.tag=policy-stable)"
           for c in gateway optimizer proxy endpoint-control; do
             printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:policy-stable"

@@ -707,8 +707,6 @@ test('Linux package replacement and native rpm removal leave pre-existing CLI st
     at = next;
   }
 });
-
-
 test('Windows signing fetches go through the shared fetch-pinned action (retry policy lives there)', () => {
   const inner = job('sign-windows-inner');
   assert.equal((inner.match(/uses: \.\/\.github\/actions\/fetch-pinned/g) ?? []).length, 2);

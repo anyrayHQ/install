@@ -156,46 +156,15 @@ describe('desktop staging workflow safety contract', () => {
     assert.ok(identifier > 0 && identifier < notarize);
   });
 
-  test('builds a non-relocatable signed and notarized desktop PKG', () => {
-    const preflight = job('preflight');
-    assert.match(preflight, /APPLE_INSTALLER_CERT_P12: \$\{\{ secrets\.APPLE_INSTALLER_CERT_P12 \}\}/);
-    assert.match(preflight, /APPLE_INSTALLER_CERT_PASSWORD: \$\{\{ secrets\.APPLE_INSTALLER_CERT_PASSWORD \}\}/);
-
+  test('ships a signed DMG without privileged installer scripts', () => {
     const sign = job('sign-macos');
-    assert.match(sign, /unsigned\/preinstall/);
-    assert.match(sign, /unsigned\/postinstall/);
-    assert.match(sign, /unsigned\/uninstall\.sh/);
-    assert.doesNotMatch(sign, /unsigned\/pkg-scripts/);
-    assert.match(sign, /ditto "\$app" "\$root\/Applications\/Anyray Connect\.app"/);
-    assert.match(sign, /--identifier ai\.anyray\.connect-tray/);
-    assert.match(sign, /plutil -replace 0\.BundleIsRelocatable -bool false "\$component_plist"/);
-    assert.match(sign, /RootRelativeBundlePath/);
-    assert.match(sign, /Developer ID Installer/);
-    assert.match(sign, /xar -tf "\$pkg" \| grep -qx 'Distribution'/);
-    assert.match(sign, /<readme file="connect-desktop-readme\.html" mime-type="text\/html"\/>/);
-    assert.match(
-      sign,
-      /If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent\./
-    );
-    assert.match(sign, /Anyray Connect CLI package \(ai\.anyray\.connect\)/);
-    assert.match(sign, /fleetd \(com\.fleetdm\.orbit\.base\.pkg\)/);
-    assert.match(sign, /--distribution "\$distribution_xml"/);
-    assert.match(sign, /--resources "\$distribution_resources"/);
-    assert.match(sign, /--package-path "\$RUNNER_TEMP"/);
-    assert.match(sign, /payload-files "\$pkg"/);
-    assert.match(sign, /Applications\/Anyray Connect\\\.app\/Contents\/MacOS\/anyray-connect/);
-    assert.match(sign, /spctl -a -vvv -t install "\$pkg"/);
-    assert.match(sign, /out\/\*\.pkg out\/\*\.app\.tar\.gz/);
-    assert.doesNotMatch(sign, /hdiutil|\.dmg|DMG/);
-    const verify = job('verify-macos-signed');
-    assert.match(verify, /count\(\/pkg-info\/relocate\/bundle\)' "\$package_info"\)" = 0/);
-    assert.match(verify, /= '\.\/Applications\/Anyray Connect\.app'/);
-    assert.match(verify, /connect-desktop-readme\.html/);
-    assert.match(verify, /PKG contains no Installer readme/);
-    assert.match(
-      verify,
-      /If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent\./
-    );
+    assert.match(sign, /hdiutil create/);
+    assert.match(sign, /notarytool submit "\$dmg"/);
+    assert.match(sign, /stapler validate "\$dmg"/);
+    assert.match(sign, /ln -s \/Applications/);
+    assert.doesNotMatch(sign, /productsign|pkgbuild|productbuild|unsigned\/postinstall/);
+    assert.doesNotMatch(job('preflight'), /APPLE_INSTALLER_CERT/);
+    assert.match(job('validate-source'), /verify-connect-desktop-backend\.mjs/);
   });
 
   test('prepares MSI metadata before signing and verifies the installed signed payload', () => {
@@ -267,17 +236,8 @@ describe('desktop staging workflow safety contract', () => {
     const mac = job('verify-macos-signed');
     assert.match(mac, /actions\/setup-node@/);
     assert.match(mac, /sparse-checkout: \|\n            .github\/actions\n            scripts/);
-    // The CodeBuild Mac is headless: the engine version check runs as root and the
-    // native login-item lifecycle is a manual acceptance check, never a CI smoke.
-    assert.doesNotMatch(mac, /smoke-connect-desktop-macos\.py|launchctl asuser|DESKTOP_MAC_TEST_USER|\/dev\/console/);
-    assert.match(mac, /test "\$\("\$engine" --version \| head -1\)" = "anyray-connect \$VERSION"/);
-    // An ordinary user must be able to run the engine, the launcher and read the shims.
-    assert.match(mac, /sysadminctl -addUser "\$smoke_user"/);
-    assert.match(mac, /sudo -H -u "\$smoke_user" "\$engine" --version/);
-    assert.match(mac, /sudo -H -u "\$smoke_user" "\$launcher" --version/);
-    assert.match(mac, /sudo -H -u "\$smoke_user" \/bin\/sh -n "\$helper"/);
-    assert.match(mac, /sysadminctl -deleteUser "\$smoke_user"/);
-    assert.ok(mac.indexOf('sysadminctl -deleteUser "$smoke_user"') < mac.indexOf('trap cleanup EXIT'));
+    assert.match(mac, /verify-connect-desktop-macos-dmg\.sh/);
+    assert.match(mac, /SMOKE_RUN_ID: \$\{\{ github\.run_id \}\}/);
     const macOwnership = macSmoke.indexOf("profile.get('engineOwner') == 'app'");
     const macStop = macSmoke.indexOf('            stop()', macOwnership);
     assert.ok(macOwnership > 0 && macOwnership < macStop);
@@ -295,66 +255,7 @@ describe('desktop staging workflow safety contract', () => {
 
   test('gates assembly on native install/uninstall smoke tests', () => {
     const mac = job('verify-macos-signed');
-    assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$updater_app\/Contents\/Info\.plist"\)" = '13\.0'/);
-    assert.match(mac, /plutil -extract LSMinimumSystemVersion raw -o - "\$app\/Contents\/Info\.plist"\)" = '13\.0'/);
-    assert.match(mac, /installer -pkg "\$pkg" -target \//);
-    assert.match(mac, /cmp "\$foreign" "\$launcher"/);
-    assert.match(
-      mac,
-      /cmp "\$foreign" "\$launcher"\s*\n\s*#[^\n]*\n\s*sudo test ! -e "\$installed_app"/
-    );
-    assert.match(mac, /readlink "\$launcher"/);
-    // Anchor the legacy assertions to the install that follows both retired-package plants.
-    const foreignInstall = mac.indexOf('if sudo installer -pkg "$pkg" -target /; then');
-    const retiredInstall = mac.indexOf('sudo installer -pkg "$retired_pkg" -target /');
-    const ownedFleetInstall = mac.indexOf(
-      'sudo installer -pkg "$owned_fleet_pkg" -target /',
-      retiredInstall
-    );
-    const ownedFleetBootstrap = mac.indexOf(
-      'sudo /bin/launchctl bootstrap system "$fleet_plist"',
-      ownedFleetInstall
-    );
-    const realInstall = mac.indexOf(
-      'sudo installer -pkg "$pkg" -target /',
-      ownedFleetBootstrap
-    );
-    assert.ok(
-      foreignInstall > 0 &&
-        foreignInstall < retiredInstall &&
-        retiredInstall < ownedFleetInstall &&
-        ownedFleetInstall < ownedFleetBootstrap &&
-        ownedFleetBootstrap < realInstall
-    );
-    assert.match(mac, /--identifier ai\.anyray\.connect/);
-    assert.match(
-      mac,
-      /cp "\$updater_app\/Contents\/MacOS\/anyray-connect" "\$retired_stub"/
-    );
-    assert.match(mac, /usr\/local\/bin\/anyray-connect/);
-    assert.match(mac, /Library\/LaunchAgents\/ai\.anyray\.connect\.managed-enroll\.plist/);
-    assert.match(mac, /desktop PKG left the retired CLI receipt behind/);
-    // these same checks appear earlier as the retired-pkg plant's own sanity checks; require the real-install copies
-    const receiptGoneCheck = mac.indexOf(
-      'if pkgutil --pkg-info ai.anyray.connect >/dev/null 2>&1; then',
-      realInstall
-    );
-    const plistGoneCheck = mac.indexOf('sudo test ! -e "$retired_plist"', realInstall);
-    const launcherSymlinkCheck = mac.indexOf('sudo test -L "$launcher"', realInstall);
-    const fleetdGoneCheck = mac.indexOf(
-      'if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then',
-      realInstall
-    );
-    // Bound every real-install assertion above by the uninstall that exercises this
-    // case, or a foreign-block copy of the same line would satisfy these checks too.
-    const ownedRealUninstall = mac.indexOf('sudo "$uninstall"', realInstall);
-    assert.ok(ownedRealUninstall > realInstall);
-    assert.ok(receiptGoneCheck > realInstall && receiptGoneCheck < ownedRealUninstall);
-    assert.ok(plistGoneCheck > realInstall && plistGoneCheck < ownedRealUninstall);
-    assert.ok(launcherSymlinkCheck > realInstall && launcherSymlinkCheck < ownedRealUninstall);
-    assert.ok(fleetdGoneCheck > realInstall && fleetdGoneCheck < ownedRealUninstall);
-    assert.match(mac, /--identifier "\$fleet_receipt"/);
-    assert.match(mac, /sudo "\$uninstall"/);
+    assert.match(mac, /verify-connect-desktop-macos-dmg\.sh/);
 
     const windows = job('verify-windows-signatures');
     assert.match(windows, /MSI install failed/);
@@ -381,177 +282,14 @@ describe('desktop staging workflow safety contract', () => {
     );
   });
 
-  test('exercises owned and foreign fleetd branches after planting real receipts', () => {
-    const mac = job('verify-macos-signed');
-    const after = (needle, anchor) => {
-      const index = mac.indexOf(needle, anchor);
-      assert.ok(index > anchor, `missing after anchored install: ${needle}`);
-      return index;
-    };
-
-    assert.match(
-      mac,
-      /build_fleet_pkg\(\)[\s\S]*<string>\$fleet_secret_argument<\/string>/
-    );
-    const retiredPlant = mac.indexOf('sudo installer -pkg "$retired_pkg" -target /');
-    const ownedSecret = mac.indexOf(
-      "'/opt/orbit/anyray-enroll-secret.txt'",
-      retiredPlant
-    );
-    const foreignSecret = mac.indexOf(
-      "'/opt/orbit/foreign-enroll-secret.txt'",
-      ownedSecret
-    );
-    const ownedBuild = mac.lastIndexOf('build_fleet_pkg', ownedSecret);
-    const foreignBuild = mac.lastIndexOf('build_fleet_pkg', foreignSecret);
-    assert.ok(ownedBuild > 0);
-    assert.ok(foreignBuild > ownedBuild);
-    assert.doesNotMatch(
-      mac.slice(
-        foreignBuild,
-        mac.indexOf('sudo installer -pkg "$foreign_fleet_pkg"', foreignBuild)
-      ),
-      /anyray-enroll-secret/
-    );
-
-    const ownedPlant = after(
-      'sudo installer -pkg "$owned_fleet_pkg" -target /',
-      ownedBuild
-    );
-    const ownedBootstrap = after(
-      'sudo /bin/launchctl bootstrap system "$fleet_plist"',
-      ownedPlant
-    );
-    const ownedInstall = after(
-      'sudo installer -pkg "$pkg" -target /',
-      ownedBootstrap
-    );
-    // Bound below AND above by the install/uninstall pair for this case, or a
-    // foreign-block copy of the same line (or a later case's) would pass too.
-    const exercisedUninstall = after('sudo "$uninstall"', ownedInstall);
-    const between = (needle, lower, upper) => {
-      const index = mac.indexOf(needle, lower);
-      assert.ok(
-        index > lower && index < upper,
-        `missing between anchors: ${needle}`
-      );
-      return index;
-    };
-    for (const assertion of [
-      'if pkgutil --pkg-info "$fleet_receipt" >/dev/null 2>&1; then',
-      'if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then',
-      'sudo test ! -e "$fleet_plist"',
-      'sudo test ! -e "$fleet_root/bin"',
-      'sudo test ! -e "$fleet_secret"',
-      'sudo test ! -e /usr/local/bin/orbit',
-      'sudo test ! -L /usr/local/bin/orbit',
-      'sudo test -f "$fleet_osquery_log"',
-      'sudo test -f "$fleet_var_log"',
-      'sudo test -d /usr/local/bin',
-      "usr_local_bin_after=\"$(stat -f '%i %u %g %Lp' /usr/local/bin)\"",
-      "test \"$usr_local_bin_after\" = \"$usr_local_bin_before\" || {",
-      'sudo test -f "$locked_cli_file"',
-      'sudo grep -Fqx -- "$locked_cli_file" "$residue_marker"',
-    ]) {
-      between(assertion, ownedInstall, exercisedUninstall);
-    }
-    // The /usr/local/bin gate: snapshot before the install, snapshot after, and a
-    // mismatch that names both values and fails, in that order.
-    const binBefore = mac.indexOf("usr_local_bin_before=\"$(stat -f '%i %u %g %Lp' /usr/local/bin)\"");
-    const binAfter = mac.indexOf("usr_local_bin_after=\"$(stat -f '%i %u %g %Lp' /usr/local/bin)\"");
-    const binCompare = mac.indexOf('test "$usr_local_bin_after" = "$usr_local_bin_before" || {');
-    const binDiag = mac.indexOf("echo \"::error::/usr/local/bin changed across the install (inode uid gid mode): before '$usr_local_bin_before', after '$usr_local_bin_after'\"");
-    const binExit = mac.indexOf('exit 1', binDiag);
-    assert.ok(binBefore > 0 && binBefore < ownedInstall, 'snapshot must precede the owned real install');
-    assert.ok(binAfter > ownedInstall && binCompare > binAfter && binDiag > binCompare && binExit > binDiag);
-    assert.ok(binExit - binDiag < 200, 'the mismatch must exit 1 right after the diagnostic');
-
-    const plistBuild = after('build_fleet_pkg', exercisedUninstall);
-    const plistPlant = after(
-      'sudo installer -pkg "$plist_fleet_pkg" -target /',
-      plistBuild
-    );
-    const plistBootstrap = after(
-      'sudo /bin/launchctl bootstrap system "$fleet_plist"',
-      plistPlant
-    );
-    const plistInstall = after(
-      'sudo installer -pkg "$pkg" -target /',
-      plistBootstrap
-    );
-    const plistUninstall = after('sudo "$uninstall"', plistInstall);
-    for (const assertion of [
-      'if pkgutil --pkg-info "$fleet_receipt" >/dev/null 2>&1; then',
-      'if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then',
-      'sudo test ! -e "$fleet_plist"',
-      'sudo test ! -e "$fleet_root/bin"',
-      'sudo test ! -e "$fleet_secret"',
-      'sudo test ! -e /usr/local/bin/orbit',
-      'sudo test ! -L /usr/local/bin/orbit',
-      'sudo test -f "$fleet_osquery_log"',
-      'sudo test -f "$fleet_var_log"',
-    ]) {
-      between(assertion, plistInstall, plistUninstall);
-    }
-
-    const foreignPlant = after(
-      'sudo installer -pkg "$foreign_fleet_pkg" -target /',
-      plistUninstall
-    );
-    const foreignBootstrap = after(
-      'sudo /bin/launchctl bootstrap system "$fleet_plist"',
-      foreignPlant
-    );
-    const foreignInstall = after(
-      'sudo installer -pkg "$pkg" -target /',
-      foreignBootstrap
-    );
-    for (const assertion of [
-      'pkgutil --pkg-info ai.anyray.connect-tray >/dev/null',
-      'pkgutil --pkg-info "$fleet_receipt" >/dev/null',
-      'sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null',
-      'sudo test -f "$fleet_plist"',
-      'sudo test -d "$fleet_root/bin"',
-      String.raw`sudo cmp \
-            "$foreign_fleet_root/opt/orbit/bin/orbit/macos/stable/orbit" \
-            "$fleet_binary"`,
-      'sudo cmp "$foreign_fleet_root$fleet_plist" "$fleet_plist"',
-      'sudo test ! -e "$fleet_secret"',
-      'sudo test -f "$fleet_osquery_log"',
-      'sudo test -f "$fleet_var_log"',
-      'sudo test -d /var/lib/orbit',
-      'sudo test -L /usr/local/bin/orbit',
-      'test "$(sudo readlink /usr/local/bin/orbit)" = /opt/orbit',
-      'sudo test -L "$launcher"',
-      String.raw`test "$(sudo readlink "$launcher")" \
-            = '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'`,
-    ]) {
-      after(assertion, foreignInstall);
-    }
-
-    const trapInstall = mac.indexOf('trap cleanup EXIT');
-    const firstPlant = mac.indexOf('sudo install -m 0755 "$foreign" "$launcher"');
-    const cleanupStart = mac.indexOf('cleanup() {');
-    assert.ok(trapInstall > 0 && trapInstall < firstPlant);
-    for (const cleanup of [
-      'sudo /bin/launchctl bootout system/com.fleetdm.orbit',
-      'sudo "$uninstall"',
-      'sudo /usr/bin/chflags noschg "$locked_cli_file"',
-      'sudo pkgutil --forget ai.anyray.connect',
-      'sudo pkgutil --forget "$fleet_receipt"',
-      'sudo pkgutil --forget ai.anyray.connect-tray',
-      '"$fleet_plist"',
-      '/usr/local/bin/orbit',
-      '/usr/local/lib/anyray-connect-retired',
-      '"$retired_plist"',
-      '"$fleet_root"',
-      '/var/lib/orbit',
-      '/var/log/orbit',
-      '"$residue_marker"',
-    ]) {
-      const cleanupIndex = mac.indexOf(cleanup, cleanupStart);
-      assert.ok(cleanupIndex > cleanupStart && cleanupIndex < trapInstall);
-    }
+  test('DMG smoke uses the actual uninstaller and rejects root-owned apps', () => {
+    const smoke = readFileSync(new URL('./verify-connect-desktop-macos-dmg.sh', import.meta.url), 'utf8');
+    assert.match(smoke, /uninstall --json --tray-path/);
+    assert.match(smoke, /uninstall-residue --json/);
+    assert.match(smoke, /test "\$result" -eq 4/);
+    assert.match(smoke, /as_user \/usr\/bin\/ditto/);
+    assert.match(smoke, /sysadminctl -deleteUser "\$smoke_user"/);
+    assert.doesNotMatch(smoke, /sudo "\$engine"|sudo "\$uninstall"|installer -pkg/);
   });
 
   test('passes validator outputs through quoted step environments', () => {
@@ -588,43 +326,17 @@ describe('desktop staging workflow safety contract', () => {
   });
 });
 
-test('macOS pkg scripts ride the unsigned artifact from the monorepo source checkout', () => {
-  const build = job('build-macos-unsigned');
-  for (const script of ['preinstall', 'postinstall', 'uninstall.sh']) {
-    assert.match(
-      build,
-      new RegExp(
-        `test -f private-source/connect-tray/src-tauri/macos/${script.replace('.', '\\.')}`
-      )
-    );
-    assert.match(
-      build,
-      new RegExp(
-        `cp private-source/connect-tray/src-tauri/macos/${script.replace('.', '\\.')} out/pkg-scripts/${script.replace('.', '\\.')}`
-      )
-    );
-  }
-  assert.match(
-    build,
-    /path: out\/connect-desktop-unsigned\.zip out\/pkg-scripts\/preinstall out\/pkg-scripts\/postinstall out\/pkg-scripts\/uninstall\.sh/
-  );
-
-  const sign = job('sign-macos');
-  assert.match(sign, /test -f unsigned\/preinstall/);
-  assert.match(sign, /test -f unsigned\/postinstall/);
-  assert.match(sign, /test -f unsigned\/uninstall\.sh/);
-  assert.doesNotMatch(workflow, /unsigned\/pkg-scripts/);
-  assert.doesNotMatch(sign, /sparse-checkout:[\s\S]*scripts\/desktop-pkg/);
-
-  assert.doesNotMatch(workflow, /scripts\/desktop-pkg/);
+test('macOS build hands only the app archive to signing', () => {
+  assert.match(job('build-macos-unsigned'), /path: out\/connect-desktop-unsigned\.zip/);
+  assert.doesNotMatch(job('build-macos-unsigned'), /pkg-scripts|macos\/postinstall/);
 });
 
-test('desktop staging assets contain one PKG, one updater tarball, and no DMG', () => {
+test('desktop staging assets contain one DMG, one updater tarball, and no PKG', () => {
   const assemble = job('assemble-signed-staging');
-  assert.match(assemble, /cp platform\/macos\/\*\.pkg assets\//);
+  assert.match(assemble, /cp platform\/macos\/\*\.dmg assets\//);
   assert.match(assemble, /cp platform\/macos\/\*\.app\.tar\.gz assets\//);
-  assert.match(assemble, /-name '\*\.pkg'[\s\S]*-eq 1/);
-  assert.match(assemble, /-name '\*\.dmg'[\s\S]*-eq 0/);
+  assert.match(assemble, /-name '\*\.pkg'[\s\S]*-eq 0/);
+  assert.match(assemble, /-name '\*\.dmg'[\s\S]*-eq 1/);
 });
 
 test('all Mac fleet owners serialize the full workflow, including cleanup', () => {

@@ -817,11 +817,22 @@ jobs:
           # A throwaway non-root account proves an ordinary user can read and run
           # what the pkg installs; it needs no GUI session.
           smoke_user='anyray-smoke'
-          smoke_user_created=false
-          cleanup() {
-            if [ "$smoke_user_created" = true ]; then
-              sudo /usr/sbin/sysadminctl -deleteUser "$smoke_user" >/dev/null 2>&1 || true
+          # The Mac host is reused inside its 24h window, so removal is verified and
+          # falls back to dscl: a silent sysadminctl failure stranded the next run.
+          remove_smoke_user() {
+            /usr/bin/id -u "$smoke_user" >/dev/null 2>&1 || return 0
+            sudo /usr/sbin/sysadminctl -deleteUser "$smoke_user" -keepHome 2>&1 | sed 's/^/sysadminctl: /' || true
+            if /usr/bin/id -u "$smoke_user" >/dev/null 2>&1; then
+              sudo /usr/bin/dscl . -delete "/Users/$smoke_user" 2>&1 | sed 's/^/dscl: /' || true
             fi
+            sudo /bin/rm -rf "/Users/$smoke_user"
+            if /usr/bin/id -u "$smoke_user" >/dev/null 2>&1; then
+              echo "::error::could not remove the $smoke_user account"
+              return 1
+            fi
+          }
+          cleanup() {
+            remove_smoke_user || true
             sudo /bin/launchctl bootout system/com.fleetdm.orbit >/dev/null 2>&1 || true
             if sudo test -x "$uninstall"; then
               sudo "$uninstall" >/dev/null 2>&1 || true
@@ -1071,12 +1082,11 @@ jobs:
           lipo -archs "$engine" | grep -q x86_64
           test "$("$engine" --version | head -1)" = "anyray-connect $VERSION"
           if /usr/bin/id -u "$smoke_user" >/dev/null 2>&1; then
-            echo "::error::dedicated Mac runner already has the $smoke_user account"
-            exit 1
+            echo "::warning::removing the $smoke_user account a previous run left on this host"
+            remove_smoke_user
           fi
           sudo /usr/sbin/sysadminctl -addUser "$smoke_user" -password "$(/usr/bin/uuidgen)" \
             -home "/Users/$smoke_user" -shell /bin/sh >/dev/null 2>&1
-          smoke_user_created=true
           smoke_uid="$(/usr/bin/id -u "$smoke_user")"
           test "$smoke_uid" -ne 0
           test "$(sudo -H -u "$smoke_user" "$engine" --version | head -1)" = "anyray-connect $VERSION"

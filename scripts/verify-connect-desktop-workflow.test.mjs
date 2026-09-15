@@ -276,8 +276,14 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(mac, /sudo -H -u "\$smoke_user" "\$engine" --version/);
     assert.match(mac, /sudo -H -u "\$smoke_user" "\$launcher" --version/);
     assert.match(mac, /sudo -H -u "\$smoke_user" \/bin\/sh -n "\$helper"/);
-    assert.match(mac, /sysadminctl -deleteUser "\$smoke_user"/);
-    assert.ok(mac.indexOf('sysadminctl -deleteUser "$smoke_user"') < mac.indexOf('trap cleanup EXIT'));
+    // Removal is verified, falls back to dscl, and runs both in cleanup and on a
+    // reused host that still carries the account from a previous run.
+    assert.match(mac, /sysadminctl -deleteUser "\$smoke_user" -keepHome/);
+    assert.match(mac, /dscl \. -delete "\/Users\/\$smoke_user"/);
+    assert.match(mac, /could not remove the \$smoke_user account/);
+    assert.ok(mac.indexOf('remove_smoke_user() {') < mac.indexOf('trap cleanup EXIT'));
+    assert.ok(mac.indexOf('remove_smoke_user || true') > mac.indexOf('cleanup() {'));
+    assert.match(mac, /removing the \$smoke_user account a previous run left on this host/);
     const macOwnership = macSmoke.indexOf("profile.get('engineOwner') == 'app'");
     const macStop = macSmoke.indexOf('            stop()', macOwnership);
     assert.ok(macOwnership > 0 && macOwnership < macStop);

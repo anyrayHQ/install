@@ -283,6 +283,12 @@ describe('desktop staging workflow safety contract', () => {
     assert.ok(staleAccountWarning > 0 && staleAccountWarning < staleAccountRemoval);
     assert.ok(staleAccountRemoval < smokeAccountCreation);
     assert.ok(mac.indexOf('remove_smoke_user || true', mac.indexOf('cleanup() {')) > 0);
+    // Removal ends by re-checking the account and failing loudly, never silently.
+    const removalStart = mac.indexOf('remove_smoke_user() {');
+    const removalEnd = mac.indexOf('\n          }', removalStart);
+    const removalBody = mac.slice(removalStart, removalEnd);
+    assert.ok(removalBody.lastIndexOf('/usr/bin/id -u "$smoke_user"') > removalBody.lastIndexOf('rm -rf "/Users/$smoke_user"'));
+    assert.match(removalBody, /could not remove the \$smoke_user account[\s\S]*return 1/);
     const macOwnership = macSmoke.indexOf("profile.get('engineOwner') == 'app'");
     const macStop = macSmoke.indexOf('            stop()', macOwnership);
     assert.ok(macOwnership > 0 && macOwnership < macStop);

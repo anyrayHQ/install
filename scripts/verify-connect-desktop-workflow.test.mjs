@@ -709,6 +709,19 @@ test('Linux package replacement and native rpm removal leave pre-existing CLI st
 });
 
 
+test('the MSI bundle runs at bundler debug level so a WiX link failure is diagnosable', () => {
+
+
+  const bundle = job('bundle-windows-unsigned');
+
+
+  assert.match(bundle, /--bundles msi `\n\s*--ci --no-sign -vv\n/);
+
+
+});
+
+
+
 test('Windows signing fetches go through the shared fetch-pinned action (retry policy lives there)', () => {
   const inner = job('sign-windows-inner');
   assert.equal((inner.match(/uses: \.\/\.github\/actions\/fetch-pinned/g) ?? []).length, 2);

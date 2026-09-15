@@ -520,7 +520,7 @@ does not make the release public/stable; it creates the explicit versioned
 staging prerelease and re-points the staging-only updater feed.
 
 The retained/published set contains one signed/notarized universal macOS
-`.pkg`, one universal `.app.tar.gz` containing the signed and stapled app, one
+`.dmg`, one universal `.app.tar.gz` containing the signed and stapled app, one
 Authenticode-signed Windows x64 MSI, the two signed Windows inner executables
 for audit, Linux x64 deb/rpm packages plus the two raw inner executables,
 detached GPG signatures and public key, signed `SHA256SUMS`, and a signed
@@ -569,17 +569,11 @@ requires all of the following before source-controlled build code executes:
 - `connect/package.json`, the tray's `Cargo.toml`, `Cargo.lock`, and
   `tauri.conf.json` all equal `version`;
 - Tauri's `bundle.externalBin` is exactly `binaries/anyray-connect`;
-- Tauri's macOS minimum is `13.0`. Signed pkg and updater bundle verification
+- Tauri's macOS minimum is `13.0`. Signed DMG and updater bundle verification
   also checks the generated `LSMinimumSystemVersion`.
 
 The private checkout is local to that native job and is **never uploaded** as
-source. The one exception is the three macOS pkg maintainer scripts
-(`preinstall`, `postinstall`, `uninstall.sh`): they are plain POSIX shell, not
-compiled, and the unsigned build job copies them byte-identical from the
-reviewed source SHA into the unsigned macOS artifact so `sign-macos` can build
-the installer from them. They carry the same bucket, access, and retention as
-the compiled app in that artifact. No TypeScript or Rust source ever crosses a
-job boundary. Provision a GitHub App installed only on the private monorepo,
+source. Only compiled app artifacts cross the macOS signing boundary. Provision a GitHub App installed only on the private monorepo,
 grant it repository Contents read-only, and set these install-repository
 secrets:
 
@@ -615,39 +609,17 @@ Compilation jobs receive the private-source credential but **no signing
 credentials**. Signing jobs download compiled artifacts and receive no private
 source or GitHub App credential:
 
-- **macOS:** `provision-mac` allocates the ephemeral CodeBuild Mac right after
-  preflight; `build-macos-unsigned` compiles one unsigned universal `.app` on
-  it, then copies `preinstall`, `postinstall`, and `uninstall.sh` from the
-  reviewed `private-source/connect-tray/src-tauri/macos/` checkout alongside
-  the unsigned app in the same artifact — those scripts are product behaviour
-  and live in the monorepo next to their Windows and Linux installer twins,
-  so this lane only carries them along, byte-identical, from the same source
-  SHA as the app. The artifact-only `sign-macos` job signs the bundled Bun
-  engine (hardened runtime + minimal `allow-jit` entitlement), signs the
-  outer app, requires Apple Team ID `V53XMA78UF` and bundle identifier
-  `ai.anyray.connect-tray`, notarizes and staples it, packs the stapled app as
-  a space-free `.app.tar.gz` for the updater, then builds a non-relocatable
-  installer `.pkg` from the downloaded scripts (preinstall refuses foreign
-  launchers/shims before Installer writes the payload, postinstall creates the
-  `/usr/local/bin` symlink and shims and installs `uninstall.sh`), signs it
-  with the Developer ID Installer certificate, and notarizes and staples it. A
-  static Installer readme tells interactive users that the deprecated Anyray
-  Connect CLI package and fleetd are removed when present. The credential-free
-  `verify-macos-signed` job proves the final pkg refuses a foreign launcher,
-  then sweeps a retired CLI receipt whose launcher is a copy of the signed
-  engine while reporting locked residue. It plants an installed and loaded
-  Anyray-owned fleetd receipt/runtime (secret file present) and asserts the
-  receipt, daemon, plist, secret, and `/usr/local/bin/orbit` symlink are all
-  gone while the audit logs and `/usr/local/bin` itself (birth time unchanged)
-  are retained. It then plants fleetd ownership via a plist reference alone,
-  with no secret file, and asserts that case is swept the same way. Finally it
-  leaves a separately installed and loaded foreign Fleet agent, receipt, and
-  `/usr/local/bin/orbit` symlink untouched; it then exercises the real desktop
-  install, GUI migration smoke, symlink/helpers, and uninstall. Teardown
-  follows the signed smoke with `always()`.
-  The Mac host is reused inside its paid 24h window, so the signing job
-  deletes its keychain and key files in an `always()` step and the build
-  never sees a secret.
+- **macOS:** public staging must accept a native desktop grant before the paid Mac is
+  allocated. Deploy the matching Billing backend first. `build-macos-unsigned` compiles
+  the universal app. `sign-macos` signs the bundled engine and outer app, verifies Team ID
+  `V53XMA78UF` and bundle ID `ai.anyray.connect-tray`, then notarizes and staples the app.
+  It produces the updater `.app.tar.gz` and a signed, notarized, stapled employee DMG.
+  The DMG contains the app, an Applications link and migration instructions. It has no
+  root scripts, shared launchers, package sweep or Developer ID Installer requirement.
+  `verify-macos-signed` copies the app as a unique temporary user, verifies ownership,
+  rejects root-owned removal, renders helpers without state creation and exercises
+  the actual CLI uninstall. Signing keys are deleted before this runtime verification.
+  `teardown-mac` runs with `always()`.
 - **Windows x64:** compile the raw Tauri main executable and bundled engine on
   Windows; sign and verify both through the existing Azure Artifact Signing
   script on Linux; restore those signed bytes on Windows and create the MSI
@@ -665,21 +637,18 @@ source or GitHub App credential:
 
 After signing, credential-free native jobs exercise the actual install/remove
 path before assembly can run. In addition to checking the bundled engine
-version, every platform launches the **installed Tauri main executable**, waits
+version, Windows and Linux launch the **installed Tauri main executable**, wait
 up to 30 seconds for its exact stable autostart artifact, validates that artifact
-points at the installed main executable, force-kills the tray, and then performs
+points at the installed main executable, stop the tray, and then perform
 the real uninstall:
 
-- macOS installs the pkg with `installer -pkg` as root and checks the bundle,
-  engine, launcher, helpers, receipts and the sweep cases. The CodeBuild Mac is
-  headless (no console session), so the native login-item lifecycle is not
-  exercised in CI. Run `scripts/smoke-connect-desktop-macos.py` by hand on a
-  Mac with a real GUI login, in a dedicated non-root account that holds no
-  Anyray profile, process, or login registration, and record the result in the
-  monorepo's `connect-tray/ACCEPTANCE.md` against the exact candidate. Changing
-  `HOME` is not isolation for Service Management, so never run it on a
-  developer account. The same manual pass covers the UI Quit action, a real
-  logout/login, enrollment, key renewal, and an EDR policy;
+- macOS copies the DMG app as a run-specific non-root account and executes actual
+  offboard, login-item unregister, state removal and native Trash removal. It also verifies
+  the signed updater archive. CI has no GUI session: browser completion and the status
+  window's resident-stop/result handling remain interactive acceptance checks in
+  `connect-tray/ACCEPTANCE.md`. Run them against the exact signed candidate in a dedicated
+  account, including the organization's EDR policy. Changing `HOME` does not isolate
+  Service Management. Old PKGs require separate one-time cleanup before a DMG copy;
 - Windows first plants an unsigned foreign engine at
   `C:\Program Files\Anyray\anyray-connect.exe`, requires the MSI to refuse it
   with exit 1603 without changing it, then plants a stale managed credential

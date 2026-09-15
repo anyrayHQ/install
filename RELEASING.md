@@ -615,9 +615,13 @@ source or GitHub App credential:
   `V53XMA78UF` and bundle ID `ai.anyray.connect-tray`, then notarizes and staples the app.
   It produces the updater `.app.tar.gz` and a signed, notarized, stapled employee DMG.
   The DMG contains the app, an Applications link and migration instructions. It has no
-  root scripts, shared launchers, package sweep or Developer ID Installer requirement.
+  root scripts, shared launchers or package sweep. A separate `macos-universal-managed.pkg`
+  contains the signed app and two pre-rendered `/usr/local/bin` fleet helpers, with no
+  installer scripts. It uses Developer ID Installer signing and the distinct receipt
+  `ai.anyray.connect-tray.managed`. IT owns managed updates and removal.
   `verify-macos-signed` copies the app as a unique temporary user, verifies ownership,
-  rejects root-owned removal, renders helpers without state creation and exercises
+  accepts managed startup, rejects root-owned and group-writable removal, verifies the
+  managed helper payload, renders helpers without state creation and exercises
   the actual CLI uninstall. Signing keys are deleted before this runtime verification.
   `teardown-mac` runs with `always()`.
 - **Windows x64:** compile the raw Tauri main executable and bundled engine on

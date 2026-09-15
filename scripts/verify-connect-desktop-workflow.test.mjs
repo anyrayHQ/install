@@ -162,8 +162,12 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(sign, /notarytool submit "\$dmg"/);
     assert.match(sign, /stapler validate "\$dmg"/);
     assert.match(sign, /ln -s \/Applications/);
-    assert.doesNotMatch(sign, /productsign|pkgbuild|productbuild|unsigned\/postinstall/);
-    assert.doesNotMatch(job('preflight'), /APPLE_INSTALLER_CERT/);
+    assert.doesNotMatch(sign, /--scripts|unsigned\/postinstall/);
+    assert.match(sign, /--identifier ai\.anyray\.connect-tray\.managed/);
+    assert.match(sign, /productbuild --package/);
+    assert.match(sign, /install -m 0755 unsigned\/anyray-credential-helper/);
+    assert.match(sign, /install -m 0755 unsigned\/anyray-bootstrap-headers-helper/);
+    assert.match(job('preflight'), /APPLE_INSTALLER_CERT/);
     assert.match(job('validate-source'), /verify-connect-desktop-backend\.mjs/);
   });
 
@@ -335,16 +339,16 @@ describe('desktop staging workflow safety contract', () => {
   });
 });
 
-test('macOS build hands only the app archive to signing', () => {
+test('macOS build hands the app archive and static helpers to signing', () => {
   assert.match(job('build-macos-unsigned'), /path: out\/connect-desktop-unsigned\.zip/);
   assert.doesNotMatch(job('build-macos-unsigned'), /pkg-scripts|macos\/postinstall/);
 });
 
-test('desktop staging assets contain one DMG, one updater tarball, and no PKG', () => {
+test('desktop staging assets contain an employee DMG, updater, and managed PKG', () => {
   const assemble = job('assemble-signed-staging');
   assert.match(assemble, /cp platform\/macos\/\*\.dmg assets\//);
   assert.match(assemble, /cp platform\/macos\/\*\.app\.tar\.gz assets\//);
-  assert.match(assemble, /-name '\*\.pkg'[\s\S]*-eq 0/);
+  assert.match(assemble, /-name '\*-managed\.pkg'[\s\S]*-eq 1/);
   assert.match(assemble, /-name '\*\.dmg'[\s\S]*-eq 1/);
 });
 
@@ -529,4 +533,25 @@ test('Linux smoke runs uninstall.sh user cleanup before package removal', () => 
   const markerSurvives = linux.indexOf('test -f "$user_layer_marker"', anyrayGone);
   assert.ok(offboardGrep > anyrayGone && offboardGrep < markerSurvives);
   assert.match(linux, /test ! -e "\$uninstall"/);
+});
+
+test('DMG smoke refuses removable unsafe bundles and verifies updater platform declarations', () => {
+  const smoke = readFileSync(new URL('./verify-connect-desktop-macos-dmg.sh', import.meta.url), 'utf8');
+  const unsafe = smoke.slice(smoke.indexOf('as_user chmod 775'), smoke.indexOf('as_user chmod 755'));
+  assert.match(unsafe, /uninstall-residue --json/);
+  assert.match(unsafe, /test "\$result" -eq 4/);
+  assert.match(unsafe, /test -d "\$app"/);
+  assert.match(smoke, /CFBundleShortVersionString raw -o - "\$updater_app\/Contents\/Info\.plist"\)" = "\$VERSION"/);
+  assert.match(smoke, /LSMinimumSystemVersion raw -o - "\$updater_app\/Contents\/Info\.plist"\)" = '13\.0'/);
+});
+
+
+test('managed PKG inspection uses runner-owned scratch and checks static helpers', () => {
+  const smoke = readFileSync(new URL('./verify-connect-desktop-macos-dmg.sh', import.meta.url), 'utf8');
+  assert.match(smoke, /managed_expanded="\$RUNNER_TEMP\//);
+  assert.match(smoke, /pkgutil --expand-full "\$pkg" "\$managed_expanded"/);
+  assert.match(smoke, /-name preinstall -o -name postinstall -o -name uninstall\.sh/);
+  assert.match(smoke, /cmp "\$RUNNER_TEMP\/expected-\$wrapper"/);
+  assert.match(smoke, /installation-check --json/);
+  assert.match(smoke, /userOwned == false/);
 });

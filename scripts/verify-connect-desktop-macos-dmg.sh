@@ -9,11 +9,24 @@ smoke_user_created=false
 mountpoint="$(mktemp -d /tmp/anyray-dmg.XXXXXX)"
 chmod 755 "$mountpoint"
 mounted=false
+# The Mac host is reused for 24h and sysadminctl can fail silently, so removal is verified.
+remove_smoke_user() {
+  /usr/bin/id -u "$smoke_user" >/dev/null 2>&1 || return 0
+  sudo /usr/sbin/sysadminctl -deleteUser "$smoke_user" -keepHome 2>&1 | sed 's/^/sysadminctl: /' || true
+  if /usr/bin/id -u "$smoke_user" >/dev/null 2>&1; then
+    sudo /usr/bin/dscl . -delete "/Users/$smoke_user" 2>&1 | sed 's/^/dscl: /' || true
+  fi
+  sudo /bin/rm -rf "$smoke_home"
+  if /usr/bin/id -u "$smoke_user" >/dev/null 2>&1; then
+    echo "::error::could not remove the $smoke_user account"
+    return 1
+  fi
+}
 cleanup() {
   if [ "$mounted" = true ]; then hdiutil detach "$mountpoint" >/dev/null || true; fi
   rmdir "$mountpoint" 2>/dev/null || true
   if [ "$smoke_user_created" = true ]; then
-    sudo /usr/sbin/sysadminctl -deleteUser "$smoke_user" >/dev/null 2>&1 || true
+    remove_smoke_user || true
   fi
 }
 trap cleanup EXIT

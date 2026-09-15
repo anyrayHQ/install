@@ -290,6 +290,15 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(smoke, /as_user \/usr\/bin\/ditto/);
     assert.match(smoke, /sysadminctl -deleteUser "\$smoke_user"/);
     assert.doesNotMatch(smoke, /sudo "\$engine"|sudo "\$uninstall"|installer -pkg/);
+    // Removal ends by re-checking the account and failing loudly, never silently.
+    const cleanupStart = smoke.indexOf('cleanup() {');
+    assert.ok(smoke.indexOf('remove_smoke_user || true', cleanupStart) > cleanupStart);
+    assert.ok(cleanupStart < smoke.indexOf('trap cleanup EXIT'));
+    const removalStart = smoke.indexOf('remove_smoke_user() {');
+    const removalBody = smoke.slice(removalStart, smoke.indexOf('\n}', removalStart));
+    assert.ok(removalStart > 0);
+    assert.ok(removalBody.lastIndexOf('/usr/bin/id -u "$smoke_user"') > removalBody.lastIndexOf('rm -rf "$smoke_home"'));
+    assert.match(removalBody, /could not remove the \$smoke_user account[\s\S]*return 1/);
   });
 
   test('passes validator outputs through quoted step environments', () => {

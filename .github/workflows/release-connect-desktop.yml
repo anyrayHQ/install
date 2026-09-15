@@ -826,7 +826,7 @@ jobs:
             if sudo test -x "$uninstall"; then
               sudo "$uninstall" >/dev/null 2>&1 || true
             fi
-            sudo /usr/bin/chflags nouchg "$locked_cli_file" >/dev/null 2>&1 || true
+            sudo /usr/bin/chflags noschg "$locked_cli_file" >/dev/null 2>&1 || true
             sudo rm -rf "$installed_app" /usr/local/lib/anyray-connect
             for helper in "$credential_helper" "$bootstrap_helper"; do
               if sudo test -f "$helper" \
@@ -996,7 +996,11 @@ jobs:
           pkgutil --pkg-info ai.anyray.connect >/dev/null
           sudo cmp "$retired_stub" "$launcher"
           sudo test -f "$retired_plist"
-          sudo /usr/bin/chflags uchg "$locked_cli_file"
+          # WHY: schg, not uchg. preinstall deletes through /bin/rm running as root,
+          # and BSD rm clears UF_IMMUTABLE (uchg) itself before unlinking, so a uchg
+          # fixture is removed and record_residue never runs. rm skips that clear when
+          # SF_IMMUTABLE is set, which is what makes the path genuinely unremovable.
+          sudo /usr/bin/chflags schg "$locked_cli_file"
 
           build_fleet_pkg \
             "$owned_fleet_root" \

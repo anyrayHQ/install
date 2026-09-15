@@ -44,7 +44,7 @@ as_user() { sudo -H -u "$smoke_user" "$@"; }
 dmg="signed/anyray-connect-desktop-${VERSION}-macos-universal.dmg"
 tarball="signed/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
 test "$(find signed -maxdepth 1 -name '*.dmg' | wc -l | tr -d ' ')" -eq 1
-test "$(find signed -maxdepth 1 -name '*.pkg' | wc -l | tr -d ' ')" -eq 0
+test "$(find signed -maxdepth 1 -name '*-managed.pkg' | wc -l | tr -d ' ')" -eq 1
 test -s "$tarball"
 xcrun stapler validate "$dmg"
 spctl -a -vvv -t open --context context:primary-signature "$dmg"
@@ -72,6 +72,19 @@ for wrapper in credential bootstrap-headers; do
 done
 sudo test ! -e "$smoke_home/.anyray"
 
+# Unlike a root-owned fixture, this bundle is removable by the test user. Only
+# the app's trust gate can prevent Trash from moving a group-writable bundle.
+as_user chmod 775 "$app"
+codesign --verify --deep --strict "$app"
+set +e
+as_user "$main" uninstall-residue --json > "$RUNNER_TEMP/desktop-writable-removal.json"
+result=$?
+set -e
+test "$result" -eq 4
+test -d "$app"
+jq -e '.status == "needs_admin"' "$RUNNER_TEMP/desktop-writable-removal.json" >/dev/null
+as_user chmod 755 "$app"
+
 # A legacy root-owned bundle must be rejected without being moved or elevated.
 sudo chown root:wheel "$app"
 set +e
@@ -81,6 +94,9 @@ set -e
 test "$result" -eq 4
 test -d "$app"
 jq -e '.status == "needs_admin"' "$RUNNER_TEMP/desktop-root-removal.json" >/dev/null
+# A root-owned MDM bundle is allowed to start, but never to self-update/remove.
+as_user "$main" installation-check --json > "$RUNNER_TEMP/desktop-managed-start.json"
+jq -e '.status == "ready" and .userOwned == false' "$RUNNER_TEMP/desktop-managed-start.json" >/dev/null
 sudo chown "$smoke_user":staff "$app"
 
 # Check the updater distribution too; installation uses the same signed bundle.
@@ -91,8 +107,28 @@ sudo chmod 644 "$smoke_home/updater.tar.gz"
 as_user tar -xzf "$smoke_home/updater.tar.gz" -C "$updater_root"
 updater_app="$(sudo find "$updater_root" -maxdepth 1 -name '*.app' -print -quit)"
 codesign --verify --deep --strict "$updater_app"
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$updater_app/Contents/Info.plist")" = "$VERSION"
+test "$(plutil -extract LSMinimumSystemVersion raw -o - "$updater_app/Contents/Info.plist")" = '13.0'
 cmp "$engine" "$updater_app/Contents/MacOS/anyray-connect"
 cmp "$main" "$updater_app/Contents/MacOS/connect-tray"
+
+# Managed PKG carries the same sealed app and static helpers, without executable
+# Installer scripts or a privileged uninstaller. Expand it without changing host paths.
+pkg="signed/anyray-connect-desktop-${VERSION}-macos-universal-managed.pkg"
+pkgutil --check-signature "$pkg"
+xcrun stapler validate "$pkg"
+spctl -a -vvv -t install "$pkg"
+managed_expanded="$RUNNER_TEMP/managed-expanded-${SMOKE_RUN_ID}-${SMOKE_RUN_ATTEMPT}"
+pkgutil --expand-full "$pkg" "$managed_expanded"
+test -z "$(find "$managed_expanded" -type f \( -name preinstall -o -name postinstall -o -name uninstall.sh \) -print -quit)"
+managed_payload="$(find "$managed_expanded" -type d -name Payload -print -quit)"
+test -n "$managed_payload"
+for wrapper in credential bootstrap-headers; do
+  as_user "$engine" desktop helper --print --platform posix --wrapper "$wrapper" \
+    --bin '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect' > "$RUNNER_TEMP/expected-$wrapper"
+  cmp "$RUNNER_TEMP/expected-$wrapper" "$managed_payload/usr/local/bin/anyray-$wrapper-helper"
+done
+codesign --verify --deep --strict "$managed_payload/Applications/Anyray Connect.app"
 
 # Exercise the engine's real offboard -> unregister -> state removal -> Trash.
 # Native browser/login registration still requires interactive acceptance.

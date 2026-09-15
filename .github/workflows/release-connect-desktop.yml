@@ -110,6 +110,8 @@ jobs:
       AWS_MAC_FLEET_ROLE_ARN: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
       APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
       APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+      APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
       APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
@@ -142,6 +144,7 @@ jobs:
             MONOREPO_READ_APP_ID MONOREPO_READ_APP_PRIVATE_KEY \
             AWS_MAC_FLEET_ROLE_ARN \
             APPLE_SIGNING_CERT_P12 APPLE_SIGNING_CERT_PASSWORD \
+            APPLE_INSTALLER_CERT_P12 APPLE_INSTALLER_CERT_PASSWORD \
             APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID \
             AZURE_SIGNING_CLIENT_ID AZURE_SIGNING_TENANT_ID \
             AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT_PROFILE \
@@ -379,12 +382,21 @@ jobs:
           lipo -archs "$main" | grep -q x86_64
           mkdir -p out
           ditto -c -k --keepParent "$app" out/connect-desktop-unsigned.zip
+          # Pre-render managed payload files here, never during root installation.
+          "$app/Contents/MacOS/anyray-connect" desktop helper --print --platform posix \
+            --wrapper credential --bin '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect' \
+            > out/anyray-credential-helper
+          "$app/Contents/MacOS/anyray-connect" desktop helper --print --platform posix \
+            --wrapper bootstrap-headers --bin '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect' \
+            > out/anyray-bootstrap-headers-helper
+          /bin/sh -n out/anyray-credential-helper
+          /bin/sh -n out/anyray-bootstrap-headers-helper
 
       - uses: ./.github/actions/s3-artifact-upload
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-unsigned
-          path: out/connect-desktop-unsigned.zip
+          path: out/connect-desktop-unsigned.zip out/anyray-credential-helper out/anyray-bootstrap-headers-helper
           if-no-files-found: error
 
   sign-macos:
@@ -398,6 +410,8 @@ jobs:
       VERSION: ${{ needs.preflight.outputs.version }}
       APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
       APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+      APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+      APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
       APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
@@ -550,12 +564,47 @@ jobs:
           xcrun stapler validate "$dmg"
           spctl -a -vvv -t open --context context:primary-signature "$dmg"
 
+      - name: Build the separate script-free managed macOS package
+        run: |
+          set -euo pipefail
+          app="$(find expanded -maxdepth 1 -type d -name '*.app' -print -quit)"
+          managed_root="$(mktemp -d "$RUNNER_TEMP/connect-managed.XXXXXX")"
+          mkdir -p "$managed_root/payload/Applications" "$managed_root/payload/usr/local/bin"
+          ditto "$app" "$managed_root/payload/Applications/Anyray Connect.app"
+          install -m 0755 unsigned/anyray-credential-helper "$managed_root/payload/usr/local/bin/anyray-credential-helper"
+          install -m 0755 unsigned/anyray-bootstrap-headers-helper "$managed_root/payload/usr/local/bin/anyray-bootstrap-headers-helper"
+          pkgbuild --analyze --root "$managed_root/payload" "$managed_root/components.plist"
+          plutil -replace 0.BundleIsRelocatable -bool false "$managed_root/components.plist"
+          pkgbuild --root "$managed_root/payload" --component-plist "$managed_root/components.plist" \
+            --identifier ai.anyray.connect-tray.managed --version "$VERSION" \
+            --install-location / --ownership recommended "$managed_root/component.pkg"
+          keychain="$RUNNER_TEMP/connect-desktop-signing.keychain-db"
+          printf '%s' "$APPLE_INSTALLER_CERT_P12" | base64 -d > "$RUNNER_TEMP/connect-desktop-installer-cert.p12"
+          security import "$RUNNER_TEMP/connect-desktop-installer-cert.p12" -k "$keychain" \
+            -f pkcs12 -P "$APPLE_INSTALLER_CERT_PASSWORD" -A -T /usr/bin/productbuild
+          keychain_password="$(cat "$RUNNER_TEMP/connect-desktop-keychain-password")"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          installer_identity="$(security find-identity -v "$keychain" | awk '/Developer ID Installer/ {print $2; exit}')"
+          test -n "$installer_identity"
+          pkg="out/anyray-connect-desktop-${VERSION}-macos-universal-managed.pkg"
+          productbuild --package "$managed_root/component.pkg" --sign "$installer_identity" "$pkg"
+          pkgutil --check-signature "$pkg"
+          xar -tf "$pkg" | grep -qx Distribution
+          status="$(xcrun notarytool submit "$pkg" \
+            --key "$RUNNER_TEMP/connect-desktop-notary-key.p8" --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
+          [ "$status" = Accepted ] || { echo "::error::managed PKG notarization failed: $status"; exit 1; }
+          xcrun stapler staple "$pkg"
+          xcrun stapler validate "$pkg"
+          spctl -a -vvv -t install "$pkg"
+
       - name: Delete the throwaway Apple signing material
         if: always()
         run: |
           set -euo pipefail
           rm -rf \
             "$RUNNER_TEMP/connect-desktop-cert.p12" \
+            "$RUNNER_TEMP/connect-desktop-installer-cert.p12" \
             "$RUNNER_TEMP/connect-desktop-notary-key.p8" \
             "$RUNNER_TEMP/connect-desktop-keychain-password" \
             "$RUNNER_TEMP/connect-desktop-engine-entitlements.plist" \
@@ -568,7 +617,7 @@ jobs:
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
-          path: out/*.dmg out/*.app.tar.gz
+          path: out/*.dmg out/*-managed.pkg out/*.app.tar.gz
           if-no-files-found: error
 
   # Runtime validation is deliberately separate from signing. The signed app
@@ -1942,11 +1991,12 @@ jobs:
           set -euo pipefail
           mkdir -p assets
           cp platform/macos/*.dmg assets/
+          cp platform/macos/*-managed.pkg assets/
           cp platform/macos/*.app.tar.gz assets/
           cp platform/windows-inner/*.exe assets/
           cp platform/windows-installer/*.msi assets/
           cp platform/linux/* assets/
-          test "$(find assets -maxdepth 1 -type f -name '*.pkg' | wc -l)" -eq 0
+          test "$(find assets -maxdepth 1 -type f -name '*-managed.pkg' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -type f -name '*.dmg' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -type f -name '*.app.tar.gz' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -type f -name '*windows*x64*.exe' | wc -l)" -eq 2

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createPublicKey } from 'node:crypto';
-import { verifyDesktopBackend, STAGING_ORIGIN, assertNativeOrigin } from './verify-connect-desktop-backend.mjs';
+import { verifyDesktopBackend, STAGING_ORIGIN, assertNativeOrigin, probeDiagnostic } from './verify-connect-desktop-backend.mjs';
 
 test('probes native callback acceptance with a real key and private random path', async () => {
   await verifyDesktopBackend(async (url, options) => {
@@ -25,4 +25,18 @@ test('blocks an old backend, edge denial, redirect and malformed success', async
 test('the checked-out app and release probe must use the same staging origin', () => {
   assertNativeOrigin(`const STAGING_CONTROL_PLANE_ORIGIN: &str = "${STAGING_ORIGIN}";`);
   assert.throws(() => assertNativeOrigin('const STAGING_CONTROL_PLANE_ORIGIN: &str = "https://other.example";'));
+});
+
+test('probe diagnostics distinguish deployment, policy and temporary failures without secrets', async () => {
+  for (const [status, label] of [[429, 'backend-rate-limited'], [503, 'backend-temporary-failure'],
+    [404, 'backend-native-sign-in-unavailable'], [403, 'backend-rejected-native-sign-in']]) {
+    await assert.rejects(verifyDesktopBackend(async () => Response.json({message: 'private-body'}, {status})), (error) => {
+      assert.equal(probeDiagnostic(error), `${label} http_status=${status}`);
+      return true;
+    });
+  }
+  assert.throws(() => assertNativeOrigin('changed'), (error) => {
+    assert.equal(probeDiagnostic(error), 'origin-drift'); return true;
+  });
+  assert.equal(probeDiagnostic(new Error('private-path-or-body')), 'probe-failed');
 });

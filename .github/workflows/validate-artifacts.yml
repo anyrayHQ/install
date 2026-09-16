@@ -54,8 +54,9 @@ jobs:
         run: ci/test-connect-download.sh
       # Same reason, one step later: the install onto the stable path has to
       # work on a machine that already runs Anyray, where that path is a loaded
-      # .exe. The failure is Windows-only, but the helper is drivable anywhere,
-      # so this rides the runner the steps above already use.
+      # .exe. This covers the helper's retry, rollback, naming and messaging;
+      # the loaded-image lock itself is a Windows property and gets a real
+      # Windows runner in connect-installers-windows below.
       - name: Test the installer replaces a running binary
         shell: pwsh
         run: ./ci/test-connect-install.ps1 "$PWD/connect.ps1"
@@ -149,6 +150,20 @@ jobs:
 
           check_payload "$deb_root"
           check_payload "$rpm_root"
+
+  # The half of the install guard that Linux cannot answer. Renaming and
+  # unlinking a running binary is simply ALLOWED on Linux, so the job above has
+  # to shadow Rename-Item and therefore cannot prove what the whole approach
+  # rests on: Windows refuses to OVERWRITE a loaded image but permits RENAMING
+  # it aside. That is exactly where the customer-visible bug came from, so it
+  # runs on the same on-demand Windows runner the connect binaries are built on.
+  connect-installers-windows:
+    runs-on: codebuild-anyray-install-runner-win-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Test the installer replaces a RUNNING binary
+        shell: pwsh
+        run: ./ci/test-connect-install-windows.ps1 "$PWD/connect.ps1"
 
   compose:
     runs-on: ubuntu-latest

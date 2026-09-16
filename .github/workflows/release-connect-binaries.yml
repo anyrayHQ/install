@@ -339,8 +339,8 @@ jobs:
           # because it sits where the failure actually lands. --prefer-online so
           # a cached 404 cannot be what we retry against.
           #
-          # BUDGET: 60 x 10s = 10 minutes. The old 20 x 5s (~100s) was far under
-          # what propagation actually takes, and v1.10.401 proved it end to end:
+          # BUDGET: a 10-minute WALL-CLOCK deadline. The old 20 x 5s (~100s) was
+          # far under what propagation actually takes, and v1.10.401 proved it:
           #   10:35:51  publish returns `+ anyray-connect@0.11.232`
           #   10:38:25  publisher's own 150s read-wait expires, dispatches anyway
           #   10:39:29  this step starts fetching
@@ -350,20 +350,30 @@ jobs:
           # lane failed on a version that was merely late, not missing, and left
           # `releases/latest` a version behind npm — the precise split this retry
           # exists to prevent. 10 minutes is ~1.4x the observed worst case.
-          # Waiting costs nothing here: the signing lanes that follow take ~30m.
-          attempts=60
-          for attempt in $(seq 1 "$attempts"); do
+          #
+          # A deadline, not an attempt count, because the bound has to hold
+          # against the job's 40-minute timeout: counting attempts bounds the
+          # SLEEPING, while each `npm pack` also takes unbounded time of its own
+          # (a slow or hanging registry read costs wall clock the count cannot
+          # see). The deadline is checked BEFORE sleeping, so a failed final
+          # check exits immediately rather than sleeping first.
+          # Work after this step is ~30s (deps 9s, compile 5s, upload 16s), so
+          # even a deadline-length wait leaves ~29m of the 40m timeout unused.
+          FETCH_DEADLINE=$(( $(date +%s) + 600 ))
+          attempt=0
+          while :; do
+            attempt=$(( attempt + 1 ))
             # Clear any partial artifact first: the extract below globs, and two
             # tarballs would make `tar xzf` fail on an argument it cannot take.
             rm -f anyray-connect-*.tgz
             if npm pack --prefer-online "anyray-connect@${VERSION_INPUT}"; then
               break
             fi
-            if [ "$attempt" = "$attempts" ]; then
-              echo "::error::anyray-connect@${VERSION_INPUT} still unfetchable from npm after ~10 minutes. npm holds a version this lane has no assets for, so releases/latest stays on the PREVIOUS connect; re-run this workflow for ${VERSION_INPUT} once the registry serves it."
+            if [ "$(date +%s)" -ge "$FETCH_DEADLINE" ]; then
+              echo "::error::anyray-connect@${VERSION_INPUT} still unfetchable from npm after 10 minutes (${attempt} attempts). npm holds a version this lane has no assets for, so releases/latest stays on the PREVIOUS connect; re-run this workflow for ${VERSION_INPUT} once the registry serves it."
               exit 1
             fi
-            echo "npm does not serve ${VERSION_INPUT} yet — retrying ($attempt/$attempts)"
+            echo "npm does not serve ${VERSION_INPUT} yet — retrying (attempt ${attempt})"
             sleep 10
           done
           tar xzf anyray-connect-*.tgz

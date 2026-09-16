@@ -18,10 +18,15 @@
 # temp directory with no powershell.exe.config and no Modules — and is also the
 # textbook masquerading signature, so it has two ways to die that have nothing
 # to do with what this file measures. It took one of them on 2026-09-16, exiting
-# within three seconds and failing the job on its second ever run. ping.exe is a
-# self-contained PE with no side files and no CLR: it holds the image lock the
-# same way, `-t` keeps it resident until killed, and it keeps looping even where
-# ICMP is unavailable.
+# within three seconds and failing the job on its second ever run. ping.exe
+# carries no CLR and needs no config: it takes the same image lock, and `-t`
+# keeps it resident until killed.
+#
+# Nothing here reads its console output. ping.exe keeps its strings in a MUI
+# satellite (System32\en-US\ping.exe.mui), so a copy on its own prints nothing
+# and still exits 0 — which is how it scored a working binary as broken twice
+# before this was understood. Case 6 checks the bytes and the image load
+# instead, which is what "the swap produced a working PE" actually means.
 [CmdletBinding()]
 param([Parameter(Mandatory = $true)][string] $ConnectPs1)
 
@@ -48,26 +53,15 @@ function Check {
   if (-not $Pass) { $failures.Add($Case) }
 }
 
-# Whatever a launch had to say about itself, in one line. Polled rather than
-# read once: a redirect file is written by the CHILD, and the handle can still
-# be closing when the parent observes the exit, so a single read races an
-# already-finished process to empty. Callers that expect nothing pass -Settle 0.
+# Whatever a failed launch had to say about itself, in one line.
 function Get-StreamHead {
-  param([string] $Path, [int] $SettleMs = 0)
-  $deadline = (Get-Date).AddMilliseconds($SettleMs)
-  do {
-    if (Test-Path -LiteralPath $Path) {
-      $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
-      if (-not [string]::IsNullOrWhiteSpace($text)) {
-        $flat = ($text -replace '\s+', ' ').Trim()
-        if ($flat.Length -gt 200) { return $flat.Substring(0, 200) + '...' }
-        return $flat
-      }
-    }
-    if ((Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
-  } while ((Get-Date) -lt $deadline)
+  param([string] $Path)
   if (-not (Test-Path -LiteralPath $Path)) { return '(no file)' }
-  return '(empty)'
+  $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+  if ([string]::IsNullOrWhiteSpace($text)) { return '(empty)' }
+  $flat = ($text -replace '\s+', ' ').Trim()
+  if ($flat.Length -gt 200) { return $flat.Substring(0, 200) + '...' }
+  return $flat
 }
 
 # Start the test image and prove it is resident before anything is measured
@@ -104,6 +98,7 @@ $stub = Join-Path $env:SystemRoot 'System32\ping.exe'
 if (-not (Test-Path -LiteralPath $stub)) { throw "no ping.exe at $stub to use as a test image" }
 
 $live = $null
+$reran = $null
 try {
   $bin = Join-Path $binDir 'anyray-connect.exe'
   Copy-Item -LiteralPath $stub -Destination $bin -Force
@@ -174,30 +169,24 @@ try {
   Check '5 the freed aside is swept by the next install' ($left.Count -eq 0) "$($left.Count) file(s) left beside the binary"
 
   # 6. the swap produced a working PE, not a truncated or half-copied file.
-  # Matched on the address echoed back, which is the one part of ping's output
-  # no locale translates, and the exit code is ignored: a container that drops
-  # ICMP still proves the image loaded and ran. Run through Start-Process with
-  # the streams on disk rather than `& $bin ... 2>&1`, which turns a native
-  # stderr line into an ErrorRecord that $ErrorActionPreference = 'Stop' would
-  # make terminating.
+  # Two independent halves: the bytes on disk are the bytes that were staged,
+  # and Windows will still load them as an image. A truncated or partially
+  # written PE fails the first; one that is intact on disk but malformed is
+  # refused by CreateProcess and fails the second.
   $ran = $false
   $detail = ''
   try {
-    $out = Join-Path $logDir 'run.out'
-    $err = Join-Path $logDir 'run.err'
-    $p = Start-Process -FilePath $bin -ArgumentList '-n', '1', '127.0.0.1' -PassThru -NoNewWindow `
-      -RedirectStandardOutput $out -RedirectStandardError $err
-    if (-not $p.WaitForExit(30000)) { $p.Kill(); throw 'the installed binary did not exit within 30s' }
-    # The timeout overload above returns as soon as the process is gone; only
-    # the parameterless one also waits for the redirected streams to finish.
-    # Without it this read the file mid-flush and scored a working binary as
-    # broken (run 35075535460: "exit 0, stdout: (empty), stderr: (empty)").
-    $p.WaitForExit()
-    $text = Get-StreamHead -Path $out -SettleMs 5000
-    $ran = $text -match '127\.0\.0\.1'
-    $detail = "exit $($p.ExitCode), stdout: $text, stderr: $(Get-StreamHead $err)"
+    $want = (Get-FileHash -LiteralPath $stub -Algorithm SHA256).Hash
+    $got = (Get-FileHash -LiteralPath $bin -Algorithm SHA256).Hash
+    if ($want -ne $got) {
+      $detail = "the installed bytes differ from the source: $($got.Substring(0,16))... vs $($want.Substring(0,16))..."
+    } else {
+      $reran = Start-TestImage -Path $bin -LogDir $logDir -Tag 'installed'
+      $ran = $true
+      $detail = "bytes match the source and the image loaded (pid $($reran.Id))"
+    }
   } catch {
-    $detail = "could not execute the installed binary: $($_.Exception.Message)"
+    $detail = "could not run the installed binary: $($_.Exception.Message)"
   }
   Check '6 the installed binary executes' $ran $detail
 
@@ -207,6 +196,8 @@ try {
   Write-Host 'connect.ps1 install (Windows): 7/7 cases OK'
 }
 finally {
-  if ($live -and -not $live.HasExited) { $live.Kill(); $live.WaitForExit(10000) | Out-Null }
+  foreach ($p in @($live, $reran)) {
+    if ($p -and -not $p.HasExited) { $p.Kill(); $p.WaitForExit(10000) | Out-Null }
+  }
   Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }

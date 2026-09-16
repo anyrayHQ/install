@@ -7,11 +7,21 @@
 # OVERWRITE a loaded image but permits RENAMING it aside. That is the property
 # the customer-visible bug came from, so it gets a real Windows runner.
 #
-# Six cases. Case 0 is the control: overwriting a running image must FAIL here.
-# If it succeeds, this host does not lock loaded images and every verdict below
-# is meaningless — the script fails rather than report a green table of
+# Seven cases. Case 0 is the control: overwriting a running image must FAIL
+# here. If it succeeds, this host does not lock loaded images and every verdict
+# below is meaningless — the script fails rather than report a green table of
 # nonsense. Case 1 reproduces the shipped bug, so a future Windows or
 # PowerShell change that quietly fixes it is noticed here instead of assumed.
+#
+# The test image is a copy of ping.exe, NOT of powershell.exe. A renamed script
+# host carries the whole PowerShell startup path with it — $PSHOME lands in a
+# temp directory with no powershell.exe.config and no Modules — and is also the
+# textbook masquerading signature, so it has two ways to die that have nothing
+# to do with what this file measures. It took one of them on 2026-09-16, exiting
+# within three seconds and failing the job on its second ever run. ping.exe is a
+# self-contained PE with no side files and no CLR: it holds the image lock the
+# same way, `-t` keeps it resident until killed, and it keeps looping even where
+# ICMP is unavailable.
 [CmdletBinding()]
 param([Parameter(Mandatory = $true)][string] $ConnectPs1)
 
@@ -26,21 +36,61 @@ Invoke-Expression $match.Value
 
 $work = Join-Path $env:TEMP ("anyray-install-win-" + [guid]::NewGuid().ToString('N'))
 $binDir = Join-Path $work 'bin'
+$logDir = Join-Path $work 'logs'
 New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
 $failures = [System.Collections.Generic.List[string]]::new()
 function Check {
   param([string] $Case, [bool] $Pass, [string] $Detail)
-  $verdict = if ($Pass) { 'PASS' } else { 'FAIL'; }
+  $verdict = if ($Pass) { 'PASS' } else { 'FAIL' }
   Write-Host ("  [{0}] {1} - {2}" -f $verdict, $Case, $Detail)
   if (-not $Pass) { $failures.Add($Case) }
 }
 
-# A real PE we can run and hold open. A copy of powershell.exe rather than a
-# compiled stub: it needs no toolchain, and only a genuine loaded image takes
-# the lock this file exists to measure.
-$stub = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-if (-not (Test-Path -LiteralPath $stub)) { throw "no powershell.exe at $stub to use as a test image" }
+# Whatever a failed launch had to say about itself, in one line.
+function Get-StreamHead {
+  param([string] $Path)
+  if (-not (Test-Path -LiteralPath $Path)) { return '(no file)' }
+  $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+  if ([string]::IsNullOrWhiteSpace($text)) { return '(empty)' }
+  $flat = ($text -replace '\s+', ' ').Trim()
+  if ($flat.Length -gt 200) { return $flat.Substring(0, 200) + '...' }
+  return $flat
+}
+
+# Start the test image and prove it is resident before anything is measured
+# against it. The version this replaces slept three seconds and then threw a
+# bare string, so a launch failure reported nothing about itself and the job
+# had to be re-run to learn anything. Capture the exit code and both streams,
+# and give a slow or on-access-scanned start two more chances.
+function Start-TestImage {
+  param(
+    [Parameter(Mandatory = $true)][string] $Path,
+    [Parameter(Mandatory = $true)][string] $LogDir,
+    [Parameter(Mandatory = $true)][string] $Tag
+  )
+  $details = [System.Collections.Generic.List[string]]::new()
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    $out = Join-Path $LogDir "$Tag-$attempt.out"
+    $err = Join-Path $LogDir "$Tag-$attempt.err"
+    $p = Start-Process -FilePath $Path -ArgumentList '-t', '127.0.0.1' -PassThru -NoNewWindow `
+      -RedirectStandardOutput $out -RedirectStandardError $err
+    # An image that is going to fault does it in the first moments; past that
+    # it is loaded and holding its own file.
+    $settled = (Get-Date).AddSeconds(3)
+    while ((Get-Date) -lt $settled -and -not $p.HasExited) { Start-Sleep -Milliseconds 250 }
+    if (-not $p.HasExited) { return $p }
+
+    $line = "attempt ${attempt}: exit $($p.ExitCode), stderr: $(Get-StreamHead $err), stdout: $(Get-StreamHead $out)"
+    $details.Add($line)
+    Write-Host "  [warn] $Tag exited before the run started - $line"
+  }
+  throw "the test image ($Tag) exited before the run started - $($details -join ' | ')"
+}
+
+$stub = Join-Path $env:SystemRoot 'System32\ping.exe'
+if (-not (Test-Path -LiteralPath $stub)) { throw "no ping.exe at $stub to use as a test image" }
 
 $live = $null
 try {
@@ -48,9 +98,7 @@ try {
   Copy-Item -LiteralPath $stub -Destination $bin -Force
 
   # Hold it open the way a hook, the MCP server or the tray would.
-  $live = Start-Process -FilePath $bin -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 300' -PassThru
-  Start-Sleep -Seconds 3
-  if ($live.HasExited) { throw 'the test image exited before the run started' }
+  $live = Start-TestImage -Path $bin -LogDir $logDir -Tag 'held'
 
   # 0. control: a running image cannot be overwritten.
   $blocked = $false
@@ -115,12 +163,23 @@ try {
   Check '5 the freed aside is swept by the next install' ($left.Count -eq 0) "$($left.Count) file(s) left beside the binary"
 
   # 6. the swap produced a working PE, not a truncated or half-copied file.
+  # Matched on the address echoed back, which is the one part of ping's output
+  # no locale translates, and the exit code is ignored: a container that drops
+  # ICMP still proves the image loaded and ran. Run through Start-Process with
+  # the streams on disk rather than `& $bin ... 2>&1`, which turns a native
+  # stderr line into an ErrorRecord that $ErrorActionPreference = 'Stop' would
+  # make terminating.
   $ran = $false
   $detail = ''
   try {
-    $out = & $bin -NoProfile -Command 'Write-Output anyray-ok'
-    $ran = "$out".Trim() -eq 'anyray-ok'
-    $detail = "executed, output: $out"
+    $out = Join-Path $logDir 'run.out'
+    $err = Join-Path $logDir 'run.err'
+    $p = Start-Process -FilePath $bin -ArgumentList '-n', '1', '127.0.0.1' -PassThru -NoNewWindow `
+      -RedirectStandardOutput $out -RedirectStandardError $err
+    if (-not $p.WaitForExit(30000)) { $p.Kill(); throw 'the installed binary did not exit within 30s' }
+    $text = Get-StreamHead $out
+    $ran = $text -match '127\.0\.0\.1'
+    $detail = "exit $($p.ExitCode), stdout: $text, stderr: $(Get-StreamHead $err)"
   } catch {
     $detail = "could not execute the installed binary: $($_.Exception.Message)"
   }
@@ -132,6 +191,6 @@ try {
   Write-Host 'connect.ps1 install (Windows): 7/7 cases OK'
 }
 finally {
-  if ($live -and -not $live.HasExited) { $live.Kill() }
+  if ($live -and -not $live.HasExited) { $live.Kill(); $live.WaitForExit(10000) | Out-Null }
   Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }

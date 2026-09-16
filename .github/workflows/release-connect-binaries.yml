@@ -370,6 +370,49 @@ jobs:
           # --ignore-scripts: never run lifecycle scripts from fetched deps.
           bun install --production --ignore-scripts
 
+          # Koffi ships one native addon per platform as an os/cpu-gated
+          # optionalDependency, so the install above fetches ONLY this runner's
+          # (linux-x64). But connect's ffi loader (connect/src/util/confinedRead.ts)
+          # statically `await import()`s all six by name so Bun can EMBED the addon
+          # in a standalone binary, and `bun build --compile` must resolve every one
+          # of those specifiers for EVERY target — the darwin/windows imports are in
+          # the graph even when compiling for linux. With only the host's package
+          # present the very first target died on
+          #   error: Could not resolve: "@koromix/koffi-darwin-arm64"
+          # and the whole binaries lane failed while npm already had the version
+          # (0.11.231, v1.10.400), stranding releases/latest a version behind.
+          #
+          # `npm install --force --os --cpu` is what overrides that gating: --os/--cpu
+          # alone still refuse with `notsup`, and --force without them ignores the
+          # request. Installed into the same node_modules Bun resolves from; the
+          # per-target binary still embeds only the addon its own code path imports.
+          for spec in \
+            "darwin arm64 @koromix/koffi-darwin-arm64" \
+            "darwin x64   @koromix/koffi-darwin-x64" \
+            "linux  arm64 @koromix/koffi-linux-arm64" \
+            "linux  x64   @koromix/koffi-linux-x64" \
+            "win32  arm64 @koromix/koffi-win32-arm64" \
+            "win32  x64   @koromix/koffi-win32-x64"; do
+            set -- $spec
+            # Version comes from the published package's own optionalDependencies,
+            # never a hardcoded pin here, so this cannot drift from what connect ships.
+            want=$(node -p "require('./package.json').optionalDependencies['$3']")
+            npm install --force --no-save --ignore-scripts --os="$1" --cpu="$2" "$3@$want"
+          done
+
+          # Fail here, not 40 lines later inside a minified bundle, if any is missing.
+          node -e '
+            const deps = Object.keys(require("./package.json").optionalDependencies || {});
+            const missing = deps.filter((d) => {
+              try { require.resolve(d + "/package.json"); return false; } catch { return true; }
+            });
+            if (missing.length) {
+              console.error("::error::koffi platform packages absent: " + missing.join(", "));
+              process.exit(1);
+            }
+            console.log("all " + deps.length + " koffi platform packages present");
+          '
+
       - name: Compile standalone binaries (Bun)
         run: |
           set -euo pipefail

@@ -338,19 +338,33 @@ jobs:
           # this is the belt to that braces, and it is the half that matters
           # because it sits where the failure actually lands. --prefer-online so
           # a cached 404 cannot be what we retry against.
-          for attempt in $(seq 1 20); do
+          #
+          # BUDGET: 60 x 10s = 10 minutes. The old 20 x 5s (~100s) was far under
+          # what propagation actually takes, and v1.10.401 proved it end to end:
+          #   10:35:51  publish returns `+ anyray-connect@0.11.232`
+          #   10:38:25  publisher's own 150s read-wait expires, dispatches anyway
+          #   10:39:29  this step starts fetching
+          #   10:41:23  20 retries exhausted -> release FAILED here
+          #   10:43:02  npm actually begins serving 0.11.232
+          # Propagation took ~7 minutes against a combined budget of ~4, so the
+          # lane failed on a version that was merely late, not missing, and left
+          # `releases/latest` a version behind npm — the precise split this retry
+          # exists to prevent. 10 minutes is ~1.4x the observed worst case.
+          # Waiting costs nothing here: the signing lanes that follow take ~30m.
+          attempts=60
+          for attempt in $(seq 1 "$attempts"); do
             # Clear any partial artifact first: the extract below globs, and two
             # tarballs would make `tar xzf` fail on an argument it cannot take.
             rm -f anyray-connect-*.tgz
             if npm pack --prefer-online "anyray-connect@${VERSION_INPUT}"; then
               break
             fi
-            if [ "$attempt" = 20 ]; then
-              echo "::error::anyray-connect@${VERSION_INPUT} still unfetchable from npm after ~100s"
+            if [ "$attempt" = "$attempts" ]; then
+              echo "::error::anyray-connect@${VERSION_INPUT} still unfetchable from npm after ~10 minutes. npm holds a version this lane has no assets for, so releases/latest stays on the PREVIOUS connect; re-run this workflow for ${VERSION_INPUT} once the registry serves it."
               exit 1
             fi
-            echo "npm does not serve ${VERSION_INPUT} yet — retrying ($attempt/20)"
-            sleep 5
+            echo "npm does not serve ${VERSION_INPUT} yet — retrying ($attempt/$attempts)"
+            sleep 10
           done
           tar xzf anyray-connect-*.tgz
           # Resolve the concrete version even when 'latest' was requested.

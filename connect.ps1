@@ -110,6 +110,67 @@ function Get-AnyrayDownload {
   throw $lastError
 }
 
+# Put the downloaded exe at the stable path, even when the copy already there is
+# RUNNING. Windows refuses to overwrite a loaded image, and `Move-Item -Force`
+# reports that refusal as "Cannot create a file when that file already exists"
+# (ERROR_ALREADY_EXISTS), which reads as "the destination exists" and sends the
+# user to delete a file that -Force was already meant to replace. It is a
+# PowerShell error-message bug (PowerShell/PowerShell#16990, #21251), not a
+# missing flag: no switch makes the overwrite succeed. Re-enrollment on a
+# machine that already has Anyray hits this every time, because the Claude Code
+# PostToolUse hook, the MCP server, the tray and the managed-enrollment task all
+# execute this exact path.
+#
+# Renaming a running image aside IS allowed, so do what the self-updater's
+# `activate()` does: move the live copy out of the way, put the new one in
+# place, then try to delete the old one (that delete fails while the old process
+# lives, which is why the aside carries a pid and is swept on the next run).
+function Install-AnyrayBinary {
+  param(
+    [Parameter(Mandatory = $true)][string] $Source,
+    [Parameter(Mandatory = $true)][string] $Destination
+  )
+  $dir = Split-Path -Parent $Destination
+  $leaf = Split-Path -Leaf $Destination
+
+  # Sweep asides an earlier install left behind once their process has exited.
+  # Matched on Name, not -Filter: the filesystem wildcard -Filter uses also
+  # matches 8.3 short names, which would sweep files this never created.
+  Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "$leaf.old-*" } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+
+  $aside = "$Destination.old-$PID"
+  $movedAside = $false
+  if (Test-Path -LiteralPath $Destination) {
+    Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
+    # An on-access AV scan can hold the file for a moment; a running Anyray
+    # process cannot, so a couple of retries separate the two cases.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+      try {
+        Rename-Item -LiteralPath $Destination -NewName "$leaf.old-$PID" -Force
+        $movedAside = $true
+        break
+      } catch {
+        if ($attempt -eq 3) {
+          throw "could not replace $Destination - close Claude Code, Codex and the Anyray tray, then re-run this command ($($_.Exception.Message))"
+        }
+        Start-Sleep -Milliseconds (200 * $attempt)
+      }
+    }
+  }
+
+  try {
+    Move-Item -LiteralPath $Source -Destination $Destination -Force
+  } catch {
+    if ($movedAside) { Rename-Item -LiteralPath $aside -NewName $leaf -Force -ErrorAction SilentlyContinue }
+    throw
+  }
+  # Fails while the old binary is still running. Harmless: the sweep above
+  # clears it on the next install, and nothing references the aside path.
+  if ($movedAside) { Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue }
+}
+
 $tmp = Join-Path $env:TEMP ("anyray-connect-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 $dl = Join-Path $tmp 'anyray-connect.exe'
@@ -150,7 +211,7 @@ try {
   $installDir = if ($env:ANYRAY_HOME) { Join-Path $env:ANYRAY_HOME 'bin' } else { Join-Path $env:USERPROFILE '.anyray\bin' }
   New-Item -ItemType Directory -Path $installDir -Force | Out-Null
   $bin = Join-Path $installDir 'anyray-connect.exe'
-  Move-Item -Force -Path $dl -Destination $bin
+  Install-AnyrayBinary -Source $dl -Destination $bin
 
   if ($managedInstall) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

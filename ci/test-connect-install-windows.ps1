@@ -79,8 +79,22 @@ function Start-TestImage {
   for ($attempt = 1; $attempt -le 3; $attempt++) {
     $out = Join-Path $LogDir "$Tag-$attempt.out"
     $err = Join-Path $LogDir "$Tag-$attempt.err"
-    $p = Start-Process -FilePath $Path -ArgumentList '-t', '127.0.0.1' -PassThru -NoNewWindow `
-      -RedirectStandardOutput $out -RedirectStandardError $err
+    # A refused CreateProcess is exactly the transient this loop exists for, and
+    # $ErrorActionPreference = 'Stop' makes it terminating, so the launch has to
+    # be caught per attempt or it escapes the retries it is supposed to use.
+    try {
+      $p = Start-Process -FilePath $Path -ArgumentList '-t', '127.0.0.1' -PassThru -NoNewWindow `
+        -RedirectStandardOutput $out -RedirectStandardError $err
+    } catch {
+      $line = "attempt ${attempt}: could not start - $($_.Exception.GetType().Name): $($_.Exception.Message)"
+      $details.Add($line)
+      Write-Host "  [warn] $Tag did not start - $line"
+      # A refusal costs nothing to observe, so without a wait all three
+      # attempts burn inside a second and the retry tolerates no transient at
+      # all. The exit path below already waits out its settle window.
+      if ($attempt -lt 3) { Start-Sleep -Seconds (2 * $attempt) }
+      continue
+    }
     # An image that is going to fault does it in the first moments; past that
     # it is loaded and holding its own file.
     $settled = (Get-Date).AddSeconds(3)

@@ -48,15 +48,26 @@ function Check {
   if (-not $Pass) { $failures.Add($Case) }
 }
 
-# Whatever a failed launch had to say about itself, in one line.
+# Whatever a launch had to say about itself, in one line. Polled rather than
+# read once: a redirect file is written by the CHILD, and the handle can still
+# be closing when the parent observes the exit, so a single read races an
+# already-finished process to empty. Callers that expect nothing pass -Settle 0.
 function Get-StreamHead {
-  param([string] $Path)
+  param([string] $Path, [int] $SettleMs = 0)
+  $deadline = (Get-Date).AddMilliseconds($SettleMs)
+  do {
+    if (Test-Path -LiteralPath $Path) {
+      $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+      if (-not [string]::IsNullOrWhiteSpace($text)) {
+        $flat = ($text -replace '\s+', ' ').Trim()
+        if ($flat.Length -gt 200) { return $flat.Substring(0, 200) + '...' }
+        return $flat
+      }
+    }
+    if ((Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
+  } while ((Get-Date) -lt $deadline)
   if (-not (Test-Path -LiteralPath $Path)) { return '(no file)' }
-  $text = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
-  if ([string]::IsNullOrWhiteSpace($text)) { return '(empty)' }
-  $flat = ($text -replace '\s+', ' ').Trim()
-  if ($flat.Length -gt 200) { return $flat.Substring(0, 200) + '...' }
-  return $flat
+  return '(empty)'
 }
 
 # Start the test image and prove it is resident before anything is measured
@@ -177,7 +188,12 @@ try {
     $p = Start-Process -FilePath $bin -ArgumentList '-n', '1', '127.0.0.1' -PassThru -NoNewWindow `
       -RedirectStandardOutput $out -RedirectStandardError $err
     if (-not $p.WaitForExit(30000)) { $p.Kill(); throw 'the installed binary did not exit within 30s' }
-    $text = Get-StreamHead $out
+    # The timeout overload above returns as soon as the process is gone; only
+    # the parameterless one also waits for the redirected streams to finish.
+    # Without it this read the file mid-flush and scored a working binary as
+    # broken (run 35075535460: "exit 0, stdout: (empty), stderr: (empty)").
+    $p.WaitForExit()
+    $text = Get-StreamHead -Path $out -SettleMs 5000
     $ran = $text -match '127\.0\.0\.1'
     $detail = "exit $($p.ExitCode), stdout: $text, stderr: $(Get-StreamHead $err)"
   } catch {

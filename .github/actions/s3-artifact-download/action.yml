@@ -44,6 +44,32 @@ runs:
         # rather than let the consumer proceed on an empty directory and
         # publish a release that is quietly missing a platform's binary.
         if [ -z "$(aws s3 ls "${src}/" 2>/dev/null | head -1)" ]; then
+          # Keys are attempt-scoped on purpose (a re-run must never read a
+          # previous attempt's bytes), which makes "re-run failed jobs" a trap:
+          # it re-runs only the CONSUMER, so it reads attempt N while the
+          # producers wrote attempt N-1, and the honest-but-misleading message
+          # below sends the operator hunting a producer that succeeded. Say so
+          # explicitly when an earlier attempt holds the bytes.
+          # Scan EVERY earlier attempt, not just the immediately preceding
+          # one: re-running failed jobs twice leaves the producers' bytes two
+          # or more attempts back, and checking only N-1 would fall through to
+          # the message that blames a producer which in fact succeeded.
+          if [ "${GITHUB_RUN_ATTEMPT:-1}" != "1" ]; then
+            found_attempt=""
+            n=$((GITHUB_RUN_ATTEMPT - 1))
+            while [ "$n" -ge 1 ]; do
+              prev="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${n}/${ARTIFACT_NAME}"
+              if [ -n "$(aws s3 ls "${prev}/" 2>/dev/null | head -1)" ]; then
+                found_attempt="$n"
+                break
+              fi
+              n=$((n - 1))
+            done
+            if [ -n "$found_attempt" ]; then
+              echo "::error::'${ARTIFACT_NAME}' exists under attempt ${found_attempt} but not attempt ${GITHUB_RUN_ATTEMPT}. Artifact keys are attempt-scoped, so re-running FAILED JOBS ONLY can never work for this workflow: the producing jobs did not re-run. Re-dispatch the whole workflow instead (same inputs)."
+              exit 1
+            fi
+          fi
           echo "::error::No objects under ${src} — the job that uploads '${ARTIFACT_NAME}' did not run or wrote nothing."
           exit 1
         fi

@@ -1867,13 +1867,51 @@ jobs:
 
           # Idempotent: replace an existing release for this version.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+
+          # Uploading is SEPARATE from creating, and retried with --clobber.
+          # `gh release create ... assets/*` is all-or-nothing: when one asset
+          # upload stalls, gh's own retry re-PUTs a name that already landed,
+          # GitHub answers `422 ReleaseAsset.name already exists`, and gh then
+          # DELETES the release it just created -- discarding ~25 minutes of
+          # signing and notarization for a transient network fault
+          # (connect-v0.11.236, 2026-09-17: one 422 on the aarch64 rpm after a
+          # 16-minute upload window took the whole release with it, and the
+          # re-cut had to rebuild everything).
+          # --clobber makes re-uploading a name that already exists the
+          # SUCCESS path, so a retry converges instead of colliding.
+          #
+          # NOT a draft, even though a draft would hide the half-built release:
+          # GitHub creates the git tag only when a draft is PUBLISHED, so a
+          # draft for a new version has no resolvable tag and every
+          # `gh release upload|edit "$TAG"` against it 404s
+          # (`/releases/tags/<tag>` -> 404; verified on the pinned gh 2.76.1).
+          # `latest` is what must not move early, so the release is created
+          # real-but-not-latest and promoted only once every asset is attached.
+          upload_assets() {
+            tag="$1"
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              if gh release upload "$tag" assets/* --clobber; then
+                return 0
+              fi
+              # Only announce a retry when one is actually left, or the last
+              # failure logs "retrying" and sleeps before the terminal error.
+              if [ "$attempt" -lt 3 ]; then
+                echo "::warning::asset upload attempt ${attempt} for ${tag} failed; retrying"
+                sleep 15
+              fi
+              attempt=$((attempt + 1))
+            done
+            echo "::error::asset upload for ${tag} failed after 3 attempts"
+            return 1
+          }
           if [ "$STAGING" = "true" ]; then
             gh release create "$TAG" \
               --title "anyray-connect ${VERSION} (staging assets)" \
               --notes "Staging build of anyray-connect ${VERSION}, for testing before a customer-facing release. Same signing and checksums as a real release; deliberately NOT \`latest\`, so \`connect.sh\`, \`connect.ps1\` and the self-updater are unaffected and no customer receives this build. Fetch a binary by its explicit tag URL, never through \`releases/latest/download\`." \
               --latest=false \
-              --prerelease \
-              assets/*
+              --prerelease
+            upload_assets "$TAG"
             # Say it out loud in the log: a human reading a green run needs to
             # see that `latest` did not move.
             echo "Published STAGING release $TAG (pre-release, not latest)."
@@ -1907,8 +1945,14 @@ jobs:
             gh release create "$TAG" \
               --title "anyray-connect ${VERSION} (binaries and macOS package)" \
               --notes-file "$NOTES" \
-              "--latest=$MAKE_LATEST" \
-              assets/*
+              --latest=false
+            upload_assets "$TAG"
+            # Promote only now. Until this line `releases/latest` still points
+            # at the previous release, so connect.sh, connect.ps1 and the
+            # self-updater never resolve a release whose assets are still
+            # uploading. When MAKE_LATEST is false (an older re-cut) this is a
+            # no-op and latest is left exactly where it was.
+            gh release edit "$TAG" "--latest=$MAKE_LATEST"
 
             actual_latest="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
             if [ "$MAKE_LATEST" = true ]; then

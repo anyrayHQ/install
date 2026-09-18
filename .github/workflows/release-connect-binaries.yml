@@ -1894,9 +1894,13 @@ jobs:
               if gh release upload "$tag" assets/* --clobber; then
                 return 0
               fi
-              echo "::warning::asset upload attempt ${attempt} for ${tag} failed; retrying"
+              # Only announce a retry when one is actually left, or the last
+              # failure logs "retrying" and sleeps before the terminal error.
+              if [ "$attempt" -lt 3 ]; then
+                echo "::warning::asset upload attempt ${attempt} for ${tag} failed; retrying"
+                sleep 15
+              fi
               attempt=$((attempt + 1))
-              sleep 15
             done
             echo "::error::asset upload for ${tag} failed after 3 attempts"
             return 1

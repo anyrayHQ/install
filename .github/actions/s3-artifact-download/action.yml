@@ -50,10 +50,23 @@ runs:
           # producers wrote attempt N-1, and the honest-but-misleading message
           # below sends the operator hunting a producer that succeeded. Say so
           # explicitly when an earlier attempt holds the bytes.
+          # Scan EVERY earlier attempt, not just the immediately preceding
+          # one: re-running failed jobs twice leaves the producers' bytes two
+          # or more attempts back, and checking only N-1 would fall through to
+          # the message that blames a producer which in fact succeeded.
           if [ "${GITHUB_RUN_ATTEMPT:-1}" != "1" ]; then
-            prev="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-$((GITHUB_RUN_ATTEMPT - 1))/${ARTIFACT_NAME}"
-            if [ -n "$(aws s3 ls "${prev}/" 2>/dev/null | head -1)" ]; then
-              echo "::error::'${ARTIFACT_NAME}' exists under attempt $((GITHUB_RUN_ATTEMPT - 1)) but not this attempt. Artifact keys are attempt-scoped, so re-running FAILED JOBS ONLY can never work for this workflow: the producing jobs did not re-run. Re-dispatch the whole workflow instead (same inputs)."
+            found_attempt=""
+            n=$((GITHUB_RUN_ATTEMPT - 1))
+            while [ "$n" -ge 1 ]; do
+              prev="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${n}/${ARTIFACT_NAME}"
+              if [ -n "$(aws s3 ls "${prev}/" 2>/dev/null | head -1)" ]; then
+                found_attempt="$n"
+                break
+              fi
+              n=$((n - 1))
+            done
+            if [ -n "$found_attempt" ]; then
+              echo "::error::'${ARTIFACT_NAME}' exists under attempt ${found_attempt} but not attempt ${GITHUB_RUN_ATTEMPT}. Artifact keys are attempt-scoped, so re-running FAILED JOBS ONLY can never work for this workflow: the producing jobs did not re-run. Re-dispatch the whole workflow instead (same inputs)."
               exit 1
             fi
           fi

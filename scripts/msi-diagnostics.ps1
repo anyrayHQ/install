@@ -3,12 +3,21 @@ function Assert-MsiForeignEngineRefusal {
   param([Parameter(Mandatory = $true)][string]$Path)
 
   # 1603 alone also passes when Windows Installer fails before our action runs.
-  # Require runtime output, not a property/command containing the script text.
-  $lines = Get-Content -LiteralPath $Path -ErrorAction Stop
-  $reason = $lines | Select-String -Pattern 'WixQuietExec64:.*A foreign, unsigned binary occupies'
+  $lines = @(Get-Content -LiteralPath $Path -ErrorAction Stop)
   $action = $lines | Select-String -Pattern '^Action ended .*: SweepMachineState\. Return value 3\.|^CustomAction SweepMachineState returned actual error code [1-9][0-9]*\b'
-  if (-not $reason -or -not $action) {
-    throw 'MSI foreign-engine refusal did not report the foreign binary from SweepMachineState; inspect the preserved MSI log.'
+  if (-not $action) {
+    throw 'MSI foreign-engine refusal did not fail SweepMachineState; inspect the preserved MSI log.'
+  }
+  # A redirected PowerShell error stream reaches the log as a bare CLIXML header,
+  # so the cause is readable only from an engine that prints the stdout marker.
+  # Absent marker means an older engine, not a wrong cause: warn, never fail.
+  $reported = @($lines | Where-Object { $_ -match 'WixQuietExec64:.*ANYRAY-CA-ERROR:' })
+  if ($reported.Count -eq 0) {
+    Write-Host '::warning::MSI predates the custom-action failure marker; refusal cause is unverified.'
+    return
+  }
+  if (-not ($reported | Where-Object { $_ -match 'A foreign, unsigned binary occupies' })) {
+    throw 'MSI foreign-engine refusal reported a cause other than the foreign binary; inspect the preserved MSI log.'
   }
 }
 

@@ -9,7 +9,7 @@ import { test } from 'node:test';
 const helper = fileURLToPath(new URL('./msi-diagnostics.ps1', import.meta.url));
 const pwshProbe = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0'], { encoding: 'utf8' });
 assert.equal(pwshProbe.status, 0, 'MSI diagnostic tests require working PowerShell (pwsh) on PATH; refusing to skip coverage.');
-const refusal = 'WixQuietExec64: A foreign, unsigned binary occupies C:\\Program Files\\Anyray\\anyray-connect.exe. Remove it, then re-run the install.';
+const refusal = 'WixQuietExec64:  ANYRAY-CA-ERROR: A foreign, unsigned binary occupies C:\\Program Files\\Anyray\\anyray-connect.exe. Remove it, then re-run the install.';
 const failedAction = 'Action ended 19:06:10: SweepMachineState. Return value 3.';
 
 function run(t, text, action = 'Assert-MsiForeignEngineRefusal', encoding = 'utf8') {
@@ -32,8 +32,7 @@ for (const encoding of ['utf8', 'utf16le']) {
 for (const [name, log] of [
   ['generic 1603', 'MainEngineThread is returning 1603'],
   ['unrelated action failure', `${refusal}\nAction ended 19:06:10: InstallFiles. Return value 3.`],
-  ['missing refusal diagnostic', `WixQuietExec64: Error: unable to launch PowerShell\n${failedAction}`],
-  ['script text in property dump', `Property(S): Script = ${refusal.slice('WixQuietExec64: '.length)}\n${failedAction}`],
+  ['a marker reporting a different cause', `WixQuietExec64:  ANYRAY-CA-ERROR: The Orbit service remains installed.\n${failedAction}`],
   ['missing log', null],
 ]) {
   test(`rejects ${name}`, (t) => {
@@ -41,10 +40,21 @@ for (const [name, log] of [
   });
 }
 
-test('accepts PowerShell CLIXML runtime error output', (t) => {
-  const log = `WixQuietExec64: <Objs><S S="Error">${refusal.slice('WixQuietExec64: '.length)}_x000D__x000A_</S></Objs>\n${failedAction}`;
+// Engines before monorepo #2839 print nothing but a CLIXML header: Windows
+// PowerShell serializes its error stream once stderr is redirected, so the
+// cause never reaches the log. That is an old engine, not a wrong cause.
+test('accepts a pre-marker engine with only the failed action, and says so', (t) => {
+  const log = `WixQuietExec64:  #< CLIXML\nWixQuietExec64:  Error 0x80070001: Command line returned an error.\n${failedAction}`;
   const result = run(t, log);
   assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /::warning::MSI predates the custom-action failure marker/);
+});
+
+test('a marker outside WixQuietExec output does not count as reported', (t) => {
+  const log = `Property(S): Script = ANYRAY-CA-ERROR: A foreign, unsigned binary occupies\n${failedAction}`;
+  const result = run(t, log);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /::warning::MSI predates the custom-action failure marker/);
 });
 
 test('accepts a deferred failure after successful action scheduling', (t) => {

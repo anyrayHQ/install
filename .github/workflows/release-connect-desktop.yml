@@ -1626,9 +1626,13 @@ jobs:
           name: connect-desktop-windows-installer-signed
           path: installer
       - name: Verify refusal, install layout, execute, and uninstall without touching CLI state
+        id: windows-msi-smoke
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $logDir = New-Item -ItemType Directory -Force -Path 'connect-desktop-msi-logs'
+          # A reused workspace must not upload evidence from an earlier attempt.
+          Get-ChildItem -LiteralPath $logDir.FullName -Filter 'connect-desktop-msi*.log' -File | Remove-Item -Force
           if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
           $PSNativeCommandUseErrorActionPreference = $true
           $inner = @(Get-ChildItem -LiteralPath 'inner' -Filter '*.exe')
@@ -1673,9 +1677,12 @@ jobs:
           $bootstrapShim = Join-Path $installDir 'anyray-bootstrap-headers-helper.cmd'
           $uninstallScript = Join-Path $installDir 'uninstall.ps1'
           $helperMarker = 'Managed by anyray-connect desktop helper; do not edit.'
-          $log = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi.log'
-          $foreignLog = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi-foreign.log'
+          . ./scripts/msi-diagnostics.ps1
+          $log = Join-Path $logDir.FullName 'connect-desktop-msi.log'
+          $foreignLog = Join-Path $logDir.FullName 'connect-desktop-msi-foreign.log'
+          $uninstallLog = Join-Path $logDir.FullName 'connect-desktop-msi-uninstall.log'
           $installed = $false
+          $smokeFailure = $null
           $createdInstallDir = $false
           $appProcess = $null
           $createdRunKey = $false
@@ -1719,7 +1726,6 @@ jobs:
               -ArgumentList $foreignInstallArgs
             if ($foreignInstall.ExitCode -in 0,3010) { $installed = $true }
             if ($foreignInstall.ExitCode -ne 1603) {
-              Get-Content -LiteralPath $foreignLog -Tail 80 -ErrorAction SilentlyContinue
               throw "MSI foreign-engine refusal returned exit $($foreignInstall.ExitCode), expected 1603"
             }
             if (-not (Test-Path -LiteralPath $installedEnginePath -PathType Leaf)) {
@@ -1728,6 +1734,7 @@ jobs:
             if ((Get-FileHash -LiteralPath $installedEnginePath -Algorithm SHA256).Hash -ne $foreignHash) {
               throw 'MSI foreign-engine refusal changed the foreign engine'
             }
+            Assert-MsiForeignEngineRefusal -Path $foreignLog
             Remove-Item -LiteralPath $installedEnginePath
             Set-Content -LiteralPath $credentialShim -Value @(
               '@echo off'
@@ -1755,7 +1762,6 @@ jobs:
             $proc = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
               -ArgumentList $installArgs
             if ($proc.ExitCode -notin 0,3010) {
-              Get-Content -LiteralPath $log -Tail 80 -ErrorAction SilentlyContinue
               throw "MSI install failed with exit $($proc.ExitCode)"
             }
             $installed = $true
@@ -1863,34 +1869,45 @@ jobs:
               throw 'running the installed tray changed the existing scheduler sentinel'
             }
           }
+          catch {
+            $smokeFailure = $_
+            throw
+          }
           finally {
-            if ($null -ne $appProcess -and -not $appProcess.HasExited) {
-              Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
-              Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
-            }
-            # The tray owns this exact test-created Run value; MSI uninstall
-            # is not expected to remove per-user autostart state.
-            Remove-ItemProperty -LiteralPath $runKey -Name $runName -ErrorAction SilentlyContinue
-            if ($createdRunKey) {
-              $remaining = Get-Item -LiteralPath $runKey -ErrorAction SilentlyContinue
-              if ($null -ne $remaining -and $remaining.ValueCount -eq 0 -and $remaining.SubKeyCount -eq 0) {
-                Remove-Item -LiteralPath $runKey
+            try {
+              if ($null -ne $appProcess -and -not $appProcess.HasExited) {
+                Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+                Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
+              }
+              # The tray owns this exact test-created Run value; MSI uninstall
+              # is not expected to remove per-user autostart state.
+              Remove-ItemProperty -LiteralPath $runKey -Name $runName -ErrorAction SilentlyContinue
+              if ($createdRunKey) {
+                $remaining = Get-Item -LiteralPath $runKey -ErrorAction SilentlyContinue
+                if ($null -ne $remaining -and $remaining.ValueCount -eq 0 -and $remaining.SubKeyCount -eq 0) {
+                  Remove-Item -LiteralPath $runKey
+                }
+              }
+              if ($installed) {
+                $uninstallArgs = @(
+                  '/x', "`"$msi`"", '/qn', '/norestart', '/L*v', "`"$uninstallLog`""
+                )
+                $remove = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
+                  -ArgumentList $uninstallArgs
+                if ($remove.ExitCode -notin 0,3010) {
+                  throw "MSI uninstall failed with exit $($remove.ExitCode)"
+                }
+              }
+              elseif ($createdInstallDir -and (Test-Path -LiteralPath $installDir)) {
+                # Only a directory this smoke created is removed: a failure before the clean
+                # install leaves planted fixtures behind, and a reused runner requires it absent.
+                Remove-Item -LiteralPath $installDir -Recurse -Force
               }
             }
-            if ($installed) {
-              $uninstallArgs = @(
-                '/x', "`"$msi`"", '/qn', '/norestart'
-              )
-              $remove = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
-                -ArgumentList $uninstallArgs
-              if ($remove.ExitCode -notin 0,3010) {
-                throw "MSI uninstall failed with exit $($remove.ExitCode)"
-              }
-            }
-            elseif ($createdInstallDir -and (Test-Path -LiteralPath $installDir)) {
-              # Only a directory this smoke created is removed: a failure before the clean
-              # install leaves planted fixtures behind, and a reused runner requires it absent.
-              Remove-Item -LiteralPath $installDir -Recurse -Force
+            catch {
+              if ($null -eq $smokeFailure) { throw }
+              # Preserve the pending smoke exception; cleanup remains visible separately.
+              Write-Warning "Windows MSI cleanup also failed: $($_.Exception.Message)"
             }
           }
           if (Test-Path -LiteralPath $installedMainPath -PathType Leaf) {
@@ -1916,6 +1933,25 @@ jobs:
           if ((Get-FileHash -LiteralPath $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
             throw 'MSI install/uninstall changed the existing scheduler sentinel'
           }
+
+      - name: Show MSI failure context
+        if: ${{ failure() && steps.windows-msi-smoke.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          . ./scripts/msi-diagnostics.ps1
+          foreach ($name in @('connect-desktop-msi-foreign.log', 'connect-desktop-msi.log', 'connect-desktop-msi-uninstall.log')) {
+            Write-Host "::group::$name"
+            try { Show-MsiFailureContext -Path (Join-Path 'connect-desktop-msi-logs' $name) }
+            finally { Write-Host '::endgroup::' }
+          }
+      - name: Preserve MSI logs
+        if: ${{ always() && steps.windows-msi-smoke.outcome != 'skipped' }}
+        uses: ./.github/actions/s3-artifact-upload
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          name: connect-desktop-windows-msi-logs
+          path: connect-desktop-msi-logs/*.log
+          if-no-files-found: warn
 
   # The persistent install runner is Amazon Linux (no webkit2gtk-4.1, no
   # Docker daemon), so Linux compiles on the Ubuntu 22.04 CodeBuild project

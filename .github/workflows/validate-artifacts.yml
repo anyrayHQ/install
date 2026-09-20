@@ -33,19 +33,21 @@ jobs:
           test -n "$connect_path"
           grep -Fqx "ExecStart=$connect_path __anyray-managed-enroll" \
             ci/anyray-connect-managed-enroll.service
-      - name: Parse PowerShell installer
+      - name: Parse PowerShell installer and MSI diagnostics
         shell: pwsh
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            "$PWD/connect.ps1",
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -ne 0) {
-            $errors | ForEach-Object { Write-Error $_ }
-            exit 1
+          foreach ($path in @('connect.ps1', 'scripts/msi-diagnostics.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD $path),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -ne 0) {
+              $errors | ForEach-Object { Write-Error $_ }
+              exit 1
+            }
           }
       # Parsing proves the installers are well-formed, not that they survive a
       # dropped connection — the failure that actually reached a customer. This

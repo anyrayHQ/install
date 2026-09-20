@@ -1630,6 +1630,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $logDir = New-Item -ItemType Directory -Force -Path 'connect-desktop-msi-logs'
+          # A reused workspace must not upload evidence from an earlier attempt.
+          Get-ChildItem -LiteralPath $logDir.FullName -Filter 'connect-desktop-msi*.log' -File | Remove-Item -Force
           if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
           $PSNativeCommandUseErrorActionPreference = $true
           $inner = @(Get-ChildItem -LiteralPath 'inner' -Filter '*.exe')
@@ -1675,7 +1678,6 @@ jobs:
           $uninstallScript = Join-Path $installDir 'uninstall.ps1'
           $helperMarker = 'Managed by anyray-connect desktop helper; do not edit.'
           . ./scripts/msi-diagnostics.ps1
-          $logDir = New-Item -ItemType Directory -Path 'connect-desktop-msi-logs'
           $log = Join-Path $logDir.FullName 'connect-desktop-msi.log'
           $foreignLog = Join-Path $logDir.FullName 'connect-desktop-msi-foreign.log'
           $uninstallLog = Join-Path $logDir.FullName 'connect-desktop-msi-uninstall.log'
@@ -1726,13 +1728,13 @@ jobs:
             if ($foreignInstall.ExitCode -ne 1603) {
               throw "MSI foreign-engine refusal returned exit $($foreignInstall.ExitCode), expected 1603"
             }
-            Assert-MsiForeignEngineRefusal -Path $foreignLog
             if (-not (Test-Path -LiteralPath $installedEnginePath -PathType Leaf)) {
               throw 'MSI foreign-engine refusal removed the foreign engine'
             }
             if ((Get-FileHash -LiteralPath $installedEnginePath -Algorithm SHA256).Hash -ne $foreignHash) {
               throw 'MSI foreign-engine refusal changed the foreign engine'
             }
+            Assert-MsiForeignEngineRefusal -Path $foreignLog
             Remove-Item -LiteralPath $installedEnginePath
             Set-Content -LiteralPath $credentialShim -Value @(
               '@echo off'

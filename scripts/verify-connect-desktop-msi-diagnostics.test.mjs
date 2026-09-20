@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 const helper = fileURLToPath(new URL('./msi-diagnostics.ps1', import.meta.url));
-const hasPwsh = !spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0']).error;
+const pwshProbe = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0'], { encoding: 'utf8' });
+assert.equal(pwshProbe.status, 0, 'MSI diagnostic tests require working PowerShell (pwsh) on PATH; refusing to skip coverage.');
 const refusal = 'WixQuietExec64: A foreign, unsigned binary occupies C:\\Program Files\\Anyray\\anyray-connect.exe. Remove it, then re-run the install.';
 const failedAction = 'Action ended 19:06:10: SweepMachineState. Return value 3.';
 
@@ -22,7 +23,7 @@ function run(t, text, action = 'Assert-MsiForeignEngineRefusal', encoding = 'utf
 }
 
 for (const encoding of ['utf8', 'utf16le']) {
-  test(`accepts the specific refusal and failed action in ${encoding}`, { skip: !hasPwsh }, (t) => {
+  test(`accepts the specific refusal and failed action in ${encoding}`, (t) => {
     const result = run(t, `\uFEFF${refusal}\r\n${failedAction}\r\n`, undefined, encoding);
     assert.equal(result.status, 0, result.stderr);
   });
@@ -35,24 +36,24 @@ for (const [name, log] of [
   ['script text in property dump', `Property(S): Script = ${refusal.slice('WixQuietExec64: '.length)}\n${failedAction}`],
   ['missing log', null],
 ]) {
-  test(`rejects ${name}`, { skip: !hasPwsh }, (t) => {
+  test(`rejects ${name}`, (t) => {
     assert.notEqual(run(t, log).status, 0);
   });
 }
 
-test('accepts PowerShell CLIXML runtime error output', { skip: !hasPwsh }, (t) => {
+test('accepts PowerShell CLIXML runtime error output', (t) => {
   const log = `WixQuietExec64: <Objs><S S="Error">${refusal.slice('WixQuietExec64: '.length)}_x000D__x000A_</S></Objs>\n${failedAction}`;
   const result = run(t, log);
   assert.equal(result.status, 0, result.stderr);
 });
 
-test('accepts a deferred failure after successful action scheduling', { skip: !hasPwsh }, (t) => {
+test('accepts a deferred failure after successful action scheduling', (t) => {
   const log = `Action ended 19:06:09: SweepMachineState. Return value 1.\n${refusal}\nCustomAction SweepMachineState returned actual error code 1603 (note this may not be 100% accurate if translation happened inside sandbox)`;
   const result = run(t, log);
   assert.equal(result.status, 0, result.stderr);
 });
 
-test('shows the original failure before a long property dump, with bounded output', { skip: !hasPwsh }, (t) => {
+test('shows the original failure before a long property dump, with bounded output', (t) => {
   const log = ['Action start 19:06:10: SweepMachineState.', refusal, failedAction,
     ...Array.from({ length: 150 }, (_, i) => `Property(S): filler${i} = ${'x'.repeat(2000)}`),
     'MainEngineThread is returning 1603'].join('\n');
@@ -65,13 +66,13 @@ test('shows the original failure before a long property dump, with bounded outpu
   assert.equal(result.stdout.match(/3: Action ended/g)?.length, 1);
 });
 
-test('reports a missing log without obscuring the original smoke failure', { skip: !hasPwsh }, (t) => {
+test('reports a missing log without obscuring the original smoke failure', (t) => {
   const result = run(t, null, 'Show-MsiFailureContext');
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MSI log was not created/);
 });
 
-test('falls back to the tail when no failure marker exists', { skip: !hasPwsh }, (t) => {
+test('falls back to the tail when no failure marker exists', (t) => {
   const result = run(t, Array.from({ length: 100 }, (_, i) => `entry-${i}`).join('\n'), 'Show-MsiFailureContext');
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /61: entry-60/);
@@ -93,7 +94,7 @@ for (const [name, primaryFails, cleanupFails, expected] of [
   ['only smoke fails: original error survives', true, false, 'primary smoke failure'],
   ['both succeed: smoke succeeds', false, false, null],
 ]) {
-  test(`workflow cleanup: ${name}`, { skip: !hasPwsh }, () => {
+  test(`workflow cleanup: ${name}`, () => {
     assert.ok(cleanupStart > 0 && cleanupEnd > cleanupStart);
     const command = `
       $ErrorActionPreference = 'Stop'

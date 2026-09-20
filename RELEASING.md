@@ -682,13 +682,20 @@ the real uninstall:
   logout/login, enrollment, key renewal, and an EDR policy;
 - Windows first plants an unsigned foreign engine at
   `C:\Program Files\Anyray\anyray-connect.exe`, requires the MSI to refuse it
-  with exit 1603 without changing it, then plants a stale managed credential
+  with exit 1603, the foreign-binary diagnostic, and a failed `SweepMachineState`
+  action without changing it, then plants a stale managed credential
   shim and installs cleanly into that fixed directory. The smoke verifies the
   installed engine's Authenticode signature, both regenerated managed shims and
   their engine target, the machine `PATH` entry, `uninstall.ps1`, and the
   `ai.anyray.connect-tray` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; MSI uninstall must
-  remove both shims and the machine `PATH` entry;
+  remove both shims and the machine `PATH` entry. On failure, the job prints
+  context around MSI failure markers. Full refusal, install, and uninstall
+  logs (whichever were created) are uploaded even when the smoke fails as
+  `connect-desktop-windows-msi-logs`. The job summary links the S3 URI; download
+  them with `aws s3 cp <uri>/ ./msi-logs/ --recursive` before the bucket's
+  seven-day retention expires. A generic 1603 is not proof that the refusal
+  action ran;
 - Ubuntu runs as a fixed `tester` account it creates and removes each run. It
   installs synthetic legacy CLI (from `ci/nfpm.yaml`) and `fleet-osquery`
   (from its own YAML) deb/rpm packages, both built with the same pinned nfpm

@@ -223,10 +223,12 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(windows, /MSI foreign-engine refusal changed the foreign engine/);
 
     const refusalCheck = windows.indexOf('$foreignInstall.ExitCode -ne 1603');
+    const refusalReason = windows.indexOf('Assert-MsiForeignEngineRefusal -Path $foreignLog');
     const engineRemoved = windows.indexOf('Remove-Item -LiteralPath $installedEnginePath');
     const staleShim = windows.indexOf("'echo stale-helper-sentinel'");
     const cleanInstall = windows.indexOf('$installArgs = @(');
     assert.ok(refusalCheck > 0 && refusalCheck < engineRemoved);
+    assert.ok(refusalReason > refusalCheck && refusalReason < engineRemoved);
     assert.ok(engineRemoved > 0 && engineRemoved < staleShim);
     assert.ok(staleShim > 0 && staleShim < cleanInstall);
     assert.match(windows, /anyray-credential-helper\.cmd/);
@@ -254,6 +256,19 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(windows, /MSI uninstall left the uninstall script behind/);
     assert.match(windows, /MSI uninstall left the install directory in machine PATH/);
     assert.doesNotMatch(windows, /Invoke-Expression/);
+  });
+
+  test('preserves MSI evidence independently of the failing smoke step', () => {
+    const windows = job('verify-windows-signatures');
+    assert.match(windows, /id: windows-msi-smoke/);
+    assert.match(windows, /'\/x', .*'\/L\*v', .*\$uninstallLog/);
+    const reporting = windows.slice(windows.indexOf('      - name: Show MSI failure context'));
+    assert.match(reporting, /failure\(\) && steps.windows-msi-smoke.outcome == 'failure'/);
+    assert.match(reporting, /Show-MsiFailureContext/);
+    assert.match(reporting, /always\(\) && steps.windows-msi-smoke.outcome != 'skipped'/);
+    assert.match(reporting, /uses: \.\/\.github\/actions\/s3-artifact-upload/);
+    assert.match(reporting, /path: connect-desktop-msi-logs\/\*\.log/);
+    assert.match(reporting, /if-no-files-found: warn/);
   });
 
   test('signs Windows inner executables before MSI packaging and the MSI after', () => {

@@ -1626,6 +1626,7 @@ jobs:
           name: connect-desktop-windows-installer-signed
           path: installer
       - name: Verify refusal, install layout, execute, and uninstall without touching CLI state
+        id: windows-msi-smoke
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -1673,8 +1674,11 @@ jobs:
           $bootstrapShim = Join-Path $installDir 'anyray-bootstrap-headers-helper.cmd'
           $uninstallScript = Join-Path $installDir 'uninstall.ps1'
           $helperMarker = 'Managed by anyray-connect desktop helper; do not edit.'
-          $log = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi.log'
-          $foreignLog = Join-Path $env:RUNNER_TEMP 'connect-desktop-msi-foreign.log'
+          . ./scripts/msi-diagnostics.ps1
+          $logDir = New-Item -ItemType Directory -Path 'connect-desktop-msi-logs'
+          $log = Join-Path $logDir.FullName 'connect-desktop-msi.log'
+          $foreignLog = Join-Path $logDir.FullName 'connect-desktop-msi-foreign.log'
+          $uninstallLog = Join-Path $logDir.FullName 'connect-desktop-msi-uninstall.log'
           $installed = $false
           $createdInstallDir = $false
           $appProcess = $null
@@ -1719,9 +1723,9 @@ jobs:
               -ArgumentList $foreignInstallArgs
             if ($foreignInstall.ExitCode -in 0,3010) { $installed = $true }
             if ($foreignInstall.ExitCode -ne 1603) {
-              Get-Content -LiteralPath $foreignLog -Tail 80 -ErrorAction SilentlyContinue
               throw "MSI foreign-engine refusal returned exit $($foreignInstall.ExitCode), expected 1603"
             }
+            Assert-MsiForeignEngineRefusal -Path $foreignLog
             if (-not (Test-Path -LiteralPath $installedEnginePath -PathType Leaf)) {
               throw 'MSI foreign-engine refusal removed the foreign engine'
             }
@@ -1755,7 +1759,6 @@ jobs:
             $proc = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
               -ArgumentList $installArgs
             if ($proc.ExitCode -notin 0,3010) {
-              Get-Content -LiteralPath $log -Tail 80 -ErrorAction SilentlyContinue
               throw "MSI install failed with exit $($proc.ExitCode)"
             }
             $installed = $true
@@ -1879,7 +1882,7 @@ jobs:
             }
             if ($installed) {
               $uninstallArgs = @(
-                '/x', "`"$msi`"", '/qn', '/norestart'
+                '/x', "`"$msi`"", '/qn', '/norestart', '/L*v', "`"$uninstallLog`""
               )
               $remove = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
                 -ArgumentList $uninstallArgs
@@ -1916,6 +1919,25 @@ jobs:
           if ((Get-FileHash -LiteralPath $scheduler -Algorithm SHA256).Hash -ne $schedulerBefore) {
             throw 'MSI install/uninstall changed the existing scheduler sentinel'
           }
+
+      - name: Show MSI failure context
+        if: ${{ failure() && steps.windows-msi-smoke.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          . ./scripts/msi-diagnostics.ps1
+          foreach ($name in @('connect-desktop-msi-foreign.log', 'connect-desktop-msi.log', 'connect-desktop-msi-uninstall.log')) {
+            Write-Host "::group::$name"
+            try { Show-MsiFailureContext -Path (Join-Path 'connect-desktop-msi-logs' $name) }
+            finally { Write-Host '::endgroup::' }
+          }
+      - name: Preserve MSI logs
+        if: ${{ always() && steps.windows-msi-smoke.outcome != 'skipped' }}
+        uses: ./.github/actions/s3-artifact-upload
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          name: connect-desktop-windows-msi-logs
+          path: connect-desktop-msi-logs/*.log
+          if-no-files-found: warn
 
   # The persistent install runner is Amazon Linux (no webkit2gtk-4.1, no
   # Docker daemon), so Linux compiles on the Ubuntu 22.04 CodeBuild project

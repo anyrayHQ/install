@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,3 +78,55 @@ test('falls back to the tail when no failure marker exists', { skip: !hasPwsh },
   assert.match(result.stdout, /100: entry-99/);
   assert.doesNotMatch(result.stdout, /entry-59/);
 });
+
+// Execute the workflow's actual catch/finally with a mocked uninstall process.
+// This checks error precedence without requiring an installed MSI or registry.
+const workflow = readFileSync(new URL('../.github/workflows/release-connect-desktop.yml', import.meta.url), 'utf8');
+const smoke = workflow.slice(workflow.indexOf('        id: windows-msi-smoke'));
+const cleanupStart = smoke.indexOf('          catch {\n            $smokeFailure = $_');
+const cleanupEnd = smoke.indexOf('          if (Test-Path -LiteralPath $installedMainPath', cleanupStart);
+const cleanupHandling = smoke.slice(cleanupStart, cleanupEnd);
+
+for (const [name, primaryFails, cleanupFails, expected] of [
+  ['both fail: original error survives and cleanup is reported', true, true, 'primary smoke failure'],
+  ['only cleanup fails: the smoke still fails', false, true, 'MSI uninstall failed with exit 1603'],
+  ['only smoke fails: original error survives', true, false, 'primary smoke failure'],
+  ['both succeed: smoke succeeds', false, false, null],
+]) {
+  test(`workflow cleanup: ${name}`, { skip: !hasPwsh }, () => {
+    assert.ok(cleanupStart > 0 && cleanupEnd > cleanupStart);
+    const command = `
+      $ErrorActionPreference = 'Stop'
+      $smokeFailure = $null
+      $appProcess = $null
+      $createdRunKey = $false
+      $installed = $true
+      $runKey = 'unused'
+      $runName = 'unused'
+      $msi = 'fixture.msi'
+      $uninstallLog = 'fixture.log'
+      function Remove-ItemProperty { }
+      function Start-Process {
+        Write-Host 'UNINSTALL_ATTEMPTED'
+        return [pscustomobject]@{ ExitCode = ${cleanupFails ? 1603 : 0} }
+      }
+      try {
+        try { ${primaryFails ? "throw 'primary smoke failure'" : "Write-Host 'SMOKE_OK'"} }
+        ${cleanupHandling}
+      }
+      catch {
+        Write-Host "FINAL_ERROR: $($_.Exception.Message)"
+        exit 1
+      }
+    `;
+    const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' });
+    assert.match(result.stdout, /UNINSTALL_ATTEMPTED/);
+    assert.equal(result.status, expected === null ? 0 : 1, result.stderr);
+    if (expected !== null) assert.ok(result.stdout.includes(`FINAL_ERROR: ${expected}`), result.stdout);
+    if (primaryFails && cleanupFails) {
+      assert.match(result.stdout, /Windows MSI cleanup also failed: MSI uninstall failed with exit 1603/);
+    } else {
+      assert.doesNotMatch(result.stdout, /Windows MSI cleanup also failed/);
+    }
+  });
+}

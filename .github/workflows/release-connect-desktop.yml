@@ -1680,6 +1680,7 @@ jobs:
           $foreignLog = Join-Path $logDir.FullName 'connect-desktop-msi-foreign.log'
           $uninstallLog = Join-Path $logDir.FullName 'connect-desktop-msi-uninstall.log'
           $installed = $false
+          $smokeFailure = $null
           $createdInstallDir = $false
           $appProcess = $null
           $createdRunKey = $false
@@ -1866,34 +1867,45 @@ jobs:
               throw 'running the installed tray changed the existing scheduler sentinel'
             }
           }
+          catch {
+            $smokeFailure = $_
+            throw
+          }
           finally {
-            if ($null -ne $appProcess -and -not $appProcess.HasExited) {
-              Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
-              Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
-            }
-            # The tray owns this exact test-created Run value; MSI uninstall
-            # is not expected to remove per-user autostart state.
-            Remove-ItemProperty -LiteralPath $runKey -Name $runName -ErrorAction SilentlyContinue
-            if ($createdRunKey) {
-              $remaining = Get-Item -LiteralPath $runKey -ErrorAction SilentlyContinue
-              if ($null -ne $remaining -and $remaining.ValueCount -eq 0 -and $remaining.SubKeyCount -eq 0) {
-                Remove-Item -LiteralPath $runKey
+            try {
+              if ($null -ne $appProcess -and -not $appProcess.HasExited) {
+                Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+                Wait-Process -Id $appProcess.Id -ErrorAction SilentlyContinue
+              }
+              # The tray owns this exact test-created Run value; MSI uninstall
+              # is not expected to remove per-user autostart state.
+              Remove-ItemProperty -LiteralPath $runKey -Name $runName -ErrorAction SilentlyContinue
+              if ($createdRunKey) {
+                $remaining = Get-Item -LiteralPath $runKey -ErrorAction SilentlyContinue
+                if ($null -ne $remaining -and $remaining.ValueCount -eq 0 -and $remaining.SubKeyCount -eq 0) {
+                  Remove-Item -LiteralPath $runKey
+                }
+              }
+              if ($installed) {
+                $uninstallArgs = @(
+                  '/x', "`"$msi`"", '/qn', '/norestart', '/L*v', "`"$uninstallLog`""
+                )
+                $remove = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
+                  -ArgumentList $uninstallArgs
+                if ($remove.ExitCode -notin 0,3010) {
+                  throw "MSI uninstall failed with exit $($remove.ExitCode)"
+                }
+              }
+              elseif ($createdInstallDir -and (Test-Path -LiteralPath $installDir)) {
+                # Only a directory this smoke created is removed: a failure before the clean
+                # install leaves planted fixtures behind, and a reused runner requires it absent.
+                Remove-Item -LiteralPath $installDir -Recurse -Force
               }
             }
-            if ($installed) {
-              $uninstallArgs = @(
-                '/x', "`"$msi`"", '/qn', '/norestart', '/L*v', "`"$uninstallLog`""
-              )
-              $remove = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
-                -ArgumentList $uninstallArgs
-              if ($remove.ExitCode -notin 0,3010) {
-                throw "MSI uninstall failed with exit $($remove.ExitCode)"
-              }
-            }
-            elseif ($createdInstallDir -and (Test-Path -LiteralPath $installDir)) {
-              # Only a directory this smoke created is removed: a failure before the clean
-              # install leaves planted fixtures behind, and a reused runner requires it absent.
-              Remove-Item -LiteralPath $installDir -Recurse -Force
+            catch {
+              if ($null -eq $smokeFailure) { throw }
+              # Preserve the pending smoke exception; cleanup remains visible separately.
+              Write-Warning "Windows MSI cleanup also failed: $($_.Exception.Message)"
             }
           }
           if (Test-Path -LiteralPath $installedMainPath -PathType Leaf) {

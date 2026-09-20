@@ -716,6 +716,17 @@ test('ships a signed, notarized uninstaller pkg inside the desktop PKG payload',
   // The engine opens it only when root owns it and nobody else can write it.
   assert.match(verify, /stat -f '%u %g %Lp' "\$uninstaller"\)" = '0 0 644'/);
   assert.match(verify, /stat -f '%u %Lp' \/usr\/local\/lib\/anyray-connect\)" = '0 755'/);
+  // Payload-free, so Installer writes no receipt; dropping --nopayload would start leaving one.
+  const pkgUninstall = verify.indexOf('sudo installer -pkg "$uninstaller" -target /');
+  const receiptCheck = verify.indexOf(
+    'if pkgutil --pkg-info ai.anyray.connect-tray.uninstaller >/dev/null 2>&1; then',
+    pkgUninstall
+  );
+  assert.ok(pkgUninstall > 0 && receiptCheck > pkgUninstall);
+  assert.ok(
+    receiptCheck < verify.indexOf('build_fleet_pkg', pkgUninstall),
+    'the receipt check belongs to the case that ran the uninstaller pkg'
+  );
 });
 
 test('desktop staging assets contain one PKG, one updater tarball, and no DMG', () => {

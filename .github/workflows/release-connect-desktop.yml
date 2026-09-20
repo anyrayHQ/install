@@ -973,6 +973,8 @@ jobs:
             sudo pkgutil --forget ai.anyray.connect >/dev/null 2>&1 || true
             sudo pkgutil --forget "$fleet_receipt" >/dev/null 2>&1 || true
             sudo pkgutil --forget ai.anyray.connect-tray >/dev/null 2>&1 || true
+            # The Mac host is reused: a receipt from a failed run must not fail the next one.
+            sudo pkgutil --forget ai.anyray.connect-tray.uninstaller >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
@@ -1259,6 +1261,11 @@ jobs:
           sudo test ! -e /usr/local/lib/anyray-connect
           if pkgutil --pkg-info ai.anyray.connect-tray >/dev/null 2>&1; then
             echo '::error::uninstall left the PKG receipt behind'
+            exit 1
+          fi
+          # Payload-free, so Installer writes no receipt; this fails if --nopayload is ever dropped.
+          if pkgutil --pkg-info ai.anyray.connect-tray.uninstaller >/dev/null 2>&1; then
+            echo '::error::the uninstaller pkg left its own receipt behind'
             exit 1
           fi
 

@@ -1176,7 +1176,6 @@ jobs:
             sudo grep -Fq "$launcher" "$helper"
           done
           sudo test -x "$uninstall"
-          # The engine opens the uninstaller only when root owns it and nobody else can write it.
           sudo test -f "$uninstaller"
           test "$(sudo stat -f '%u %g %Lp' "$uninstaller")" = '0 0 644'
           test "$(sudo stat -f '%u %Lp' /usr/local/lib/anyray-connect)" = '0 755'
@@ -1250,8 +1249,7 @@ jobs:
           test "$(sudo readlink "$launcher")" \
             = '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'
 
-          # The self-serve and package-only-MDM route, from the installed path: the
-          # pkg's script deletes the directory the pkg itself sits in.
+          # The self-serve route: the pkg's own script deletes the directory it sits in.
           sudo installer -pkg "$uninstaller" -target /
           sudo test ! -e "$installed_app"
           sudo test ! -e "$launcher"

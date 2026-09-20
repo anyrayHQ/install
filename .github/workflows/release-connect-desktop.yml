@@ -392,12 +392,21 @@ jobs:
           cp private-source/connect-tray/src-tauri/macos/preinstall out/pkg-scripts/preinstall
           cp private-source/connect-tray/src-tauri/macos/postinstall out/pkg-scripts/postinstall
           cp private-source/connect-tray/src-tauri/macos/uninstall.sh out/pkg-scripts/uninstall.sh
+          # The artifact flattens to basenames, so the uninstaller's files carry a prefix.
+          test -f private-source/connect-tray/src-tauri/macos/uninstaller/postinstall
+          test -f private-source/connect-tray/src-tauri/macos/uninstaller/distribution.xml
+          test -f private-source/connect-tray/src-tauri/macos/uninstaller/welcome.html
+          test -f private-source/connect-tray/src-tauri/macos/uninstaller/conclusion.html
+          cp private-source/connect-tray/src-tauri/macos/uninstaller/postinstall out/pkg-scripts/uninstaller-postinstall
+          cp private-source/connect-tray/src-tauri/macos/uninstaller/distribution.xml out/pkg-scripts/uninstaller-distribution.xml
+          cp private-source/connect-tray/src-tauri/macos/uninstaller/welcome.html out/pkg-scripts/uninstaller-welcome.html
+          cp private-source/connect-tray/src-tauri/macos/uninstaller/conclusion.html out/pkg-scripts/uninstaller-conclusion.html
 
       - uses: ./.github/actions/s3-artifact-upload
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-unsigned
-          path: out/connect-desktop-unsigned.zip out/pkg-scripts/preinstall out/pkg-scripts/postinstall out/pkg-scripts/uninstall.sh
+          path: out/connect-desktop-unsigned.zip out/pkg-scripts/preinstall out/pkg-scripts/postinstall out/pkg-scripts/uninstall.sh out/pkg-scripts/uninstaller-postinstall out/pkg-scripts/uninstaller-distribution.xml out/pkg-scripts/uninstaller-welcome.html out/pkg-scripts/uninstaller-conclusion.html
           if-no-files-found: error
 
   sign-macos:
@@ -540,6 +549,101 @@ jobs:
           tarball="out/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
           tar -czf "$tarball" -C "$(dirname "$app")" "$(basename "$app")"
 
+      - name: Import the Developer ID Installer identity
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/connect-desktop-signing.keychain-db"
+          keychain_password_file="$RUNNER_TEMP/connect-desktop-keychain-password"
+          test -f "$keychain_password_file"
+          keychain_password="$(cat "$keychain_password_file")"
+          printf '%s' "$APPLE_INSTALLER_CERT_P12" \
+            | base64 -d > "$RUNNER_TEMP/connect-desktop-installer-cert.p12"
+          security import "$RUNNER_TEMP/connect-desktop-installer-cert.p12" \
+            -k "$keychain" -f pkcs12 \
+            -P "$APPLE_INSTALLER_CERT_PASSWORD" -A -T /usr/bin/productsign
+          rm -f "$RUNNER_TEMP/connect-desktop-installer-cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          system_root_keychain='/System/Library/Keychains/SystemRootCertificates.keychain'
+          test -r "$system_root_keychain"
+          security list-keychains -s "$keychain" "$system_root_keychain"
+          echo '--- installer identities in the throwaway keychain ---'
+          security find-identity -v "$keychain" || true
+          installer_identity="$(security find-identity -v "$keychain" \
+            | awk '/Developer ID Installer/ {print $2; exit}')"
+          if [ -z "$installer_identity" ]; then
+            echo '::error::APPLE_INSTALLER_CERT_P12 imported no Developer ID Installer identity'
+            exit 1
+          fi
+          # A certificate hash, not a secret; both pkg steps sign with it.
+          echo "INSTALLER_IDENTITY=$installer_identity" >> "$GITHUB_ENV"
+
+      # Built, notarized and stapled first because it ships inside the desktop PKG's payload.
+      - name: Build, sign and notarize the uninstaller pkg
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/connect-desktop-uninstaller"
+          scripts="$work/scripts"
+          resources="$work/resources"
+          packages="$work/packages"
+          distribution_xml="$work/distribution.xml"
+          uninstaller="$work/Uninstall Anyray Connect.pkg"
+          mkdir -p "$scripts" "$resources" "$packages"
+
+          test -f unsigned/uninstaller-postinstall
+          test -f unsigned/uninstaller-distribution.xml
+          test -f unsigned/uninstaller-welcome.html
+          test -f unsigned/uninstaller-conclusion.html
+          test -f unsigned/uninstall.sh
+          for pkg_script in unsigned/uninstaller-postinstall unsigned/uninstall.sh; do
+            /bin/sh -n "$pkg_script"
+            head -1 "$pkg_script" | grep -qx '#!/bin/sh'
+          done
+          # The postinstall runs the uninstall.sh that sits beside it in Installer's sandbox.
+          grep -Fq '"$dir/uninstall.sh"' unsigned/uninstaller-postinstall
+          install -m 0755 unsigned/uninstaller-postinstall "$scripts/postinstall"
+          install -m 0755 unsigned/uninstall.sh "$scripts/uninstall.sh"
+          install -m 0644 unsigned/uninstaller-welcome.html "$resources/welcome.html"
+          install -m 0644 unsigned/uninstaller-conclusion.html "$resources/conclusion.html"
+
+          grep -Fq 'version="__VERSION__"' unsigned/uninstaller-distribution.xml
+          sed "s/__VERSION__/$VERSION/" unsigned/uninstaller-distribution.xml > "$distribution_xml"
+          xmllint --noout "$distribution_xml"
+          test "$(xmllint --xpath 'string(/installer-gui-script/title)' "$distribution_xml")" \
+            = 'Uninstall Anyray Connect'
+          # Installer asks for an administrator only because the component demands root.
+          test "$(xmllint --xpath 'string(/installer-gui-script/pkg-ref[@auth]/@auth)' "$distribution_xml")" = root
+          test "$(xmllint --xpath 'string(/installer-gui-script/pkg-ref[@auth]/@version)' "$distribution_xml")" \
+            = "$VERSION"
+          test "$(xmllint --xpath 'string(/installer-gui-script/pkg-ref[@auth])' "$distribution_xml")" \
+            = 'component.pkg'
+
+          pkgbuild \
+            --nopayload \
+            --scripts "$scripts" \
+            --identifier ai.anyray.connect-tray.uninstaller \
+            --version "$VERSION" \
+            "$packages/component.pkg"
+          # MDM InstallApplication only installs distribution packages.
+          productbuild \
+            --distribution "$distribution_xml" \
+            --resources "$resources" \
+            --package-path "$packages" \
+            "$work/unsigned.pkg"
+          productsign --sign "$INSTALLER_IDENTITY" "$work/unsigned.pkg" "$uninstaller"
+          pkgutil --check-signature "$uninstaller"
+          xar -tf "$uninstaller" | grep -qx 'Distribution'
+
+          status="$(xcrun notarytool submit "$uninstaller" \
+            --key "$RUNNER_TEMP/connect-desktop-notary-key.p8" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
+          [ "$status" = Accepted ] || { echo "::error::uninstaller PKG notarization failed: $status"; exit 1; }
+          xcrun stapler staple "$uninstaller"
+          xcrun stapler validate "$uninstaller"
+          spctl -a -vvv -t install "$uninstaller"
+
       - name: Build and sign the macOS installer (Developer ID Installer)
         run: |
           set -euo pipefail
@@ -569,6 +673,9 @@ jobs:
           done
           install -m 0755 unsigned/uninstall.sh \
             "$root/usr/local/lib/anyray-connect/uninstall.sh"
+          # The engine opens it only when root owns it and nobody else can write it.
+          install -m 0644 "$RUNNER_TEMP/connect-desktop-uninstaller/Uninstall Anyray Connect.pkg" \
+            "$root/usr/local/lib/anyray-connect/Uninstall Anyray Connect.pkg"
           install -m 0755 unsigned/preinstall "$scripts/preinstall"
           install -m 0755 unsigned/postinstall "$scripts/postinstall"
 
@@ -627,32 +734,8 @@ jobs:
             --package-path "$RUNNER_TEMP" \
             "$unsigned_pkg"
 
-          keychain="$RUNNER_TEMP/connect-desktop-signing.keychain-db"
-          keychain_password_file="$RUNNER_TEMP/connect-desktop-keychain-password"
-          test -f "$keychain_password_file"
-          keychain_password="$(cat "$keychain_password_file")"
-          printf '%s' "$APPLE_INSTALLER_CERT_P12" \
-            | base64 -d > "$RUNNER_TEMP/connect-desktop-installer-cert.p12"
-          security import "$RUNNER_TEMP/connect-desktop-installer-cert.p12" \
-            -k "$keychain" -f pkcs12 \
-            -P "$APPLE_INSTALLER_CERT_PASSWORD" -A -T /usr/bin/productsign
-          rm -f "$RUNNER_TEMP/connect-desktop-installer-cert.p12"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$keychain_password" "$keychain" >/dev/null
-          system_root_keychain='/System/Library/Keychains/SystemRootCertificates.keychain'
-          test -r "$system_root_keychain"
-          security list-keychains -s "$keychain" "$system_root_keychain"
-          echo '--- installer identities in the throwaway keychain ---'
-          security find-identity -v "$keychain" || true
-          installer_identity="$(security find-identity -v "$keychain" \
-            | awk '/Developer ID Installer/ {print $2; exit}')"
-          if [ -z "$installer_identity" ]; then
-            echo '::error::APPLE_INSTALLER_CERT_P12 imported no Developer ID Installer identity'
-            exit 1
-          fi
-
           pkg="out/anyray-connect-desktop-${VERSION}-macos-universal.pkg"
-          productsign --sign "$installer_identity" "$unsigned_pkg" "$pkg"
+          productsign --sign "$INSTALLER_IDENTITY" "$unsigned_pkg" "$pkg"
           pkgutil --check-signature "$pkg"
           xar -tf "$pkg" | grep -qx 'Distribution'
           payload_files="$(pkgutil --payload-files "$pkg")"
@@ -663,6 +746,8 @@ jobs:
             | grep -Eq '^\.?/?Applications/Anyray Connect\.app/Contents/MacOS/anyray-connect$'
           printf '%s\n' "$payload_files" \
             | grep -Eq '^\.?/?usr/local/lib/anyray-connect/uninstall\.sh$'
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/lib/anyray-connect/Uninstall Anyray Connect\.pkg$'
 
       - name: Notarize and staple the macOS installer
         run: |
@@ -694,7 +779,8 @@ jobs:
             "$RUNNER_TEMP/connect-desktop-component.pkg" \
             "$RUNNER_TEMP/connect-desktop-distribution.xml" \
             "$RUNNER_TEMP/connect-desktop-distribution-resources" \
-            "$RUNNER_TEMP/connect-desktop-unsigned.pkg"
+            "$RUNNER_TEMP/connect-desktop-unsigned.pkg" \
+            "$RUNNER_TEMP/connect-desktop-uninstaller"
           if [ -f "$RUNNER_TEMP/connect-desktop-signing.keychain-db" ]; then
             security delete-keychain "$RUNNER_TEMP/connect-desktop-signing.keychain-db"
           fi
@@ -788,11 +874,32 @@ jobs:
           # pkg-info/@relocatable is always "false"; a relocatable pkg instead lists a bundle under <relocate>.
           test "$(xmllint --xpath 'count(/pkg-info/relocate/bundle)' "$package_info")" = 0
 
+          printf '%s\n' "$payload_files" \
+            | grep -Eq '^\.?/?usr/local/lib/anyray-connect/Uninstall Anyray Connect\.pkg$'
+          payload_uninstaller="$(find "$expanded_pkg" -type f -name 'Uninstall Anyray Connect.pkg' -print -quit)"
+          [ -n "$payload_uninstaller" ] || { echo '::error::PKG payload contains no uninstaller pkg'; exit 1; }
+          pkgutil --check-signature "$payload_uninstaller"
+          xcrun stapler validate "$payload_uninstaller"
+          spctl -a -vvv -t install "$payload_uninstaller"
+          expanded_uninstaller="$RUNNER_TEMP/connect-desktop-expanded-uninstaller"
+          pkgutil --expand-full "$payload_uninstaller" "$expanded_uninstaller"
+          test "$(xmllint --xpath 'string(/installer-gui-script/title)' "$expanded_uninstaller/Distribution")" \
+            = 'Uninstall Anyray Connect'
+          test "$(xmllint --xpath 'string(/installer-gui-script/pkg-ref[@auth]/@auth)' "$expanded_uninstaller/Distribution")" = root
+          uninstaller_scripts="$(find "$expanded_uninstaller" -type d -name Scripts -print -quit)"
+          [ -n "$uninstaller_scripts" ] || { echo '::error::uninstaller pkg carries no scripts'; exit 1; }
+          test -x "$uninstaller_scripts/postinstall"
+          # One uninstall script: the uninstaller runs the same bytes the payload installs.
+          payload_uninstall_sh="$(find "$expanded_pkg" -type f -path '*/usr/local/lib/anyray-connect/uninstall.sh' -print -quit)"
+          [ -n "$payload_uninstall_sh" ] || { echo '::error::PKG payload contains no uninstall.sh'; exit 1; }
+          cmp "$uninstaller_scripts/uninstall.sh" "$payload_uninstall_sh"
+
           installed_app='/Applications/Anyray Connect.app'
           launcher='/usr/local/bin/anyray-connect'
           credential_helper='/usr/local/bin/anyray-credential-helper'
           bootstrap_helper='/usr/local/bin/anyray-bootstrap-headers-helper'
           uninstall='/usr/local/lib/anyray-connect/uninstall.sh'
+          uninstaller='/usr/local/lib/anyray-connect/Uninstall Anyray Connect.pkg'
           retired_plist='/Library/LaunchAgents/ai.anyray.connect.managed-enroll.plist'
           retired_root="$RUNNER_TEMP/connect-desktop-retired-root"
           retired_pkg="$RUNNER_TEMP/connect-desktop-retired.pkg"
@@ -1067,6 +1174,10 @@ jobs:
             sudo grep -Fq "$launcher" "$helper"
           done
           sudo test -x "$uninstall"
+          # The engine opens the uninstaller only when root owns it and nobody else can write it.
+          sudo test -f "$uninstaller"
+          test "$(sudo stat -f '%u %g %Lp' "$uninstaller")" = '0 0 644'
+          test "$(sudo stat -f '%u %Lp' /usr/local/lib/anyray-connect)" = '0 755'
 
           app="$installed_app"
           engine="$app/Contents/MacOS/anyray-connect"
@@ -1137,7 +1248,9 @@ jobs:
           test "$(sudo readlink "$launcher")" \
             = '/Applications/Anyray Connect.app/Contents/MacOS/anyray-connect'
 
-          sudo "$uninstall"
+          # The self-serve and package-only-MDM route, from the installed path: the
+          # pkg's script deletes the directory the pkg itself sits in.
+          sudo installer -pkg "$uninstaller" -target /
           sudo test ! -e "$installed_app"
           sudo test ! -e "$launcher"
           sudo test ! -L "$launcher"

@@ -626,7 +626,17 @@ source or GitHub App credential:
   engine (hardened runtime + minimal `allow-jit` entitlement), signs the
   outer app, requires Apple Team ID `V53XMA78UF` and bundle identifier
   `ai.anyray.connect-tray`, notarizes and staples it, packs the stapled app as
-  a space-free `.app.tar.gz` for the updater, then builds a non-relocatable
+  a space-free `.app.tar.gz` for the updater. It then builds the uninstaller:
+  a payload-free distribution pkg from the monorepo's `macos/uninstaller/`
+  sources whose postinstall runs the same `uninstall.sh`, signed, notarized and
+  stapled on its own (one extra notarization round trip per release) because it
+  ships inside the installer's payload at
+  `/usr/local/lib/anyray-connect/Uninstall Anyray Connect.pkg` (root-owned,
+  0644: the engine opens it only when nobody but root can write it). It is the
+  self-serve removal route (Apple's Installer asks for the password; the app
+  never elevates) and the route for an MDM that can only deploy packages. It
+  never lands in `out/`, so the published set keeps exactly one `.pkg`. The job
+  then builds a non-relocatable
   installer `.pkg` from the downloaded scripts (preinstall refuses foreign
   launchers/shims before Installer writes the payload, postinstall creates the
   `/usr/local/bin` symlink and shims and installs `uninstall.sh`), signs it
@@ -640,7 +650,11 @@ source or GitHub App credential:
   receipt, daemon, plist, secret, and `/usr/local/bin/orbit` symlink are all
   gone while the audit logs and `/usr/local/bin` itself (birth time unchanged)
   are retained. It then plants fleetd ownership via a plist reference alone,
-  with no secret file, and asserts that case is swept the same way. Finally it
+  with no secret file, and asserts that case is swept the same way; that case
+  leaves through the installed uninstaller pkg (`installer -pkg` on its
+  installed path, whose script deletes the directory it sits in) instead of
+  the script, after the payload copy's signature, staple, Gatekeeper verdict,
+  root authorization and byte-identical `uninstall.sh` are checked. Finally it
   leaves a separately installed and loaded foreign Fleet agent, receipt, and
   `/usr/local/bin/orbit` symlink untouched; it then exercises the real desktop
   install, GUI migration smoke, symlink/helpers, and uninstall. Teardown

@@ -21,6 +21,18 @@ happened to restart (an eviction, a node drain, a scale event), at unpredictable
 times, and two replicas could sit on different builds indefinitely. A daily roll
 moves every pod together and re-converges the deployment.
 
+ONE BUILD PER RELEASE. Before the roll, the Job pins every app Deployment to the
+digest the tag resolves to right now (files/autoupdate-pin.mjs). Without that, a
+pod that starts later (a reschedule, a drain, an autoscale) pulls whatever the
+channel points at by then, and replicas split across builds until the next roll:
+proxies on two builds blanked the console (a page from one, its hashed assets
+404 on the other), optimizers on two builds flip a warm session's prompt bytes
+and rewrite its prompt cache on every hop. Init containers run each app image at
+the moving tag with pullPolicy Always, so the kubelet resolves the digests with
+the cluster's own pull secrets and mirrors; the pin step reads them back from its
+own pod status. It resolves all of them before patching any, so a failed pull
+leaves the release as it was and skips the roll.
+
 SAFETY. The gateway and proxy roll with maxUnavailable: 0, so a build that will
 not start leaves the running pods serving and stalls the rollout instead of taking
 the deployment down. The roll is scoped to Deployments, so the Postgres StatefulSet
@@ -28,8 +40,9 @@ is never restarted, and to this release's instance label, so it cannot touch
 another release in the same namespace.
 
 The RBAC is the narrowest thing that can do the job: get/list to resolve the label
-selector, patch to stamp the restart annotation. Namespaced Role, never a
-ClusterRole.
+selector, patch to pin the image and stamp the restart annotation, and get on
+pods so the pin step can read its own pod's resolved digests. Namespaced Role,
+never a ClusterRole.
 */ -}}
 {{- /* A pinned tag has nothing newer to pull, so the roll would restart every pod
 onto the identical build: churn that reads as an outage risk and buys nothing. Skip
@@ -42,6 +55,20 @@ render error for all of them, and a red sync for every ArgoCD and Flux user. A
 deploy pipeline broken by a chart bump is a worse outcome than an operator who has
 deliberately pinned not getting a nightly roll they never asked for. */ -}}
 {{- if and .Values.autoUpdate.enabled (include "anyray.isMovingTag" (include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .))) }}
+{{- /* What the pin step patches, and which init container resolves each digest.
+endpoint-control joins only when its Deployment is rendered. */}}
+{{- $fullname := include "anyray.fullname" . }}
+{{- $resolvers := list
+  (dict "name" "resolve-optimizer" "component" "optimizer" "command" (list "/nodejs/bin/node" "-e" ""))
+  (dict "name" "resolve-proxy" "component" "proxy" "command" (list "nginx" "-v")) }}
+{{- $pins := list
+  (dict "deployment" (printf "%s-gateway" $fullname) "container" "gateway" "resolvedBy" "pin" "image" (include "anyray.image" (dict "component" "gateway" "context" .)))
+  (dict "deployment" (printf "%s-optimizer" $fullname) "container" "optimizer" "resolvedBy" "resolve-optimizer" "image" (include "anyray.image" (dict "component" "optimizer" "context" .)))
+  (dict "deployment" (printf "%s-proxy" $fullname) "container" "proxy" "resolvedBy" "resolve-proxy" "image" (include "anyray.image" (dict "component" "proxy" "context" .))) }}
+{{- if (index .Values "endpoint-control").enabled }}
+{{- $resolvers = append $resolvers (dict "name" "resolve-endpoint-control" "component" "endpoint-control" "command" (list "node" "-e" "")) }}
+{{- $pins = append $pins (dict "deployment" (printf "%s-endpoint-control" $fullname) "container" "endpoint-control" "resolvedBy" "resolve-endpoint-control" "image" (include "anyray.image" (dict "component" "endpoint-control" "context" .))) }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -61,6 +88,20 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "anyray.fullname" . }}-autoupdate-pin
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: updater
+data:
+  autoupdate-pin.mjs: |
+    {{- .Files.Get "files/autoupdate-pin.mjs" | nindent 4 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -102,9 +143,11 @@ spec:
         app.kubernetes.io/component: updater
     spec:
       backoffLimit: 2
-      {{- /* Bound the Job itself: `rollout restart` returns as soon as the patch
-      lands, so this only ever trips if the API server is unreachable. */}}
-      activeDeadlineSeconds: 300
+      {{- /* Bound the Job itself. The patches and `rollout restart` return as
+      soon as they land; the time goes on the resolver pulls, which on a node
+      that has never cached the app images download each one in full. Past
+      this, the roll is skipped for the night, never half-applied. */}}
+      activeDeadlineSeconds: 900
       ttlSecondsAfterFinished: 86400
       template:
         metadata:
@@ -129,6 +172,54 @@ spec:
           imagePullSecrets:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          volumes:
+            - name: pin-script
+              configMap:
+                name: {{ include "anyray.fullname" $ }}-autoupdate-pin
+          {{- /* One no-op init container per app image, pulled fresh: its
+          status.imageID is the digest the tag resolves to tonight. The gateway's
+          digest comes from the `pin` container itself, which runs that image.
+          Each command exits at once without the image's entrypoint. */}}
+          initContainers:
+            {{- range $resolver := $resolvers }}
+            - name: {{ $resolver.name }}
+              image: {{ include "anyray.image" (dict "component" $resolver.component "context" $) }}
+              imagePullPolicy: Always
+              command: {{ toJson $resolver.command }}
+              {{- with $.Values.containerSecurityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- toYaml $.Values.autoUpdate.resources | nindent 16 }}
+            {{- end }}
+            - name: pin
+              image: {{ include "anyray.image" (dict "component" "gateway" "context" .) }}
+              imagePullPolicy: Always
+              command: ["node", "/pin/autoupdate-pin.mjs"]
+              env:
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: NODE_EXTRA_CA_CERTS
+                  value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                - name: AUTOUPDATE_PINS
+                  value: {{ toJson $pins | quote }}
+              volumeMounts:
+                - name: pin-script
+                  mountPath: /pin
+                  readOnly: true
+              {{- with .Values.containerSecurityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- toYaml .Values.autoUpdate.resources | nindent 16 }}
           containers:
             - name: kubectl
               image: {{ include "anyray.updaterImage" . }}

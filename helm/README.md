@@ -168,9 +168,21 @@ kubectl rollout status deployment -n "$ANYRAY_NAMESPACE" \
 Added in chart 0.6.0, and armed by a single value. `autoUpdate.enabled` is `true`
 out of the box but renders **nothing** while `image.tag` is pinned, because a
 nightly restart onto an identical build is pure churn: setting
-`image.tag: policy-stable` is what turns the feature on. A CronJob then runs
-`kubectl rollout restart` against this release's Deployments, so the moving tag
-resolves to a new digest.
+`image.tag: policy-stable` is what turns the feature on. A CronJob then pins
+each Deployment to the digest the tag resolves to that night and runs
+`kubectl rollout restart` against this release's Deployments.
+
+The pin is what keeps every replica on one build between rolls. Without it, a pod
+that starts later (a reschedule, a node drain, an autoscale) pulls whatever
+`policy-stable` points at by then, and replicas split across builds: proxies on
+two builds blank the console, optimizers on two builds rewrite a session's prompt
+cache on every hop between them. The Job's init containers pull each app image at
+the moving tag, so the kubelet resolves the digests with your own pull secrets and
+mirror. Every digest resolves before anything is patched, so a failed pull skips
+the night's roll rather than half-applying it. The Deployments then show images as
+`public.ecr.aws/anyray/<app>:policy-stable@sha256:…`. A `helm upgrade` renders the
+plain tag again, which rolls onto the newest build, and the next scheduled run
+pins it.
 
 That pairing is deliberate rather than a quirk. It means upgrading the chart
 never changes what a running deployment does: an install that never set a tag
@@ -184,12 +196,28 @@ release's instance label, so a second release in the same namespace is untouched
 | `autoUpdate.schedule` | `"30 3 * * *"` | Standard cron. Daily, outside working hours. |
 | `autoUpdate.timeZone` | `""` | IANA name (`Europe/Berlin`). Empty uses the cluster's zone. Needs Kubernetes 1.27+. |
 | `autoUpdate.image.repository` / `.tag` | `registry.k8s.io/kubectl` / `v1.33.0` | Any kubectl within one minor of your cluster. Mirrored by `global.imageRegistry` like every other image. The upstream image has no `latest` tag, so this is always explicit. |
-| `autoUpdate.resources` | 10m/32Mi → 100m/128Mi | The job runs one API call. |
+| `autoUpdate.resources` | 10m/32Mi → 100m/128Mi | Per container: the image resolvers, the pin step, and kubectl. Each makes a few API calls at most. |
 | `autoUpdate.nodeSelector` / `.tolerations` | `{}` / `[]` | Falls back to the global scheduling values. |
 
 It needs a `Role` (never a `ClusterRole`) granting `get`, `list` and `patch` on
-`apps/deployments` in this namespace: `get`/`list` resolve the label selector,
-`patch` stamps the restart annotation. Nothing else.
+`apps/deployments` in this namespace, and `get` on `pods`: `get`/`list` resolve
+the label selector, `patch` pins the image and stamps the restart annotation, and
+the pod read is the Job reading its own resolved digests. Nothing else.
+
+On ArgoCD or Flux the pinned image reads as drift from the rendered
+`:policy-stable`. On that channel the rendered image never changes, so ignore the
+field rather than let a sync undo the pin:
+
+```yaml
+ignoreDifferences:
+  - group: apps
+    kind: Deployment
+    jqPathExpressions:
+      - .spec.template.spec.containers[].image
+syncPolicy:
+  syncOptions:
+    - RespectIgnoreDifferences=true
+```
 
 **A build that will not start stalls the roll, it does not drop the deployment.**
 The gateway, optimizer and proxy roll with `maxUnavailable: 0`, so a replacement

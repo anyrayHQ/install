@@ -25,10 +25,12 @@ on:
     branches: [main]
     paths:
       - 'helm/**'
+      - 'tests/autoupdate-pin.test.mjs'
       - '.github/workflows/helm-chart.yml'
   pull_request:
     paths:
       - 'helm/**'
+      - 'tests/autoupdate-pin.test.mjs'
       - '.github/workflows/helm-chart.yml'
   workflow_dispatch:
 
@@ -191,6 +193,42 @@ jobs:
               exit 1
             fi
           fi
+
+      - name: autoUpdate pins every app Deployment to one digest before the roll
+        run: |
+          set -euo pipefail
+          # Without the pin, a pod that starts between rolls (a reschedule, a
+          # drain) pulls whatever policy-stable points at by then, and replicas
+          # split across builds: that blanked a customer's console (a page from
+          # one proxy build, its hashed assets 404 on the other). Every app
+          # Deployment must be pinned, each by an init container that pulls its
+          # image fresh, and the pin step must be able to read its own pod.
+          render() {
+            helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
+              --set-string image.tag=policy-stable "$@"
+          }
+          cronjob="$(render | awk '/^kind: CronJob$/,0')"
+          role="$(render | awk '/^kind: Role$/,/^---/')"
+          for c in gateway optimizer proxy endpoint-control; do
+            grep -q "\\\\\"deployment\\\\\":\\\\\"anyray-${c}\\\\\"" <<<"$cronjob" \
+              || { echo "::error::the autoUpdate pin step does not pin ${c}"; exit 1; }
+          done
+          for r in resolve-optimizer resolve-proxy resolve-endpoint-control pin; do
+            grep -q -- "- name: ${r}$" <<<"$cronjob" \
+              || { echo "::error::no ${r} init container resolves its digest"; exit 1; }
+          done
+          test "$(grep -c 'imagePullPolicy: Always' <<<"$cronjob")" -eq 4
+          grep -q 'resources: \["pods"\]' <<<"$role"
+          # endpoint-control off: it is neither resolved nor pinned (its
+          # Deployment does not exist, so pinning it would fail every night).
+          off="$(render --set endpoint-control.enabled=false | awk '/^kind: CronJob$/,0')"
+          if grep -q 'endpoint-control' <<<"$off"; then
+            echo "::error::endpoint-control disabled but still pinned"
+            exit 1
+          fi
+
+      - name: autoUpdate pin step behaves against a fake API server
+        run: node --test tests/autoupdate-pin.test.mjs
 
       - name: The autoUpdate kubectl image is a real upstream tag
         run: |

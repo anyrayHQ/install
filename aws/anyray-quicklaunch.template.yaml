@@ -42,8 +42,6 @@ Metadata:
             TrustedCustomHosts,
             UpstreamUrl,
           ]
-      - Label: { default: Optimizer }
-        Parameters: [OptimizerTimeoutMs]
       - Label: { default: Availability }
         Parameters: [HighAvailability]
       - Label: { default: Database }
@@ -272,11 +270,15 @@ Parameters:
       On-top mode: optional OpenAI-compatible upstream gateway (LiteLLM,
       OpenRouter, ...) that seeds the default routing config, so clients send no
       x-anyray-config header. Empty = route directly to providers.
+  # RETIRED (unused). The gateway no longer reads ANYRAY_OPTIMIZER_TIMEOUT_MS;
+  # the hook budget ships with the image. Kept declared so an update that
+  # passes every existing parameter with UsePreviousValue does not fail on a
+  # parameter the template no longer has. Remove in a later release.
   OptimizerTimeoutMs:
     Type: String
     Default: '1200'
     AllowedPattern: '^[0-9]+$'
-    Description: Optimizer timeout for normal requests in milliseconds.
+    Description: Retired and ignored; the gateway sets its own optimizer budget.
   DbInstanceClass:
     Type: String
     Default: db.t4g.micro
@@ -1822,7 +1824,6 @@ Resources:
               - AutoUpdate
               - { Name: ANYRAY_UPDATER_URL, Value: !GetAtt UpdaterUrl.FunctionUrl }
               - !Ref 'AWS::NoValue'
-            - { Name: ANYRAY_OPTIMIZER_TIMEOUT_MS, Value: !Ref OptimizerTimeoutMs }
             - { Name: ANYRAY_DEFAULT_MODEL, Value: !Ref DefaultModel }
             - { Name: ANYRAY_ALLOW_PLAINTEXT, Value: !Ref AllowPlaintext }
             - { Name: ANYRAY_DATA_DIR, Value: /data }

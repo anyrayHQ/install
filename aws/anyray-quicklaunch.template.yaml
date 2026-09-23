@@ -274,7 +274,7 @@ Parameters:
       x-anyray-config header. Empty = route directly to providers.
   OptimizerTimeoutMs:
     Type: String
-    Default: '800'
+    Default: '1200'
     AllowedPattern: '^[0-9]+$'
     Description: Optimizer timeout for normal requests in milliseconds.
   DbInstanceClass:
@@ -1714,14 +1714,15 @@ Resources:
       Family: !Sub '${AWS::StackName}-optimizer'
       RequiresCompatibilities: [FARGATE]
       NetworkMode: awsvpc
-      # 1 vCPU / 2 GB. The optimizer runs onnxruntime (MiniLM re-rank, OCR)
-      # synchronously on the Node event loop; at fractional vCPU a single
-      # inference pegs CPU to 100%, blocking the loop long enough to miss the
-      # health probe and trigger recycle churn (exit 137). A full vCPU shortens
-      # each inference block and keeps the gateway's optimize call landing before
-      # it times out. Cpu 1024 requires Memory >= 2048 (Fargate valid combos).
-      Cpu: '1024'
-      Memory: '2048'
+      # 2 vCPU / 4 GB. The optimizer runs onnxruntime (MiniLM re-rank, OCR)
+      # synchronously on the Node event loop, and holds every in-flight request
+      # body. At 1 vCPU / 2 GB one ~600k-token agent session sending a turn every
+      # few seconds drove memory to 93% in four minutes, stalled the loop past
+      # the health probe and recycled the task (exit 137, Anyray prod
+      # 2026-09-23); at 2 vCPU / 4 GB the same session sat at 13%. Cpu 2048
+      # requires Memory 4096-16384 (Fargate valid combos).
+      Cpu: '2048'
+      Memory: '4096'
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       Volumes:

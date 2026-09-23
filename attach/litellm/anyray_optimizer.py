@@ -37,7 +37,7 @@ Setup:
 Env:
     ANYRAY_OPTIMIZER_URL          required, e.g. http://optimizer:8088
     ANYRAY_OPTIMIZER_TOKEN        optional bearer token
-    ANYRAY_OPTIMIZER_TIMEOUT_MS   optional, default 800
+    ANYRAY_OPTIMIZER_TIMEOUT_MS   optional, default 1200
 Recording is enabled by configuring the OPTIMIZER (not the adapter) with
 ANYRAY_OBSERVABILITY_* + ANYRAY_CONTENT_* (see the optimizer's PROTOCOL.md §/v1/record).
 """
@@ -72,7 +72,7 @@ class AnyrayOptimizer(CustomLogger):
         base = os.environ.get("ANYRAY_OPTIMIZER_URL", "").rstrip("/")
         self.base_url = base
         self.token = os.environ.get("ANYRAY_OPTIMIZER_TOKEN")
-        self.timeout_s = float(os.environ.get("ANYRAY_OPTIMIZER_TIMEOUT_MS", "800")) / 1000.0
+        self.timeout_s = float(os.environ.get("ANYRAY_OPTIMIZER_TIMEOUT_MS", "1200")) / 1000.0
         # One shared async client; bounded so the hook can never hang a request.
         self._client = httpx.AsyncClient(timeout=self.timeout_s) if base else None
         # call_id -> (decisions, expires_at_monotonic)

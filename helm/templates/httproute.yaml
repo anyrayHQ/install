@@ -82,6 +82,23 @@ spec:
       backendRefs:
         - name: gateway
           port: 8787
+    # /mcp (the gateway's remote MCP server, /mcp/org included) and its OAuth
+    # discovery documents. Same reason as the Ingress: hosted MCP clients call
+    # them from the vendor's cloud, and the "/" catch-all would answer
+    # `302 /console/`.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp
+        - path:
+            type: PathPrefix
+            value: /.well-known/oauth-protected-resource
+        - path:
+            type: PathPrefix
+            value: /.well-known/oauth-authorization-server
+      backendRefs:
+        - name: gateway
+          port: 8787
     {{- if (index .Values "endpoint-control").enabled }}
     # End-point control agent plane (RFC 0014): fleetd on employee laptops
     # calls these FIXED root-anchored paths against this same origin (the

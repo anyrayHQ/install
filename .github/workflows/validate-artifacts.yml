@@ -350,6 +350,16 @@ jobs:
               echo "$edge_render"
               exit 1
             fi
+            # Same shape for the remote MCP server and its OAuth discovery:
+            # hosted MCP clients (OpenAI's `mcp` tool) that land on the
+            # catch-all get the console's 302 and fail with 424.
+            for mcp_path in /mcp /.well-known/oauth-protected-resource /.well-known/oauth-authorization-server; do
+              if ! grep -A10 -E "(value|path): ${mcp_path}\$" <<<"$edge_render" | grep -qF -- "$svc"; then
+                echo "::error::${edge}.yaml does not route ${mcp_path} to the gateway — hosted MCP clients would hit the console proxy's 302"
+                echo "$edge_render"
+                exit 1
+              fi
+            done
           done
 
           # The BOM reflects whatever the chart actually deploys. By default that

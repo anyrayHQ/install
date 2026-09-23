@@ -100,8 +100,6 @@ spec:
               valueFrom:
                 {{- include "anyray.optionalSecretRef" (dict "key" "ANYRAY_OPTIMIZER_SIGNING_KEY" "context" .) | nindent 16 }}
             {{- end }}
-            - name: ANYRAY_OPTIMIZER_TIMEOUT_MS
-              value: {{ .Values.gateway.optimizerTimeoutMs | quote }}
             {{- with .Values.gateway.defaultModel }}
             # What `anyray-default` routes to when a request names no model;
             # without it the gateway falls back to a stale alias and 404s.

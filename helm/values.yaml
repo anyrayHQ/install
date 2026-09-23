@@ -332,7 +332,6 @@ gateway:
   # optimizer.replicas guards below check, since those are about the CCR stash.
   contentMode: encrypted
   allowPlaintext: "false"
-  optimizerTimeoutMs: "1200"
   # Target for the `anyray-default` model alias (request names no model). Matches
   # the other deploy artifacts; blank it to fall back to the gateway's own default.
   defaultModel: "anthropic/claude-sonnet-4-5"

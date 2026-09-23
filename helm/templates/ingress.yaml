@@ -114,6 +114,37 @@ spec:
                 name: gateway
                 port:
                   number: 8787
+          # /mcp is the gateway's remote MCP server (/mcp = anyray_retrieve and
+          # the built-in tools, /mcp/org = the org's connectors), and the two
+          # /.well-known/oauth-* documents are its OAuth discovery for clients
+          # that cannot send the key header. Hosted MCP clients (the OpenAI
+          # Responses `mcp` tool, ChatGPT connectors) call these from the
+          # vendor's cloud. Without these rules they fall through to the proxy
+          # "/" catch-all, get `302 /console/`, and fail to list tools (OpenAI
+          # reports it as 424 Failed Dependency). Compose (Caddy) and the AWS
+          # ALB default to the gateway, so only this console-shaped edge needs
+          # them spelled out.
+          - path: /mcp
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8787
+          - path: /.well-known/oauth-protected-resource
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8787
+          - path: /.well-known/oauth-authorization-server
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 8787
           {{- if (index $.Values "endpoint-control").enabled }}
           # End-point control agent plane (RFC 0014): fleetd on employee
           # laptops calls these FIXED root-anchored paths against this same

@@ -51,10 +51,11 @@ image:
   pullSecrets: []
 
 # Scheduled image roll — what makes a Kubernetes install self-updating, the way
-# Compose bundles Watchtower and the AWS stack ships an updater Lambda. It runs
-# `kubectl rollout restart` against this release's Deployments so a moving
-# image.tag actually resolves to a new digest; the Postgres StatefulSet is never
-# restarted.
+# Compose bundles Watchtower and the AWS stack ships an updater Lambda. It pins
+# each of this release's Deployments to the digest the moving image.tag resolves
+# to that night, then runs `kubectl rollout restart`, so every replica lands on
+# one build and a pod that restarts before the next roll stays on it. The
+# Postgres StatefulSet is never restarted.
 #
 # Left ON here on purpose, and it is still backwards compatible: the roll is
 # rendered only when the effective image tag can actually MOVE. At the pinned

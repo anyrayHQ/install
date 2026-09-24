@@ -204,9 +204,16 @@ It needs a `Role` (never a `ClusterRole`) granting `get`, `list` and `patch` on
 the label selector, `patch` pins the image and stamps the restart annotation, and
 the pod read is the Job reading its own resolved digests. Nothing else.
 
-On ArgoCD or Flux the pinned image reads as drift from the rendered
-`:policy-stable`. On that channel the rendered image never changes, so ignore the
-field rather than let a sync undo the pin:
+**Under ArgoCD or Flux, prefer pinning in Git over this roll.** A Job that
+patches Deployments competes with the controller that owns them. Leave
+`image.tag` unset (each chart version deploys its `appVersion`, and the roll
+renders nothing), and upgrade by raising `targetRevision`. What each version
+changed: https://docs.anyray.ai/changelog (a chart version's `appVersion` names
+the release).
+
+If you do run `policy-stable` under ArgoCD, the pinned image reads as drift from
+the rendered `:policy-stable`. On that channel the rendered image never changes,
+so ignore the field rather than let a sync undo the pin:
 
 ```yaml
 ignoreDifferences:
@@ -218,6 +225,15 @@ syncPolicy:
   syncOptions:
     - RespectIgnoreDifferences=true
 ```
+
+> **Not with `ServerSideApply=true`.** ArgoCD 2.9.2 with server-side apply has
+> synced this as gateway env entries that kept their names and lost their
+> values: `ANYRAY_ADMIN_TOKEN`, `ANYRAY_CONTENT_KEY`, `ANYRAY_PSEUDONYM_SALT`
+> and three more, all empty. Use it with client-side apply only, and after the
+> first sync check that `kubectl get deploy -l app.kubernetes.io/component=gateway -o yaml`
+> still shows a value or `valueFrom` on every entry. Current gateways exit at
+> boot when `ANYRAY_ADMIN_TOKEN` arrives empty instead of starting
+> half-configured.
 
 **A build that will not start stalls the roll, it does not drop the deployment.**
 The gateway, optimizer and proxy roll with `maxUnavailable: 0`, so a replacement

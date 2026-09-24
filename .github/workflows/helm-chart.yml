@@ -251,7 +251,7 @@ jobs:
             exit 1
           fi
           # Guard the guard: the render must actually contain the dotted paths.
-          printf '%s\n' "$render" | grep -q 'path: /.well-known/oauth-protected-resource'
+          grep -q 'path: /.well-known/oauth-protected-resource' <<<"$render"
 
       - name: The autoUpdate kubectl image is a real upstream tag
         run: |

@@ -1786,8 +1786,18 @@ Resources:
       Family: !Sub '${AWS::StackName}-gateway'
       RequiresCompatibilities: [FARGATE]
       NetworkMode: awsvpc
-      Cpu: '512'
-      Memory: '1024'
+      # 1 vCPU / 2 GB. The gateway hashes and re-serializes whole transcripts on
+      # its single Node event loop. At half a vCPU the task is throttled to 50%
+      # of a core, so a large-transcript turn blocks the loop long enough to
+      # trip the optimizer pin-read deadline. Each timeout arms a session
+      # cooloff (bypassed turns). An ECS quicklaunch stack at 512 timed out on
+      # 0.96% of requests, and the rate rises with transcript size (0.11% under
+      # 20k tokens, 0.94% past 500k). Cpu 1024 requires Memory
+      # 2048-8192 (Fargate valid combos). Helm already limits the gateway to
+      # 1 vCPU. The updater Lambda clones this definition as registered, so
+      # only a stack update changes the size.
+      Cpu: '1024'
+      Memory: '2048'
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       Volumes:

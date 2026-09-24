@@ -207,7 +207,8 @@ the pod read is the Job reading its own resolved digests. Nothing else.
 **Under ArgoCD or Flux, prefer pinning in Git over this roll.** A Job that
 patches Deployments competes with the controller that owns them. Leave
 `image.tag` unset (each chart version deploys its `appVersion`, and the roll
-renders nothing), and upgrade by raising `targetRevision`. What each version
+renders nothing), and upgrade by raising the chart version: `targetRevision` on
+ArgoCD, `spec.chart.spec.version` on a Flux `HelmRelease`. What each version
 changed: https://docs.anyray.ai/changelog (a chart version's `appVersion` names
 the release).
 
@@ -230,8 +231,9 @@ syncPolicy:
 > synced this as gateway env entries that kept their names and lost their
 > values: `ANYRAY_ADMIN_TOKEN`, `ANYRAY_CONTENT_KEY`, `ANYRAY_PSEUDONYM_SALT`
 > and three more, all empty. Use it with client-side apply only, and after the
-> first sync check that `kubectl get deploy -l app.kubernetes.io/component=gateway -o yaml`
-> still shows a value or `valueFrom` on every entry. Current gateways exit at
+> first sync check that
+> `kubectl get deploy anyray-gateway -n "$ANYRAY_NAMESPACE" -o yaml` still shows a
+> value or `valueFrom` on every entry. Current gateways exit at
 > boot when `ANYRAY_ADMIN_TOKEN` arrives empty instead of starting
 > half-configured.
 

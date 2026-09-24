@@ -233,9 +233,8 @@ syncPolicy:
 > and three more, all empty. Use it with client-side apply only, and after the
 > first sync check that
 > `kubectl get deploy anyray-gateway -n "$ANYRAY_NAMESPACE" -o yaml` still shows a
-> value or `valueFrom` on every entry. Current gateways exit at
-> boot when `ANYRAY_ADMIN_TOKEN` arrives empty instead of starting
-> half-configured.
+> value or `valueFrom` on every entry. A stripped `ANYRAY_ADMIN_TOKEN` shows on
+> `/admin/health` (and the console Health page) as `secrets.adminToken: env_blank`.
 
 **A build that will not start stalls the roll, it does not drop the deployment.**
 The gateway, optimizer and proxy roll with `maxUnavailable: 0`, so a replacement

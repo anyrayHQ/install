@@ -230,6 +230,29 @@ jobs:
       - name: autoUpdate pin step behaves against a fake API server
         run: node --test tests/autoupdate-pin.test.mjs
 
+      - name: Every Ingress path passes ingress-nginx strict path validation
+        run: |
+          set -euo pipefail
+          # ingress-nginx 1.12+ (strict-validate-path-type on by default) rejects
+          # a non-ImplementationSpecific path outside ^/[A-Za-z0-9_/-]*$, and its
+          # admission webhook then refuses the whole Ingress. The regex is
+          # validPathType in internal/ingress/inspector/rules.go (controller-v1.12.0).
+          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
+            --set ingress.enabled=true --set endpoint-control.enabled=true)"
+          bad="$(printf '%s\n' "$render" | awk '
+            /^kind: /                 { ing = ($2 == "Ingress") }
+            ing && /- path: /         { p = $3 }
+            ing && /pathType: /       { if ($2 != "ImplementationSpecific" && p !~ /^\/[A-Za-z0-9_\/-]*$/) print p " (" $2 ")" }
+          ')"
+          if [ -n "$bad" ]; then
+            printf '%s\n' "$bad" | while IFS= read -r line; do
+              echo "::error::Ingress path ingress-nginx 1.12 rejects: $line"
+            done
+            exit 1
+          fi
+          # Guard the guard: the render must actually contain the dotted paths.
+          grep -q 'path: /.well-known/oauth-protected-resource' <<<"$render"
+
       - name: The autoUpdate kubectl image is a real upstream tag
         run: |
           set -euo pipefail

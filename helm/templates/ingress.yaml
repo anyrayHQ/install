@@ -124,6 +124,14 @@ spec:
           # reports it as 424 Failed Dependency). Compose (Caddy) and the AWS
           # ALB default to the gateway, so only this console-shaped edge needs
           # them spelled out.
+          #
+          # The two /.well-known paths are ImplementationSpecific, not Prefix or
+          # Exact: ingress-nginx's strict-validate-path-type (on by default from
+          # 1.12) rejects any path holding a "." under every other pathType, and
+          # its admission webhook then refuses the WHOLE Ingress, / and /v1
+          # included. The gateway serves only these exact paths, so the
+          # controller's own matching (prefix on nginx and Traefik, exact on
+          # GKE and the AWS LB controller) routes them either way.
           - path: /mcp
             pathType: Prefix
             backend:
@@ -132,14 +140,14 @@ spec:
                 port:
                   number: 8787
           - path: /.well-known/oauth-protected-resource
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: gateway
                 port:
                   number: 8787
           - path: /.well-known/oauth-authorization-server
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: gateway

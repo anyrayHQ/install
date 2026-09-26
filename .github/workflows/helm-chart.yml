@@ -63,6 +63,16 @@ jobs:
             --set gateway.persistence.enabled=false --set gateway.autoscaling.enabled=true \
             --set optimizer.persistence.enabled=false --set optimizer.autoscaling.enabled=true \
             > /dev/null
+          # Chart 0.8.0 raised the optimizer default to 2. These are the values
+          # files that rendered before it and must keep rendering: the default
+          # falls back to 1 for persistence and for images below the
+          # multi-replica floor, never a new refusal.
+          helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
+            --set optimizer.persistence.enabled=true > /dev/null
+          helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
+            --set gateway.persistence.enabled=true --set gateway.replicas=1 > /dev/null
+          helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
+            --set gateway.contentMode=off --set image.tag=v1.10.380 > /dev/null
 
       - name: appVersion must be a pinned vX.Y.Z (never a moving tag)
         run: |

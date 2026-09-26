@@ -22,6 +22,9 @@ spec:
         - name: postgres
           image: {{ include "anyray.image" (dict "component" "postgres" "context" .) }}
           imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "postgres" "context" .) }}
+          {{- with .Values.postgres.maxConnections }}
+          args: ["-c", "max_connections={{ int . }}"]
+          {{- end }}
           {{- include "anyray.containerSecurityContext" . | nindent 10 }}
           env:
             - name: POSTGRES_USER

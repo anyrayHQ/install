@@ -18,20 +18,18 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: optimizer
 spec:
-  {{- /* Before appVersion v1.10.393 an optimizer with content mode off still
-         minted memory-only retrieval handles, which a peer replica cannot
-         resolve. From that release it mints none under off (ANY-334, ANY-407),
-         so several replicas are safe at every content mode. Only an older pin
-         with contentMode: off is refused. */}}
-  {{- $multi := or .Values.optimizer.autoscaling.enabled (gt (int .Values.optimizer.replicas) 1) }}
-  {{- if and $multi (eq (toString .Values.gateway.contentMode) "off") (not (include "anyray.atLeastAppVersion" (dict "component" "optimizer" "floor" (include "anyray.multiOptimizerOffFloor" .) "context" .))) }}
-  {{- fail (printf "more than one optimizer replica with gateway.contentMode=off needs an optimizer image of %s or newer (this renders %s): older images mint per-pod retrieval handles a peer replica cannot resolve. Upgrade the image, or set optimizer.autoscaling.enabled=false and optimizer.replicas=1." (include "anyray.multiOptimizerOffFloor" .) (include "anyray.effectiveImageTag" (dict "component" "optimizer" "context" .))) }}
+  {{- $replicas := int (include "anyray.optimizerReplicas" .) }}
+  {{- $multi := or .Values.optimizer.autoscaling.enabled (gt $replicas 1) }}
+  {{- /* Same refusal chart 0.7.x made, now only below the image floor: from
+         v1.10.403 handles resolve on any replica at every content mode. */}}
+  {{- if and $multi (eq (toString .Values.gateway.contentMode) "off") (not (include "anyray.atLeastAppVersion" (dict "component" "optimizer" "floor" (include "anyray.multiOptimizerFloor" .) "context" .))) }}
+  {{- fail (printf "more than one optimizer replica with gateway.contentMode=off needs an optimizer image of %s or newer (this renders %s): older images mint retrieval handles a peer replica cannot resolve. Upgrade the image, or set optimizer.replicas=1 and optimizer.autoscaling.enabled=false." (include "anyray.multiOptimizerFloor" .) (include "anyray.effectiveImageTag" (dict "component" "optimizer" "context" .))) }}
   {{- end }}
   {{- if not .Values.optimizer.autoscaling.enabled }}
-  replicas: {{ .Values.optimizer.replicas }}
+  replicas: {{ $replicas }}
   {{- end }}
   {{- if .Values.optimizer.persistence.enabled }}
-  {{- if or .Values.optimizer.autoscaling.enabled (gt (int .Values.optimizer.replicas) 1) }}
+  {{- if $multi }}
   {{- fail "optimizer.replicas > 1 or optimizer.autoscaling.enabled needs optimizer.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
   {{- end }}
   # Recreate: the RWO volume must detach before the replacement pod can mount it.

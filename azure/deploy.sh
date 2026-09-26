@@ -18,7 +18,8 @@
 #   CLUSTER           AKS cluster name (default: anyray)
 #   NAMESPACE         Kubernetes namespace (default: anyray)
 #   NODE_VM_SIZE      Node pool VM size (default: Standard_D2s_v5)
-#   NODE_COUNT        Node pool size (default: 2)
+#   NODE_COUNT        Initial node pool size (default: 3)
+#   NODE_MAX_COUNT    Cluster-autoscaler ceiling (default: 6)
 #   ALLOWED_CIDR      CIDR allowed to reach the console/gateway LBs. REQUIRED.
 #                     Scope to your office/VPN range — never 0.0.0.0/0.
 #   DEPLOYMENT_TOKEN  Anyray Cloud deployment token (adt_...). REQUIRED for metering.
@@ -47,7 +48,12 @@ RESOURCE_GROUP="${RESOURCE_GROUP:-anyray}"
 CLUSTER="${CLUSTER:-anyray}"
 NAMESPACE="${NAMESPACE:-anyray}"
 NODE_VM_SIZE="${NODE_VM_SIZE:-Standard_D2s_v5}"
-NODE_COUNT="${NODE_COUNT:-2}"
+# Three, autoscaled up to NODE_MAX_COUNT: from chart 0.8.0 every workload runs at
+# least two pods under an HPA, which requests ~3 vCPU before a rollout surges one
+# more optimizer (1 vCPU). Two D2s_v5 nodes leave that surge Pending, so
+# `helm upgrade --wait` times out. The HPAs need nodes to scale onto.
+NODE_COUNT="${NODE_COUNT:-3}"
+NODE_MAX_COUNT="${NODE_MAX_COUNT:-6}"
 IMAGE_TAG="${IMAGE_TAG:-policy-stable}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}"
 ALLOWED_CIDR="${ALLOWED_CIDR:-}"
@@ -109,6 +115,9 @@ else
     --location "$LOCATION" \
     --node-count "$NODE_COUNT" \
     --node-vm-size "$NODE_VM_SIZE" \
+    --enable-cluster-autoscaler \
+    --min-count "$NODE_COUNT" \
+    --max-count "$NODE_MAX_COUNT" \
     --enable-managed-identity \
     --generate-ssh-keys
 fi

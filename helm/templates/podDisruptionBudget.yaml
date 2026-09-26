@@ -1,5 +1,6 @@
 {{- /*
-PodDisruptionBudgets for the gateway, optimizer and proxy Deployments.
+PodDisruptionBudgets for the gateway, optimizer, proxy and endpoint-control
+Deployments.
 
 These bound VOLUNTARY disruption only — a `kubectl drain` for a node upgrade, a
 cluster-autoscaler scale-down, a machine-pool roll. They do not apply to node
@@ -14,13 +15,13 @@ autoscaling.enabled alone was wrong: an HPA with minReplicas: 1 can sit at one
 pod, where a budget protects nothing. That skip is deliberate rather than an
 oversight: over a single replica any budget that protects anything makes the only
 pod permanently unevictable, and `kubectl drain` then blocks forever instead of
-completing the node upgrade. At the default gateway/optimizer replicas: 1 this
-file therefore emits nothing for them, and the proxy — two replicas by default —
-is the one workload covered out of the box.
+completing the node upgrade. Since chart 0.8.0 every workload defaults to an HPA
+with minReplicas: 2, so all four are covered out of the box.
 */}}
 {{- if .Values.podDisruptionBudget.enabled }}
-{{- range $component := list "gateway" "optimizer" "proxy" }}
+{{- range $component := list "gateway" "optimizer" "proxy" "endpoint-control" }}
 {{- $cfg := index $.Values $component }}
+{{- if or (ne $component "endpoint-control") $cfg.enabled }}
 {{- $floor := ternary (int $cfg.autoscaling.minReplicas) (int $cfg.replicas) $cfg.autoscaling.enabled }}
 {{- if gt $floor 1 }}
 {{- /* A budget that permits evicting the whole floor is not a budget: the
@@ -66,6 +67,7 @@ spec:
   selector:
     matchLabels:
       {{- include "anyray.selectorLabels" (dict "component" $component "context" $) | nindent 6 }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

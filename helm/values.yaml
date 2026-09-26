@@ -300,12 +300,16 @@ podDisruptionBudget:
 gateway:
   # Two, so the gateway survives losing one. This is only possible because
   # persistence is off below; with the ReadWriteOnce volume mounted the chart
-  # refuses anything above 1.
+  # refuses anything above 1. Used only while autoscaling is off.
   replicas: 2
-  # Autoscaling needs gateway.persistence.enabled=false because the bundled data
-  # PVC is ReadWriteOnce. Use an external/shared state backend before enabling.
+  # ON by default since chart 0.8.0: an HPA holds the gateway between
+  # minReplicas and maxReplicas on CPU. The gateway's pre-hook work is CPU-bound
+  # and grows with transcript size, so a busy install needs more pods, not a
+  # bigger fixed count. Needs gateway.persistence.enabled=false (the default;
+  # the data PVC is ReadWriteOnce) and a metrics server, which AKS, GKE and EKS
+  # ship. Without one the HPA still holds minReplicas, it just never scales up.
   autoscaling:
-    enabled: false
+    enabled: true
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
@@ -421,20 +425,23 @@ gateway:
 
 # Optimizer
 optimizer:
-  # replicas > 1 or autoscaling needs gateway.contentMode != off AND a non-empty
-  # ANYRAY_CONTENT_KEY, else the durable CCR stash degrades to per-pod in-memory
-  # (cross-replica retrieval breaks). Only off is render-guarded, which is why
-  # this stays at 1: raising the default would refuse to render for every
-  # contentMode: off install. Raise it yourself once content mode is on — a
-  # second replica is what keeps the Service answering when one pod's event loop
-  # is blocked by an onnxruntime inference, which a single pod cannot do (the
-  # kernel accept backlog fills and new connections are REFUSED while the pod
-  # stays Ready and un-restarted; the gateway books that as `error:econnrefused`
-  # and holds the session on original bytes for 15 minutes).
-  replicas: 1
-  # Autoscaling also needs optimizer.persistence.enabled=false, now the default.
+  # Two by default since chart 0.8.0, autoscaled. A second replica is what keeps
+  # the Service answering when one pod's event loop is blocked by an onnxruntime
+  # inference, which a single pod cannot do (the kernel accept backlog fills and
+  # new connections are REFUSED while the pod stays Ready and un-restarted; the
+  # gateway books that as `error:econnrefused` and holds the session on original
+  # bytes for 15 minutes).
+  #
+  # Safe at any content mode from appVersion v1.10.393: retrieval handles resolve
+  # on every replica through the shared Postgres stash (keyed from
+  # ANYRAY_ADMIN_TOKEN when no content key is set), and with contentMode: off
+  # the optimizer mints no new handles at all rather than per-pod ones. Pinned
+  # to an older image with contentMode: off, the chart refuses to render more
+  # than one replica. Used only while autoscaling is off.
+  replicas: 2
+  # Needs optimizer.persistence.enabled=false (the default) and a metrics server.
   autoscaling:
-    enabled: false
+    enabled: true
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
@@ -472,7 +479,7 @@ optimizer:
 proxy:
   replicas: 2
   autoscaling:
-    enabled: false
+    enabled: true
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
@@ -511,7 +518,14 @@ endpoint-control:
   #     pull and the Deployment would sit in ImagePullBackOff forever, so an
   #     `helm upgrade --wait` (what the AKS/GKE scripts run) times out.
   enabled: true
-  replicas: 1
+  # Two by default since chart 0.8.0, autoscaled like the rest. Stateless, so
+  # this is free of any guard. Used only while autoscaling is off.
+  replicas: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
   # Public origin fleetd is pointed at. Leave blank on an Ingress/HTTPRoute
   # install and it defaults to https://<host>; set it explicitly for
   # LoadBalancer / NodePort / non-TLS installs, where the chart routes no

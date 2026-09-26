@@ -41,6 +41,10 @@ Availability of this release:
 {{- end }}
   optimizer  replicas {{ if .Values.optimizer.autoscaling.enabled }}{{ .Values.optimizer.autoscaling.minReplicas }}-{{ .Values.optimizer.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.optimizer.replicas }}{{ end }}{{ if .Values.optimizer.persistence.enabled }}, Recreate rollout{{ end }}
   proxy      replicas {{ if .Values.proxy.autoscaling.enabled }}{{ .Values.proxy.autoscaling.minReplicas }}-{{ .Values.proxy.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.proxy.replicas }}{{ end }}
+{{- $ec := index .Values "endpoint-control" }}
+{{- if $ec.enabled }}
+  endpoint-control  replicas {{ if $ec.autoscaling.enabled }}{{ $ec.autoscaling.minReplicas }}-{{ $ec.autoscaling.maxReplicas }} (HPA){{ else }}{{ $ec.replicas }}{{ end }}
+{{- end }}
 {{- if .Values.postgres.enabled }}
   postgres   BUNDLED, single pod. This is the one part of the stack that cannot
              fail over, and the gateway reads client keys from it on the auth
@@ -82,7 +86,7 @@ Availability of this release:
   the volume for one release to let the copy run:
 
     helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} \
-      --set gateway.persistence.enabled=true --set gateway.replicas=1
+      --set gateway.persistence.enabled=true --set gateway.replicas=1 --set gateway.autoscaling.enabled=false
 
   The old volume is retained ("helm.sh/resource-policy": keep), so nothing was
   deleted in either case.

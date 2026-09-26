@@ -506,6 +506,11 @@ silently keeps the old single-replica posture.
        `git tag` before changing it. */ -}}
 {{- define "anyray.haFloor" -}}v1.10.224{{- end }}
 
+{{- /* First appVersion whose optimizer mints no per-pod retrieval handles under
+       content mode off (ANY-334 in v1.10.363, ANY-407 in v1.10.393), so more
+       than one optimizer replica is safe at every content mode. */}}
+{{- define "anyray.multiOptimizerOffFloor" -}}v1.10.393{{- end }}
+
 {{/*
 Whether the resolved image for a component is at least `floor`.
 

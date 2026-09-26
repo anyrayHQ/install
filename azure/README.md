@@ -55,7 +55,8 @@ export DEPLOYMENT_TOKEN="adt_..."        # from app.anyray.ai → Deployments
 | `CLUSTER` | no | `anyray` | AKS cluster name (reused if it already exists). |
 | `NAMESPACE` | no | `anyray` | Kubernetes namespace. |
 | `NODE_VM_SIZE` | no | `Standard_D2s_v5` | Node pool VM size. |
-| `NODE_COUNT` | no | `2` | Node pool size. |
+| `NODE_COUNT` | no | `3` | Initial node pool size, and the cluster autoscaler floor. |
+| `NODE_MAX_COUNT` | no | `6` | Cluster autoscaler ceiling. |
 | `IMAGE_TAG` | no | template default | One-click accepts only the chart's coordinated release pin or `policy-stable`. |
 | `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-4-5` | Target for the `anyray-default` model alias. |
 

@@ -15,14 +15,15 @@ autoscaling.enabled alone was wrong: an HPA with minReplicas: 1 can sit at one
 pod, where a budget protects nothing. That skip is deliberate rather than an
 oversight: over a single replica any budget that protects anything makes the only
 pod permanently unevictable, and `kubectl drain` then blocks forever instead of
-completing the node upgrade. Since chart 0.8.0 every workload defaults to an HPA
-with minReplicas: 2, so all four are covered out of the box.
+completing the node upgrade. Since chart 0.8.0 every workload defaults to two
+replicas, so all four are covered out of the box.
 */}}
 {{- if .Values.podDisruptionBudget.enabled }}
 {{- range $component := list "gateway" "optimizer" "proxy" "endpoint-control" }}
 {{- $cfg := index $.Values $component }}
 {{- if or (ne $component "endpoint-control") $cfg.enabled }}
-{{- $floor := ternary (int $cfg.autoscaling.minReplicas) (int $cfg.replicas) $cfg.autoscaling.enabled }}
+{{- $fixed := ternary (int (include "anyray.optimizerReplicas" $)) (int $cfg.replicas) (eq $component "optimizer") }}
+{{- $floor := ternary (int $cfg.autoscaling.minReplicas) $fixed $cfg.autoscaling.enabled }}
 {{- if gt $floor 1 }}
 {{- /* A budget that permits evicting the whole floor is not a budget: the
 eviction API would be free to take every serving pod at once, which is exactly

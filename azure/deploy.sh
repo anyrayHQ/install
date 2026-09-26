@@ -48,10 +48,10 @@ RESOURCE_GROUP="${RESOURCE_GROUP:-anyray}"
 CLUSTER="${CLUSTER:-anyray}"
 NAMESPACE="${NAMESPACE:-anyray}"
 NODE_VM_SIZE="${NODE_VM_SIZE:-Standard_D2s_v5}"
-# Three, autoscaled up to NODE_MAX_COUNT: from chart 0.8.0 every workload runs at
-# least two pods under an HPA, which requests ~3 vCPU before a rollout surges one
-# more optimizer (1 vCPU). Two D2s_v5 nodes leave that surge Pending, so
-# `helm upgrade --wait` times out. The HPAs need nodes to scale onto.
+# Three, autoscaled up to NODE_MAX_COUNT: from chart 0.8.0 every workload runs
+# two pods, which request ~3 vCPU before a rollout surges one more optimizer
+# (1 vCPU). Two D2s_v5 nodes leave that surge Pending, so `helm upgrade --wait`
+# times out.
 NODE_COUNT="${NODE_COUNT:-3}"
 NODE_MAX_COUNT="${NODE_MAX_COUNT:-6}"
 IMAGE_TAG="${IMAGE_TAG:-policy-stable}"
@@ -107,6 +107,21 @@ az group create --name "$RESOURCE_GROUP" --location "$LOCATION" >/dev/null
 
 if az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER" >/dev/null 2>&1; then
   echo "→ AKS cluster $CLUSTER already exists — reusing it."
+  # Chart 0.8.0 runs two of every service; a rollout then needs ~4 vCPU of
+  # requests, which an existing 2 x D2s_v5 pool cannot schedule. Turn on the
+  # cluster autoscaler for a pool that has none, and never shrink one that does.
+  POOL="$(az aks nodepool list --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+    --query "[?mode=='System'] | [0].name" -o tsv)"
+  if [ -n "$POOL" ] && [ "$(az aks nodepool show --resource-group "$RESOURCE_GROUP" \
+    --cluster-name "$CLUSTER" --name "$POOL" --query enableAutoScaling -o tsv)" != "true" ]; then
+    CUR="$(az aks nodepool show --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+      --name "$POOL" --query count -o tsv)"
+    MIN=$(( CUR > NODE_COUNT ? CUR : NODE_COUNT ))
+    MAX=$(( MIN > NODE_MAX_COUNT ? MIN : NODE_MAX_COUNT ))
+    echo "→ Enabling the cluster autoscaler on node pool $POOL ($MIN-$MAX nodes)…"
+    az aks nodepool update --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+      --name "$POOL" --enable-cluster-autoscaler --min-count "$MIN" --max-count "$MAX" >/dev/null
+  fi
 else
   echo "→ Creating AKS cluster $CLUSTER in $LOCATION (this takes a few minutes)…"
   az aks create \

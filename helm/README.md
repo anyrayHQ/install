@@ -312,7 +312,7 @@ created for each Deployment that runs two or more pods, capping how many pods a
 node drain or autoscaler scale-down may remove at once. It is deliberately not
 created for a single-replica workload: such a budget could never allow its only
 pod to be evicted, and `kubectl drain` would block indefinitely on a node upgrade.
-At the defaults that covers all four workloads, each autoscaled from two pods.
+At the defaults that covers all four workloads, each at two replicas.
 
 `podDisruptionBudget.unhealthyPodEvictionPolicy` defaults to `AlwaysAllow`.
 Kubernetes' own default (`IfHealthyBudget`) refuses to evict pods that are running
@@ -655,41 +655,38 @@ overridden through `gateway.extraEnv`.
 
 ## Scaling
 
-Since chart 0.8.0 the gateway, optimizer, proxy and endpoint-control each run
-under a HorizontalPodAutoscaler: at least two pods, up to ten, scaling on CPU at
-70%. Each gets a PodDisruptionBudget, so a node drain never takes both pods of a
-pair. The bundled Postgres stays at one pod; for a database that fails over, use
-the external-Postgres values below.
+Since chart 0.8.0 the gateway, optimizer, proxy and endpoint-control each run two
+replicas, each with a PodDisruptionBudget, so a node drain never takes both pods
+of a pair. The bundled Postgres stays at one pod; for a database that fails over,
+use the external-Postgres values below.
 
-The HPAs need a metrics server. AKS, GKE and EKS ship one; on a cluster without it
-each workload holds `minReplicas` and never scales up. They also need nodes to
-scale onto. The defaults request about 3 vCPU at the floor, and a rollout surges
-one more optimizer (1 vCPU), so give the cluster at least three 2-vCPU nodes, or
-a cluster autoscaler (the Azure script enables one).
+The optimizer resolves to one replica instead of two when
+`optimizer.persistence.enabled` is true, or when the image is older than
+`v1.10.403` (a retrieval handle minted on one pod may not resolve on another).
+Set `optimizer.replicas` to override.
 
-Tune or turn off per component:
+Two replicas of everything need about 3 vCPU of requests, plus 1 vCPU while an
+optimizer rolls, so give the cluster at least three 2-vCPU nodes or a cluster
+autoscaler (the Azure script enables one).
+
+**Autoscaling is available but off.** Scaling in terminates pods mid-session:
+spend rows still being written can be dropped, long streams are cut, and a
+removed optimizer resets the gateway connections still pointed at it, which
+sends those turns unoptimized and busts the prompt cache on warm sessions. Fixed
+replicas give the redundancy without that churn. If you enable it, raise
+`postgres.maxConnections` for `maxReplicas` first:
 
 ```yaml
 gateway:
   autoscaling:
+    enabled: true
     minReplicas: 2
-    maxReplicas: 20
-optimizer:
-  autoscaling:
-    enabled: false
-  replicas: 2
+    maxReplicas: 4
 ```
 
-With autoscaling off, `replicas` applies. An optimizer image older than
-`v1.10.393` with `gateway.contentMode: off` is refused above one replica: those
-images mint retrieval handles a peer pod cannot resolve.
-
-**Upgrading from 0.7.x:** the first `helm upgrade` onto 0.8.0 removes `replicas`
-from each Deployment so the HPA owns it. Kubernetes briefly reads the missing
-field as 1 and the HPA restores 2 within its first sync (about 15 seconds). The
-extra pod drains gracefully, so no request is cut, but capacity is halved for
-those seconds. Upgrade in a quiet window, or set `autoscaling.enabled: false`
-first and turn it on in a second upgrade.
+`postgres.maxConnections` defaults to 300. A gateway pod can hold about 47
+connections at peak, an optimizer or endpoint-control pod about 20. For external
+Postgres, size its limit the same way.
 
 ## External Postgres
 
@@ -720,8 +717,8 @@ the gateway alone silently degrades the optimizer to in-memory stash
   single-attach PVC (runtime config in the shared Postgres, migration 0058), so it
   runs on `emptyDir` and rolls with `maxUnavailable: 0`. Setting
   `optimizer.persistence.enabled: true` is still supported and re-imposes the
-  `Recreate` strategy and a one-replica cap, so it cannot be combined with the
-  default HPA. Both PVCs survive `helm uninstall` via a
+  `Recreate` strategy and a one-replica cap (the optimizer then defaults to one).
+  Both PVCs survive `helm uninstall` via a
   `helm.sh/resource-policy: keep` annotation.
 - **Single-replica bundled Postgres.** The bundled Postgres is a `replicas: 1`
   StatefulSet — adequate for most orgs, but not HA. Use the external-Postgres

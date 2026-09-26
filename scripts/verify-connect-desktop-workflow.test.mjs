@@ -949,3 +949,11 @@ test('Linux smoke runs uninstall.sh user cleanup before package removal', () => 
   assert.ok(offboardGrep > anyrayGone && offboardGrep < markerSurvives);
   assert.match(linux, /test ! -e "\$uninstall"/);
 });
+
+test('the Windows autostart poll reads the Run value without Get-ItemPropertyValue', () => {
+  // PowerShell 7 throws from Get-ItemPropertyValue on a missing value even under
+  // -ErrorAction SilentlyContinue, which ended every release run at the first poll.
+  const verify = job('verify-windows-signatures');
+  assert.doesNotMatch(verify, /Get-ItemPropertyValue/);
+  assert.match(verify, /\$runValue = \(Get-ItemProperty -LiteralPath \$runKey -Name \$runName `\n\s+-ErrorAction SilentlyContinue\)\.\$runName/);
+});

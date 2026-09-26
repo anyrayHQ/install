@@ -26,15 +26,38 @@ const job = (name) => {
     : workflow.slice(bodyStart, bodyStart + next);
 };
 
-describe('desktop staging workflow safety contract', () => {
-  test('is manual-only and exposes no production selector', () => {
+describe('desktop release workflow safety contract', () => {
+  test('is manual-only and selects the channel through one staging-default choice', () => {
     const trigger = workflow.slice(0, workflow.indexOf('\npermissions:'));
     assert.match(trigger, /\non:\n  workflow_dispatch:\n/);
     assert.doesNotMatch(trigger, /\n  (push|pull_request|workflow_run|repository_dispatch|schedule):/);
     assert.match(trigger, /\n      version:/);
     assert.match(trigger, /\n      source_sha:/);
     assert.match(trigger, /\n      dry_run:/);
+    assert.match(trigger, /\n      channel:\n[\s\S]*?type: choice\n\s+options: \[staging, stable\]\n\s+default: staging\n/);
     assert.doesNotMatch(trigger, /\n      (stable|production|public|latest):/);
+  });
+
+  test('preflight maps each channel exactly as the shared channel table does', async () => {
+    const { channelConfig } = await import('./desktop-channel.mjs');
+    const preflight = job('preflight');
+    for (const channel of ['staging', 'stable']) {
+      const { marker, feed, artifact } = channelConfig(channel);
+      assert.match(preflight, new RegExp(`\\n\\s+${channel}\\) distribution=${marker} feed=${feed} artifact=${artifact} ;;`));
+    }
+    assert.match(preflight, /echo "tag=\$\{feed\}-v\$\{VERSION_INPUT\}-\$\{SOURCE_SHA_INPUT:0:12\}"/);
+    // The tag the workflow computes must be the one the gate and publisher expect.
+    const { releaseTag } = await import('./desktop-channel.mjs');
+    assert.equal(releaseTag('stable', '1.2.3', 'a'.repeat(40)), 'connect-desktop-v1.2.3-aaaaaaaaaaaa');
+    assert.equal(releaseTag('staging', '1.2.3', 'a'.repeat(40)), 'connect-desktop-staging-v1.2.3-aaaaaaaaaaaa');
+  });
+
+  test('the stable gate runs before any paid Mac or signing job', () => {
+    const validate = job('validate-source');
+    assert.match(validate, /CHANNEL: \$\{\{ needs\.preflight\.outputs\.channel \}\}[\s\S]*node scripts\/verify-connect-desktop-publication\.mjs/);
+    assert.match(job('provision-mac'), /needs: \[preflight, validate-source\]/);
+    assert.match(job('build-windows-unsigned'), /needs: \[preflight, validate-source\]/);
+    assert.match(job('build-linux-unsigned'), /needs: \[preflight, validate-source\]/);
   });
 
   test('rejects non-main dispatches before preflight, secrets, or source', () => {
@@ -74,25 +97,26 @@ describe('desktop staging workflow safety contract', () => {
       'sign-windows-inner',
       'sign-windows-installer',
       'sign-linux-artifacts',
-      'assemble-signed-staging',
+      'assemble-signed-release',
     ]) {
       assert.doesNotMatch(job(name), /private-source|MONOREPO_READ_APP|monorepo-token/);
     }
     assert.doesNotMatch(job('sign-macos'), /anyray-connect" --version|\$engine" --version/);
   });
 
-  test('passes staging distribution only to the three native compile steps', () => {
+  test('passes the channel distribution only to the three native compile steps', () => {
+    const marker = /ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: \$\{\{ needs\.preflight\.outputs\.distribution \}\}/;
     assert.equal(
-      (workflow.match(/ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging/g) ?? [])
-        .length,
+      (workflow.match(/ANYRAY_CONNECT_DESKTOP_DISTRIBUTION:/g) ?? []).length,
       3
     );
+    assert.equal((workflow.match(new RegExp(marker.source, 'g')) ?? []).length, 3);
     for (const name of [
       'build-macos-unsigned',
       'build-windows-unsigned',
       'build-linux-unsigned',
     ]) {
-      assert.match(job(name), /ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging/);
+      assert.match(job(name), marker);
     }
     assert.doesNotMatch(
       job('bundle-windows-unsigned'),
@@ -406,7 +430,7 @@ describe('desktop staging workflow safety contract', () => {
     assert.match(linux, /kill -KILL -- "-\$tray_pid"/);
     assert.match(linux, /rm -f "\$autostart"/);
     assert.match(
-      job('assemble-signed-staging'),
+      job('assemble-signed-release'),
       /- verify-macos-signed[\s\S]*- verify-windows-signatures[\s\S]*- smoke-linux-installers/
     );
   });
@@ -613,12 +637,18 @@ describe('desktop staging workflow safety contract', () => {
     }
   });
 
-  test('can publish only a prerelease while preserving releases/latest', () => {
-    const publish = job('publish-staging-prerelease');
+  test('publishes per channel while preserving releases/latest', () => {
+    const publish = job('publish-release');
     assert.match(publish, /if: \$\{\{ !inputs\.dry_run \}\}/);
-    assert.match(publish, /connect-desktop-staging-v/);
+    assert.match(publish, /staging:connect-desktop-staging-v\*\) prerelease=true ;;/);
+    assert.match(publish, /stable:connect-desktop-v\*\) prerelease=false ;;/);
+    assert.match(publish, /\*\) echo "::error::refusing desktop tag/);
     assert.match(publish, /--prerelease/);
-    assert.match(publish, /--latest=false/);
+    // Every create, on both channels, keeps releases/latest on the CLI.
+    const creates = publish.match(/gh release create[\s\S]*?assets\/\*/g) ?? [];
+    assert.equal(creates.length, 2);
+    for (const create of creates) assert.match(create, /--latest=false/);
+    assert.match(publish, /group: \$\{\{ needs\.preflight\.outputs\.feed \}\}-feed/);
     assert.match(publish, /latest_before/);
     assert.match(publish, /latest_after/);
     assert.doesNotMatch(publish, /release delete|--clobber|echo 0/);
@@ -730,7 +760,7 @@ test('ships a signed, notarized uninstaller pkg inside the desktop PKG payload',
 });
 
 test('desktop staging assets contain one PKG, one updater tarball, and no DMG', () => {
-  const assemble = job('assemble-signed-staging');
+  const assemble = job('assemble-signed-release');
   assert.match(assemble, /cp platform\/macos\/\*\.pkg assets\//);
   assert.match(assemble, /cp platform\/macos\/\*\.app\.tar\.gz assets\//);
   assert.match(assemble, /-name '\*\.pkg'[\s\S]*-eq 1/);
@@ -759,7 +789,7 @@ test('native builds use the source-pinned pnpm before any packaging command', ()
 test('MSI verification uses Windows trust rather than the PE-only parser', () => {
   assert.doesNotMatch(job('sign-windows-installer'), /verify-authenticode\.py/);
   assert.match(job('verify-windows-signatures'), /\$installers \| ForEach-Object \{\s*\.\/scripts\/verify-authenticode-windows\.ps1/);
-  assert.match(job('assemble-signed-staging'), /- verify-windows-signatures/);
+  assert.match(job('assemble-signed-release'), /- verify-windows-signatures/);
 });
 
 test('universal builds stage a validated engine for both compile targets and bundling', () => {

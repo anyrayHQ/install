@@ -455,37 +455,68 @@ package, and `APPLE_NOTARY_KEY` (base64 `.p8`) + `APPLE_NOTARY_KEY_ID` +
 `APPLE_NOTARY_ISSUER_ID` for notarization. (`APPLE_SIGNING_CERT_PEM` was set for
 the abandoned rcodesign path and is unused.)
 
-## Connect desktop installers — isolated staging lane (ANY-250)
+## Connect desktop installers: staging and stable lanes (ANY-250, ANY-337)
 
-`.github/workflows/release-connect-desktop.yml` is a **manual, staging-only**
+`.github/workflows/release-connect-desktop.yml` is a **manual**
 release lane for the self-contained Tauri desktop app. It is intentionally a
 separate workflow from `release-connect-binaries.yml`: the CLI publisher does
 not call it, and a desktop failure cannot block an npm or CLI-binary release.
 It has no push, tag, `workflow_run`, or repository-dispatch trigger.
 
-The dispatch has exactly four inputs:
+The dispatch has exactly five inputs:
 
 | Input | Contract |
 | --- | --- |
+| `channel` | `staging` (default) or `stable`. Staging compiles with `ANYRAY_CONNECT_DESKTOP_DISTRIBUTION=staging` (app-staging, the `connect-desktop-staging` feed). Stable compiles with `production` (app.anyray.ai, the `connect-desktop` feed) and is refused unless `connect-desktop-staging-v<version>-<short-sha>` already published with its signed manifest. |
 | `version` | Explicit plain `x.y.z`; `latest` and moving ranges are rejected. |
 | `source_sha` | Exact lowercase 40-hex commit in the private `anyrayHQ/monorepo`; it must be reachable from the fetched `origin/main`. The workflow never checks out moving `main`. |
 | `min_version` | Optional numeric dotted version with two to four components. Installs older than this floor update without asking; empty omits `minVersion` from the staging manifest. |
-| `dry_run` | Defaults to `true`. A dry run retains signed assets only as a workflow artifact. `false` creates the versioned prerelease and re-points the prerelease tag `connect-desktop-staging`; neither becomes latest. |
+| `dry_run` | Defaults to `true`. A dry run retains signed assets only as a workflow artifact. `false` creates the versioned release and re-points the channel's feed release; neither becomes latest. |
 
-There is deliberately no stable/public selector. Before a staging prerelease is
-created, the workflow records `releases/latest`; after publication it requires
-that value to be unchanged. A non-dry run also updates the prerelease feed
-`connect-desktop-staging` with only the signed update manifest. The lane never
-writes `connect-update.json`, `SHA256SUMS` in an existing CLI release, npm,
-Homebrew, Winget, `connect.sh`, `connect.ps1`, or any current install path.
-The stable `connect-desktop` updater feed is not published yet.
+| | staging | stable |
+| --- | --- | --- |
+| Versioned release | `connect-desktop-staging-v<version>-<short-sha>`, prerelease | `connect-desktop-v<version>-<short-sha>`, full release |
+| Feed release (moving, prerelease) | `connect-desktop-staging` | `connect-desktop` |
+| Feed contents | `connect-desktop-staging.json` + `.asc` | `connect-desktop.json` + `.asc`, plus unversioned `anyray-connect-desktop-{macos-universal.pkg,windows-x64.msi,linux-x64.deb,linux-x64.rpm}` |
+| Manifest `artifact` | `anyray-connect-desktop-staging` | `anyray-connect-desktop` |
+
+The channel names mirror the engine's lane table
+(`connect/src/util/desktopUpdate.ts` in the monorepo) through
+`scripts/desktop-channel.mjs`; an app rejects a feed whose `artifact` or tag
+prefix is not its own, so a staging app never installs a stable build or the
+reverse. Both channels publish with `--latest=false`: `releases/latest` belongs
+to the CLI. The workflow records it before publication and requires it
+unchanged after. The lane never writes `connect-update.json`, `SHA256SUMS` in
+an existing CLI release, npm, Homebrew, Winget, `connect.sh`, `connect.ps1`, or
+any current install path.
+
+The stable feed's unversioned installers are the public download links the
+docs download page and the console's enrollment page point at:
+`https://github.com/anyrayHQ/install/releases/download/connect-desktop/anyray-connect-desktop-macos-universal.pkg`,
+and likewise for the MSI, deb and rpm. They are byte-identical to the
+versioned release's files, and they move with the feed in one switch.
+
+### Promoting a build to stable
+
+1. Dispatch with `channel: staging`, `dry_run` unchecked. Install that build on
+   macOS, Windows and Linux and confirm sign-in, update and uninstall.
+2. Dispatch again with `channel: stable`, the **same** `version` and
+   `source_sha`. Leave `dry_run` checked for the first rehearsal if you want;
+   the staging gate applies to dry runs too.
+3. Uncheck `dry_run` and dispatch. The versioned stable release is created,
+   then the `connect-desktop` feed and download links switch to it.
+
+Stable rebuilds from source with the production marker. It does not copy the
+staging bytes, so the stable artifact carries the same commit and version but
+its own signatures and checksums.
 
 Versioned releases are create-only: redispatching the same version/source cannot
 replace their bytes. Use a new version/source for a rebuild. If publication of
 the feed fails after the versioned release was created, recover the feed and
-run `node scripts/publish-desktop-feed.mjs` with `REPO`, `VERSION`, `SHORT_SHA`,
-and `GH_TOKEN` set, from a directory containing `assets/` with the original
-manifest and signature downloaded from that release. Do not regenerate them.
+run `node scripts/publish-desktop-feed.mjs` with `REPO`, `VERSION`,
+`SOURCE_SHA`, `CHANNEL` and `GH_TOKEN` set, from a directory containing
+`assets/` with the original manifest, signature and (stable) installers
+downloaded from that release. Do not regenerate them.
 
 Feed publication aborts on lookup errors, malformed versions, and backward
 version changes. Both replacement assets upload as `.pending` before any live
@@ -503,28 +534,28 @@ abandoned `.pending` assets. If the new canonical pair is already valid and the
 switch succeeded, remove only the old `.previous` backups. Never delete or
 rebuild the versioned release to repair a feed.
 
-The desktop app fetches `connect-desktop-staging.json` from the
-`connect-desktop-staging` release. It downloads the artifact named there from
+The desktop app fetches its channel's manifest (`connect-desktop-staging.json`
+or `connect-desktop.json`) from the feed release. It downloads the artifact named there from
 the versioned prerelease. It verifies its sha256 from the manifest and its Apple
 or Microsoft signature before installing; no updater key exists.
 
-Invoke it from Actions → **Release Anyray Connect desktop (staging only)**.
+Invoke it from Actions → **Release Anyray Connect desktop**.
 The workflow must itself be dispatched from the install repository's `main`
 branch; its first job rejects any other workflow ref before preflight reads
 secrets or any job fetches private source.
 Paste the Connect version and the full private-monorepo commit, leave `dry_run`
 checked for the first rehearsal, optionally set `min_version`, and inspect the
 retained
-`connect-desktop-staging-assets-<version>-<short-sha>` artifact. Unchecking it
-does not make the release public/stable; it creates the explicit versioned
-staging prerelease and re-points the staging-only updater feed.
+`<feed>-assets-<version>-<short-sha>` artifact. On staging, unchecking it
+creates the versioned staging prerelease and re-points the staging feed; only
+`channel: stable` publishes anything customers download.
 
 The retained/published set contains one signed/notarized universal macOS
 `.pkg`, one universal `.app.tar.gz` containing the signed and stapled app, one
 Authenticode-signed Windows x64 MSI, the two signed Windows inner executables
 for audit, Linux x64 deb/rpm packages plus the two raw inner executables,
 detached GPG signatures and public key, signed `SHA256SUMS`, and a signed
-`connect-desktop-staging.json` binding them to `version` and `source_sha`.
+channel manifest binding them to `version` and `source_sha`.
 
 ### Build time and early failure checks
 

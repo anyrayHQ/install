@@ -1,17 +1,20 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { test } from 'node:test';
 import { compareVersions, publishFeed } from './publish-desktop-feed.mjs';
+import { STABLE_DOWNLOADS, channelConfig, feedFiles } from './desktop-channel.mjs';
 
 const names = ['connect-desktop-staging.json', 'connect-desktop-staging.json.asc'];
-function fixture(t, { current = '1.0.0', fail = () => false, exists = true } = {}) {
+function fixture(t, { current = '1.0.0', fail = () => false, exists = true, channel = 'staging' } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'feed-test-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const manifest = { version: '2.0.0', tag: 'connect-desktop-staging-v2.0.0-abcdef' };
-  for (const name of names) writeFileSync(join(directory, name), JSON.stringify(manifest));
-  const assets = names.map((name, index) => ({ id: index + 1, name }));
+  const { feed, tagPrefix } = channelConfig(channel);
+  const manifest = { version: '2.0.0', tag: `${tagPrefix}2.0.0-abcdef` };
+  const files = feedFiles(channel, manifest.version);
+  for (const { source } of files) writeFileSync(join(directory, source), JSON.stringify(manifest));
+  const assets = files.map(({ name }, index) => ({ id: index + 1, name }));
   const calls = [];
   const run = (args) => {
     calls.push(args);
@@ -23,7 +26,7 @@ function fixture(t, { current = '1.0.0', fail = () => false, exists = true } = {
       return '';
     }
     const path = args[1];
-    if (path.endsWith('/releases')) return JSON.stringify([exists ? [{ id: 10, tag_name: 'connect-desktop-staging', prerelease: true }] : []]);
+    if (path.endsWith('/releases')) return JSON.stringify([exists ? [{ id: 10, tag_name: feed, prerelease: true }] : []]);
     if (path.endsWith('/10/assets')) return JSON.stringify([assets]);
     const id = Number(path.split('/').at(-1));
     const asset = assets.find((item) => item.id === id);
@@ -40,8 +43,8 @@ function fixture(t, { current = '1.0.0', fail = () => false, exists = true } = {
     }
     return JSON.stringify(id === 1 ? { version: current } : manifest);
   };
-  return { assets, calls, publish: () => publishFeed({ repo: 'anyrayHQ/install', version: manifest.version,
-    tag: manifest.tag, assetsDir: directory }, run) };
+  return { assets, calls, names: files.map(({ name }) => name), publish: () => publishFeed({
+    repo: 'anyrayHQ/install', version: manifest.version, tag: manifest.tag, channel, assetsDir: directory }, run) };
 }
 
 test('version comparison is numeric and rejects missing/malformed versions', () => {
@@ -160,4 +163,58 @@ test('rollback reports every failure after attempting every restoration', (t) =>
   });
   assert.deepEqual(f.calls.filter((args) => args.includes('PATCH')).slice(-4)
     .map((args) => Number(args[1].split('/').at(-1))), [4, 2, 3, 1]);
+});
+
+test('the stable feed serves its signed manifest plus one unversioned installer per OS', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'feed-test-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const version = '2.0.0';
+  const manifest = { version, tag: 'connect-desktop-v2.0.0-abcdef' };
+  for (const name of ['connect-desktop.json', 'connect-desktop.json.asc']) {
+    writeFileSync(join(directory, name), JSON.stringify(manifest));
+  }
+  for (const suffix of Object.keys(STABLE_DOWNLOADS)) {
+    writeFileSync(join(directory, `anyray-connect-desktop-${version}${suffix}`), suffix);
+  }
+  const calls = [];
+  const run = (args) => {
+    calls.push(args);
+    if (args[0] === 'api') return JSON.stringify([[{ id: 10, tag_name: 'connect-desktop-staging', prerelease: true }]]);
+    // The files are copied to a temp dir that is removed after create; read them now.
+    if (args[1] === 'create') calls.uploaded = args.slice(args.indexOf('--latest=false') + 1)
+      .map((path) => [basename(path), readFileSync(path, 'utf8')]);
+    return '';
+  };
+  publishFeed({ repo: 'anyrayHQ/install', version, tag: manifest.tag, channel: 'stable', assetsDir: directory }, run);
+  const create = calls.find((args) => args[0] === 'release' && args[1] === 'create');
+  assert.equal(create[2], 'connect-desktop');
+  assert.ok(create.includes('--latest=false'));
+  assert.deepEqual(calls.uploaded.map(([name]) => name), feedFiles('stable', version).map(({ name }) => name));
+  assert.deepEqual(calls.uploaded.slice(2).map(([, body]) => body), Object.keys(STABLE_DOWNLOADS));
+  assert.ok(calls.uploaded.slice(2).every(([name]) => !name.includes(version)));
+});
+
+test('the staging feed never carries installers, only the signed manifest pair', () => {
+  assert.deepEqual(feedFiles('staging', '2.0.0').map(({ name }) => name), names);
+  assert.throws(() => feedFiles('production', '2.0.0'), /Unknown desktop channel/);
+});
+
+test('updating an existing stable feed switches all six assets and removes backups last', (t) => {
+  const f = fixture(t, { channel: 'stable' });
+  assert.equal(f.names.length, 6);
+  f.publish();
+  assert.deepEqual(f.assets.map((asset) => asset.name), f.names);
+  assert.ok(f.assets.every((asset) => asset.id > 6), 'every live asset is a new upload');
+  assert.ok(f.calls.findIndex((args) => args[1] === 'upload') < f.calls.findIndex((args) => args.includes('PATCH')));
+  assert.ok(f.calls.findIndex((args) => args[1] === 'edit') < f.calls.findIndex((args) => args.includes('DELETE')));
+});
+
+test('a stable switch failing on an installer restores every old asset', (t) => {
+  // Asset 10 is the second installer's candidate: manifest pair and one installer already switched.
+  const f = fixture(t, { channel: 'stable', fail: (args) => args.includes('PATCH') && args[1].endsWith('/10') });
+  assert.throws(f.publish);
+  assert.deepEqual(f.assets.slice(0, 6).map((asset) => asset.name), f.names);
+  assert.ok(f.assets.slice(6).every((asset) => asset.name.endsWith('.pending')));
+  assert.ok(!f.calls.some((args) => args.includes('DELETE')));
+  assert.throws(f.publish, /Incomplete feed publication/);
 });

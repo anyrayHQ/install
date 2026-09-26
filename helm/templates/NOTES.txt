@@ -39,8 +39,12 @@ Availability of this release:
 {{- else }}
   gateway    replicas {{ if .Values.gateway.autoscaling.enabled }}{{ .Values.gateway.autoscaling.minReplicas }}-{{ .Values.gateway.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.gateway.replicas }}{{ end }}, rolling update with maxUnavailable 0
 {{- end }}
-  optimizer  replicas {{ if .Values.optimizer.autoscaling.enabled }}{{ .Values.optimizer.autoscaling.minReplicas }}-{{ .Values.optimizer.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.optimizer.replicas }}{{ end }}{{ if .Values.optimizer.persistence.enabled }}, Recreate rollout{{ end }}
+  optimizer  replicas {{ if .Values.optimizer.autoscaling.enabled }}{{ .Values.optimizer.autoscaling.minReplicas }}-{{ .Values.optimizer.autoscaling.maxReplicas }} (HPA){{ else }}{{ include "anyray.optimizerReplicas" . }}{{ end }}{{ if .Values.optimizer.persistence.enabled }}, Recreate rollout{{ end }}
   proxy      replicas {{ if .Values.proxy.autoscaling.enabled }}{{ .Values.proxy.autoscaling.minReplicas }}-{{ .Values.proxy.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.proxy.replicas }}{{ end }}
+{{- $ec := index .Values "endpoint-control" }}
+{{- if $ec.enabled }}
+  endpoint-control  replicas {{ if $ec.autoscaling.enabled }}{{ $ec.autoscaling.minReplicas }}-{{ $ec.autoscaling.maxReplicas }} (HPA){{ else }}{{ $ec.replicas }}{{ end }}
+{{- end }}
 {{- if .Values.postgres.enabled }}
   postgres   BUNDLED, single pod. This is the one part of the stack that cannot
              fail over, and the gateway reads client keys from it on the auth

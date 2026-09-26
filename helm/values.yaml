@@ -302,8 +302,12 @@ gateway:
   # persistence is off below; with the ReadWriteOnce volume mounted the chart
   # refuses anything above 1.
   replicas: 2
-  # Autoscaling needs gateway.persistence.enabled=false because the bundled data
-  # PVC is ReadWriteOnce. Use an external/shared state backend before enabling.
+  # Opt-in. Scaling IN terminates pods mid-session, and each one costs money:
+  # spend rows still being written are dropped, open streams are cut, and the
+  # per-pod prefix memo that keeps a fail-open turn byte-identical starts cold on
+  # every new pod. Fixed replicas give the redundancy without that churn. Needs
+  # gateway.persistence.enabled=false and a metrics server; size the database's
+  # connection limit for maxReplicas first (see postgres.maxConnections).
   autoscaling:
     enabled: false
     minReplicas: 2
@@ -421,18 +425,25 @@ gateway:
 
 # Optimizer
 optimizer:
-  # replicas > 1 or autoscaling needs gateway.contentMode != off AND a non-empty
-  # ANYRAY_CONTENT_KEY, else the durable CCR stash degrades to per-pod in-memory
-  # (cross-replica retrieval breaks). Only off is render-guarded, which is why
-  # this stays at 1: raising the default would refuse to render for every
-  # contentMode: off install. Raise it yourself once content mode is on — a
-  # second replica is what keeps the Service answering when one pod's event loop
-  # is blocked by an onnxruntime inference, which a single pod cannot do (the
-  # kernel accept backlog fills and new connections are REFUSED while the pod
-  # stays Ready and un-restarted; the gateway books that as `error:econnrefused`
-  # and holds the session on original bytes for 15 minutes).
-  replicas: 1
-  # Autoscaling also needs optimizer.persistence.enabled=false, now the default.
+  # Two by default since chart 0.8.0. A second replica is what keeps
+  # the Service answering when one pod's event loop is blocked by an onnxruntime
+  # inference, which a single pod cannot do (the kernel accept backlog fills and
+  # new connections are REFUSED while the pod stays Ready and un-restarted; the
+  # gateway books that as `error:econnrefused` and holds the session on original
+  # bytes for 15 minutes).
+  #
+  # Left unset, it resolves to 2, or to 1 when either makes two unsafe:
+  # optimizer.persistence.enabled=true (the volume is ReadWriteOnce), or an image
+  # older than v1.10.403, where a retrieval handle minted on one pod may not
+  # resolve on another. Set a number to override; the chart still refuses more
+  # than one replica with persistence on, or below v1.10.403 with
+  # gateway.contentMode: off.
+  replicas:
+  # Opt-in, and the least safe workload to autoscale: removing an optimizer pod
+  # resets the gateway connections still pointed at it, and each of those turns
+  # falls back to the original request (a prompt-cache bust on a warm session).
+  # CPU is also a poor signal for it: onnxruntime bursts to the limit and its
+  # real failure mode (a blocked event loop) never shows in a CPU average.
   autoscaling:
     enabled: false
     minReplicas: 2
@@ -511,7 +522,14 @@ endpoint-control:
   #     pull and the Deployment would sit in ImagePullBackOff forever, so an
   #     `helm upgrade --wait` (what the AKS/GKE scripts run) times out.
   enabled: true
-  replicas: 1
+  # Two by default since chart 0.8.0. Stateless: fleetd check-ins, script
+  # leases and policy results all go through Postgres, so either pod answers.
+  replicas: 2
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
   # Public origin fleetd is pointed at. Leave blank on an Ingress/HTTPRoute
   # install and it defaults to https://<host>; set it explicitly for
   # LoadBalancer / NodePort / non-TLS installs, where the chart routes no
@@ -532,6 +550,14 @@ endpoint-control:
 # and reads them in-process.
 postgres:
   enabled: true
+  # Connection limit for the bundled Postgres (the image default is 100). Each
+  # gateway pod opens up to 24 connections at peak from v1.10.431, and each
+  # optimizer and endpoint-control pod up to 8. The default two of each use up
+  # to 80 connections. On older images, each gateway pod uses about 47 and each
+  # optimizer and endpoint-control pod about 20, or ~175 for two of each. Raise
+  # it before raising replicas or enabling an HPA.
+  # External Postgres: size its limit the same way.
+  maxConnections: 300
   # The bundled Postgres is a SINGLE pod on a ReadWriteOnce volume. It is sized
   # for a small team and it is the stack's one unavoidable single point of
   # failure: the gateway's auth hot path reads client keys from it, so while it

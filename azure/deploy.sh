@@ -18,7 +18,8 @@
 #   CLUSTER           AKS cluster name (default: anyray)
 #   NAMESPACE         Kubernetes namespace (default: anyray)
 #   NODE_VM_SIZE      Node pool VM size (default: Standard_D2s_v5)
-#   NODE_COUNT        Node pool size (default: 2)
+#   NODE_COUNT        Initial node pool size (default: 3)
+#   NODE_MAX_COUNT    Cluster-autoscaler ceiling (default: 6)
 #   ALLOWED_CIDR      CIDR allowed to reach the console/gateway LBs. REQUIRED.
 #                     Scope to your office/VPN range — never 0.0.0.0/0.
 #   DEPLOYMENT_TOKEN  Anyray Cloud deployment token (adt_...). REQUIRED for metering.
@@ -47,7 +48,12 @@ RESOURCE_GROUP="${RESOURCE_GROUP:-anyray}"
 CLUSTER="${CLUSTER:-anyray}"
 NAMESPACE="${NAMESPACE:-anyray}"
 NODE_VM_SIZE="${NODE_VM_SIZE:-Standard_D2s_v5}"
-NODE_COUNT="${NODE_COUNT:-2}"
+# Three, autoscaled up to NODE_MAX_COUNT: from chart 0.8.0 every workload runs
+# two pods, which request ~3 vCPU before a rollout surges one more optimizer
+# (1 vCPU). Two D2s_v5 nodes leave that surge Pending, so `helm upgrade --wait`
+# times out.
+NODE_COUNT="${NODE_COUNT:-3}"
+NODE_MAX_COUNT="${NODE_MAX_COUNT:-6}"
 IMAGE_TAG="${IMAGE_TAG:-policy-stable}"
 DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}"
 ALLOWED_CIDR="${ALLOWED_CIDR:-}"
@@ -101,6 +107,34 @@ az group create --name "$RESOURCE_GROUP" --location "$LOCATION" >/dev/null
 
 if az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER" >/dev/null 2>&1; then
   echo "→ AKS cluster $CLUSTER already exists — reusing it."
+  # Chart 0.8.0 runs two of every service; a rollout then needs ~4 vCPU of
+  # requests, which an existing 2 x D2s_v5 pool cannot schedule. Turn on the
+  # cluster autoscaler for a pool that has none, or raise an existing pool's
+  # ceiling when needed. Never shrink either bound.
+  POOL="$(az aks nodepool list --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+    --query "[?mode=='System'] | [0].name" -o tsv)"
+  if [ -n "$POOL" ]; then
+    if [ "$(az aks nodepool show --resource-group "$RESOURCE_GROUP" \
+      --cluster-name "$CLUSTER" --name "$POOL" --query enableAutoScaling -o tsv)" != "true" ]; then
+      CUR="$(az aks nodepool show --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+        --name "$POOL" --query count -o tsv)"
+      MIN=$(( CUR > NODE_COUNT ? CUR : NODE_COUNT ))
+      MAX=$(( MIN > NODE_MAX_COUNT ? MIN : NODE_MAX_COUNT ))
+      echo "→ Enabling the cluster autoscaler on node pool $POOL ($MIN-$MAX nodes)…"
+      az aks nodepool update --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+        --name "$POOL" --enable-cluster-autoscaler --min-count "$MIN" --max-count "$MAX" >/dev/null
+    else
+      MIN="$(az aks nodepool show --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+        --name "$POOL" --query minCount -o tsv)"
+      MAX="$(az aks nodepool show --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+        --name "$POOL" --query maxCount -o tsv)"
+      if [ "$MAX" -lt "$NODE_MAX_COUNT" ]; then
+        echo "→ Raising the cluster autoscaler ceiling on node pool $POOL ($MIN-$NODE_MAX_COUNT nodes)…"
+        az aks nodepool update --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+          --name "$POOL" --update-cluster-autoscaler --min-count "$MIN" --max-count "$NODE_MAX_COUNT" >/dev/null
+      fi
+    fi
+  fi
 else
   echo "→ Creating AKS cluster $CLUSTER in $LOCATION (this takes a few minutes)…"
   az aks create \
@@ -109,6 +143,9 @@ else
     --location "$LOCATION" \
     --node-count "$NODE_COUNT" \
     --node-vm-size "$NODE_VM_SIZE" \
+    --enable-cluster-autoscaler \
+    --min-count "$NODE_COUNT" \
+    --max-count "$NODE_MAX_COUNT" \
     --enable-managed-identity \
     --generate-ssh-keys
 fi

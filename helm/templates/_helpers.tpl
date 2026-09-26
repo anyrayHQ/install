@@ -506,6 +506,21 @@ silently keeps the old single-replica posture.
        `git tag` before changing it. */ -}}
 {{- define "anyray.haFloor" -}}v1.10.224{{- end }}
 
+{{- /* First appVersion where a retrieval handle resolves on every optimizer
+       replica, with or without a content key (ANY-439, v1.10.403; ANY-334 and
+       ANY-407 had already stopped per-pod mints under content mode off). */}}
+{{- define "anyray.multiOptimizerFloor" -}}v1.10.403{{- end }}
+
+{{- /* Optimizer replica count. An explicit value wins; unset resolves to 2, or
+       to 1 wherever a default of 2 would render stricter than chart 0.7.x did
+       (persistence on, or an image below the multi-replica floor). */}}
+{{- define "anyray.optimizerReplicas" -}}
+{{- $r := .Values.optimizer.replicas -}}
+{{- if kindIs "invalid" $r -}}
+{{- if or .Values.optimizer.persistence.enabled (not (include "anyray.atLeastAppVersion" (dict "component" "optimizer" "floor" (include "anyray.multiOptimizerFloor" .) "context" .))) -}}1{{- else -}}2{{- end -}}
+{{- else -}}{{ int $r }}{{- end -}}
+{{- end }}
+
 {{/*
 Whether the resolved image for a component is at least `floor`.
 

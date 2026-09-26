@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { verifyPublication } from './verify-connect-desktop-publication.mjs';
 
-const options = { repo: 'example/install', version: '1.2.3', sourceSha: 'a'.repeat(40), dryRun: false };
+const options = { repo: 'example/install', version: '1.2.3', sourceSha: 'a'.repeat(40), channel: 'staging', dryRun: false };
 const tag = 'connect-desktop-staging-v1.2.3-aaaaaaaaaaaa';
 const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 const fixtures = (overrides = {}) => async (url) => {
@@ -53,4 +53,48 @@ test('a damaged or newer staging feed rejects the build', async () => {
   await assert.rejects(verifyPublication(options, fixtures({ ...base,
     'https://github.com/example/install/releases/download/connect-desktop-staging/connect-desktop-staging.json': response({ version: '2.0.0' }),
   })), /downgrade/);
+});
+
+const stable = { ...options, channel: 'stable' };
+const stagingTag = 'connect-desktop-staging-v1.2.3-aaaaaaaaaaaa';
+const stableTag = 'connect-desktop-v1.2.3-aaaaaaaaaaaa';
+const stagedOn = (assets = [{ name: 'connect-desktop-staging.json' }]) => ({
+  [`releases/tags/${stagingTag}`]: response({ id: 7 }),
+  'releases/7/assets?per_page=100&page=1': response(assets),
+  [`releases/tags/${stableTag}`]: response(null, 404),
+  'releases/tags/connect-desktop': response(null, 404),
+});
+
+test('stable refuses a version and commit that never published on staging, dry runs included', async () => {
+  for (const dryRun of [false, true]) {
+    await assert.rejects(verifyPublication({ ...stable, dryRun }, fixtures({ [`releases/tags/${stagingTag}`]: response(null, 404) })),
+      /publish 1\.2\.3 at this commit on staging first/);
+  }
+  // Same version from another commit is not the tested build.
+  const other = { ...stable, sourceSha: 'b'.repeat(40) };
+  await assert.rejects(verifyPublication(other, fixtures({ ...stagedOn(),
+    'releases/tags/connect-desktop-staging-v1.2.3-bbbbbbbbbbbb': response(null, 404) })), /on staging first/);
+});
+
+test('stable refuses a staging release that never finished publishing its manifest', async () => {
+  await assert.rejects(verifyPublication(stable, fixtures(stagedOn([{ name: 'SHA256SUMS' }]))), /did not finish publishing/);
+});
+
+test('stable after staging passes, and checks the stable feed, never the staging one', async () => {
+  await verifyPublication(stable, fixtures(stagedOn()));
+  await verifyPublication({ ...stable, dryRun: true }, fixtures(stagedOn()));
+  await assert.rejects(verifyPublication(stable, fixtures({ ...stagedOn(), [`releases/tags/${stableTag}`]: response({}) })), /already exists/);
+  const feed = [{ name: 'connect-desktop.json' }, { name: 'connect-desktop.json.asc' }];
+  const live = {
+    ...stagedOn(),
+    'releases/tags/connect-desktop': response({ id: 9, prerelease: true }),
+    'releases/9/assets?per_page=100&page=1': response(feed),
+    'https://github.com/example/install/releases/download/connect-desktop/connect-desktop.json': response({ version: '2.0.0' }),
+  };
+  await assert.rejects(verifyPublication(stable, fixtures(live)), /downgrade the connect-desktop feed/);
+});
+
+test('an unknown channel fails before any request', async () => {
+  const request = () => assert.fail('no request for an unknown channel');
+  await assert.rejects(verifyPublication({ ...options, channel: 'production' }, request), /Unknown desktop channel/);
 });

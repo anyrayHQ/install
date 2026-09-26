@@ -1,6 +1,9 @@
-name: Release Anyray Connect desktop (staging only)
+name: Release Anyray Connect desktop
 
 # Manual, isolated release lane for the self-contained Tauri desktop app.
+# `channel: staging` (default) builds against app-staging and the staging feed;
+# `channel: stable` builds against app.anyray.ai and the production feed, and is
+# refused for any version/commit that has not already published on staging.
 #
 # This workflow is deliberately NOT called by release-connect-binaries.yml and
 # has no push, tag, workflow_run, or repository_dispatch trigger. It never
@@ -41,8 +44,14 @@ on:
         required: false
         type: string
         default: ''
+      channel:
+        description: 'staging builds for app-staging and the staging feed. stable builds for production and requires this version and source_sha to have published on staging first.'
+        required: true
+        type: choice
+        options: [staging, stable]
+        default: staging
       dry_run:
-        description: 'Build, sign, notarize, and retain a workflow artifact only. When false, publish the versioned staging prerelease and moving updater feed; neither becomes latest.'
+        description: 'Build, sign, notarize, and retain a workflow artifact only. When false, publish the versioned release and moving updater feed for the channel; neither becomes latest.'
         required: false
         type: boolean
         default: true
@@ -101,7 +110,13 @@ jobs:
       source_sha: ${{ steps.inputs.outputs.source_sha }}
       short_sha: ${{ steps.inputs.outputs.short_sha }}
       min_version: ${{ steps.inputs.outputs.min_version }}
+      channel: ${{ steps.inputs.outputs.channel }}
+      distribution: ${{ steps.inputs.outputs.distribution }}
+      feed: ${{ steps.inputs.outputs.feed }}
+      artifact: ${{ steps.inputs.outputs.artifact }}
+      tag: ${{ steps.inputs.outputs.tag }}
     env:
+      CHANNEL_INPUT: ${{ inputs.channel }}
       VERSION_INPUT: ${{ inputs.version }}
       SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
       MIN_VERSION_INPUT: ${{ inputs.min_version }}
@@ -134,6 +149,12 @@ jobs:
             echo "::error::source_sha must be an exact lowercase 40-hex commit SHA"
             exit 1
           fi
+          # Mirrors scripts/desktop-channel.mjs; the workflow test holds them together.
+          case "$CHANNEL_INPUT" in
+            staging) distribution=staging feed=connect-desktop-staging artifact=anyray-connect-desktop-staging ;;
+            stable) distribution=production feed=connect-desktop artifact=anyray-connect-desktop ;;
+            *) echo "::error::channel must be staging or stable, got '$CHANNEL_INPUT'"; exit 1 ;;
+          esac
           if [[ -n "$MIN_VERSION_INPUT" && ! "$MIN_VERSION_INPUT" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
             echo "::error::min_version must be empty or a numeric dotted version with two to four components, got '$MIN_VERSION_INPUT'"
             exit 1
@@ -152,7 +173,7 @@ jobs:
             [ -n "${!name:-}" ] || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
-            echo "::error::desktop staging release prerequisites are incomplete. Missing:$missing (see RELEASING.md)"
+            echo "::error::desktop release prerequisites are incomplete. Missing:$missing (see RELEASING.md)"
             exit 1
           fi
 
@@ -161,6 +182,11 @@ jobs:
             echo "source_sha=$SOURCE_SHA_INPUT"
             echo "short_sha=${SOURCE_SHA_INPUT:0:12}"
             echo "min_version=$MIN_VERSION_INPUT"
+            echo "channel=$CHANNEL_INPUT"
+            echo "distribution=$distribution"
+            echo "feed=$feed"
+            echo "artifact=$artifact"
+            echo "tag=${feed}-v${VERSION_INPUT}-${SOURCE_SHA_INPUT:0:12}"
           } >> "$GITHUB_OUTPUT"
           echo "desktop release inputs are explicit and all signing lanes are configured"
 
@@ -208,6 +234,7 @@ jobs:
           VERSION: ${{ needs.preflight.outputs.version }}
           SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
           MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
+          CHANNEL: ${{ needs.preflight.outputs.channel }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: node scripts/verify-connect-desktop-publication.mjs
 
@@ -349,7 +376,7 @@ jobs:
 
       - name: Build the unsigned universal Tauri app bundle
         env:
-          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging
+          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: ${{ needs.preflight.outputs.distribution }}
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
@@ -1425,7 +1452,7 @@ jobs:
       - name: Compile the unsigned Windows app executable
         shell: pwsh
         env:
-          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging
+          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: ${{ needs.preflight.outputs.distribution }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
@@ -2170,7 +2197,7 @@ jobs:
           )
       - name: Compile the raw Linux app executable
         env:
-          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: staging
+          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: ${{ needs.preflight.outputs.distribution }}
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
@@ -2612,7 +2639,7 @@ jobs:
           assert_existing_state_untouched
 
 
-  assemble-signed-staging:
+  assemble-signed-release:
     needs:
       - preflight
       - verify-macos-signed
@@ -2682,62 +2709,63 @@ jobs:
             sha256sum -- * > SHA256SUMS
           )
 
-      - name: Generate and sign the content-addressed staging manifest
+      - name: Generate and sign the content-addressed channel manifest
         env:
           MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
-          SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
+          FEED: ${{ needs.preflight.outputs.feed }}
+          ARTIFACT: ${{ needs.preflight.outputs.artifact }}
+          TAG: ${{ needs.preflight.outputs.tag }}
         run: |
           set -euo pipefail
+          manifest="assets/${FEED}.json"
           jq -Rn \
             --arg version "$VERSION" \
             --arg sourceCommit "$SOURCE_SHA" \
             --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg tag "connect-desktop-staging-v${VERSION}-${SHORT_SHA}" \
+            --arg tag "$TAG" \
+            --arg artifact "$ARTIFACT" \
+            --arg feed "${FEED}.json" \
             --arg min "$MIN_VERSION" \
             '[inputs | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")] as $artifacts
-             | {schemaVersion: 1, artifact: "anyray-connect-desktop-staging", version: $version, sourceCommit: $sourceCommit, createdAt: $createdAt, tag: $tag}
+             | {schemaVersion: 1, artifact: $artifact, version: $version, sourceCommit: $sourceCommit, createdAt: $createdAt, tag: $tag}
              + (if $min == "" then {} else {minVersion: $min} end)
-             + {updater: {feed: "connect-desktop-staging.json"}, artifacts: $artifacts}' \
-            assets/SHA256SUMS > assets/connect-desktop-staging.json
+             + {updater: {feed: $feed}, artifacts: $artifacts}' \
+            assets/SHA256SUMS > "$manifest"
           key_check="$RUNNER_TEMP/connect-desktop-public-key-check"
           mkdir -p "$key_check"
           ./scripts/sign-gpg-artifacts.sh "$key_check" \
-            assets/SHA256SUMS assets/connect-desktop-staging.json
+            assets/SHA256SUMS "$manifest"
           cmp "$key_check/anyray-endpoint-signing-key.asc" \
             assets/anyray-connect-desktop-signing-key.asc
           export GNUPGHOME="$RUNNER_TEMP/gv"
           mkdir -m 700 "$GNUPGHOME"
           gpg --batch --import assets/anyray-connect-desktop-signing-key.asc
           gpg --batch --verify assets/SHA256SUMS.asc assets/SHA256SUMS
-          gpg --batch --verify \
-            assets/connect-desktop-staging.json.asc \
-            assets/connect-desktop-staging.json
-          test "$(jq -r .version assets/connect-desktop-staging.json)" = "$VERSION"
-          test "$(jq -r .sourceCommit assets/connect-desktop-staging.json)" = "$SOURCE_SHA"
-          test "$(jq -r .artifact assets/connect-desktop-staging.json)" = 'anyray-connect-desktop-staging'
-          test "$(jq -r .tag assets/connect-desktop-staging.json)" = "connect-desktop-staging-v${VERSION}-${SHORT_SHA}"
-          jq -e '.updater.feed == "connect-desktop-staging.json"' assets/connect-desktop-staging.json
-          jq -e '[.artifacts[] | select(.name | endswith(".app.tar.gz"))] | length == 1' \
-            assets/connect-desktop-staging.json
-          jq -e '[.artifacts[] | select(.name | endswith("windows-x64.msi"))] | length == 1' \
-            assets/connect-desktop-staging.json
+          gpg --batch --verify "${manifest}.asc" "$manifest"
+          test "$(jq -r .version "$manifest")" = "$VERSION"
+          test "$(jq -r .sourceCommit "$manifest")" = "$SOURCE_SHA"
+          test "$(jq -r .artifact "$manifest")" = "$ARTIFACT"
+          test "$(jq -r .tag "$manifest")" = "$TAG"
+          jq -e --arg feed "${FEED}.json" '.updater.feed == $feed' "$manifest"
+          jq -e '[.artifacts[] | select(.name | endswith(".app.tar.gz"))] | length == 1' "$manifest"
+          jq -e '[.artifacts[] | select(.name | endswith("windows-x64.msi"))] | length == 1' "$manifest"
           cat assets/SHA256SUMS
 
       - uses: ./.github/actions/s3-artifact-upload
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
-          name: connect-desktop-staging-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
+          name: ${{ needs.preflight.outputs.feed }}-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
           path: assets/
           if-no-files-found: error
 
-  publish-staging-prerelease:
-    needs: [preflight, assemble-signed-staging]
+  publish-release:
+    needs: [preflight, assemble-signed-release]
     if: ${{ !inputs.dry_run }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
-    # Every run rewrites the one staging feed; serialize across versions.
+    # Every run rewrites its channel's one feed; serialize across versions.
     concurrency:
-      group: connect-desktop-staging-feed
+      group: ${{ needs.preflight.outputs.feed }}-feed
       cancel-in-progress: false
     permissions:
       id-token: write # assume the CI-artifacts role for the S3 handoff
@@ -2746,6 +2774,9 @@ jobs:
       VERSION: ${{ needs.preflight.outputs.version }}
       SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
       SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
+      CHANNEL: ${{ needs.preflight.outputs.channel }}
+      FEED: ${{ needs.preflight.outputs.feed }}
+      TAG: ${{ needs.preflight.outputs.tag }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
     steps:
@@ -2776,50 +2807,60 @@ jobs:
       - uses: ./.github/actions/s3-artifact-download
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
-          name: connect-desktop-staging-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
+          name: ${{ needs.preflight.outputs.feed }}-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
           path: assets
-      - name: Publish only an explicit staging prerelease and preserve latest
+      - name: Publish the versioned channel release and preserve latest
         run: |
           set -euo pipefail
-          tag="connect-desktop-staging-v${VERSION}-${SHORT_SHA}"
           latest_before="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
-          case "$tag" in
-            connect-desktop-staging-v*) ;;
-            *) echo "::error::refusing non-staging desktop tag: $tag"; exit 1 ;;
+          case "$CHANNEL:$TAG" in
+            staging:connect-desktop-staging-v*) prerelease=true ;;
+            stable:connect-desktop-v*) prerelease=false ;;
+            *) echo "::error::refusing desktop tag $TAG on channel $CHANNEL"; exit 1 ;;
           esac
-          test "$(jq -r .version assets/connect-desktop-staging.json)" = "$VERSION"
-          test "$(jq -r .sourceCommit assets/connect-desktop-staging.json)" = "$SOURCE_SHA"
+          test "$(jq -r .version "assets/${FEED}.json")" = "$VERSION"
+          test "$(jq -r .sourceCommit "assets/${FEED}.json")" = "$SOURCE_SHA"
 
           # Create-only: an existing tag fails publication without changing bytes
           # referenced by a live or cached feed. Rebuilds need a new version/source.
-          gh release create "$tag" \
-            --title "Anyray Connect desktop ${VERSION} (${SHORT_SHA}, staging only)" \
-            --notes "Signed staging-only desktop installers and update manifest built from private monorepo commit ${SOURCE_SHA}. This versioned prerelease is deliberately never latest; connect.sh, connect.ps1, npm, Homebrew, Winget, and the existing CLI release lane are unchanged." \
-            --prerelease \
-            --latest=false \
-            assets/*
+          # --latest=false on both channels: releases/latest belongs to the CLI
+          # (connect.sh, connect.ps1 and its self-updater download through it).
+          if [ "$CHANNEL" = stable ]; then
+            gh release create "$TAG" \
+              --title "Anyray Connect desktop ${VERSION}" \
+              --notes "Signed desktop installers and update manifest built from private monorepo commit ${SOURCE_SHA}, the same commit and version published on staging as connect-desktop-staging-v${VERSION}-${SHORT_SHA}. Download from the connect-desktop release for a stable link per OS." \
+              --latest=false \
+              assets/*
+          else
+            gh release create "$TAG" \
+              --title "Anyray Connect desktop ${VERSION} (${SHORT_SHA}, staging only)" \
+              --notes "Signed staging-only desktop installers and update manifest built from private monorepo commit ${SOURCE_SHA}. This versioned prerelease is deliberately never latest; connect.sh, connect.ps1, npm, Homebrew, Winget, and the existing CLI release lane are unchanged." \
+              --prerelease \
+              --latest=false \
+              assets/*
+          fi
 
-          prerelease="$(gh api "repos/${REPO}/releases/tags/${tag}" --jq .prerelease)"
+          published="$(gh api "repos/${REPO}/releases/tags/${TAG}" --jq .prerelease)"
           latest_after="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
-          test "$prerelease" = true || {
-            echo "::error::$tag was not published as a prerelease"
+          test "$published" = "$prerelease" || {
+            echo "::error::$TAG published with prerelease=$published, expected $prerelease"
             exit 1
           }
           test "$latest_after" = "$latest_before" || {
-            echo "::error::desktop staging release changed releases/latest from $latest_before to $latest_after"
+            echo "::error::desktop $CHANNEL release changed releases/latest from $latest_before to $latest_after"
             exit 1
           }
-          echo "published staging prerelease $tag; releases/latest remains $latest_after"
+          echo "published $CHANNEL release $TAG; releases/latest remains $latest_after"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: 24
-      - name: Point the staging feed at this release
+      - name: Point the channel feed at this release
         run: |
           set -euo pipefail
           latest_before="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
           node scripts/publish-desktop-feed.mjs
           test "$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)" = "$latest_before" || {
             echo "::error::feed release changed releases/latest"; exit 1; }
-          curl -fsSL "https://github.com/${REPO}/releases/download/connect-desktop-staging/connect-desktop-staging.json" \
+          curl -fsSL "https://github.com/${REPO}/releases/download/${FEED}/${FEED}.json" \
             | jq -e --arg v "$VERSION" '.version == $v'

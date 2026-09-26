@@ -51,10 +51,23 @@ jobs:
       - name: Lint
         run: helm lint helm --set host=anyray.example.com --set postgres.storage=150Gi
 
-      - name: Chart renders with default values, at scale, and autoscaled
+      - name: Chart renders with expected replicas, at scale, and autoscaled
         run: |
           set -euo pipefail
-          helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi > /dev/null
+          assert_replicas() {
+            local case_name="$1" component="$2" expected="$3" actual
+            shift 3
+            actual="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
+              --show-only "templates/${component}.yaml" "$@" | sed -nE 's/^  replicas: ([0-9]+)$/\1/p')" || {
+              echo "::error::$case_name failed to render"
+              return 1
+            }
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::$case_name: expected $component Deployment replicas $expected, got ${actual:-<missing>}"
+              return 1
+            fi
+          }
+          assert_replicas "default values" optimizer 2
           helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
             --set gateway.persistence.enabled=false --set gateway.replicas=2 \
             --set optimizer.persistence.enabled=false --set optimizer.replicas=2 \
@@ -67,12 +80,15 @@ jobs:
           # files that rendered before it and must keep rendering: the default
           # falls back to 1 for persistence and for images below the
           # multi-replica floor, never a new refusal.
-          helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
-            --set optimizer.persistence.enabled=true > /dev/null
+          assert_replicas "optimizer persistence" optimizer 1 \
+            --set optimizer.persistence.enabled=true
           helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
             --set gateway.persistence.enabled=true --set gateway.replicas=1 > /dev/null
-          helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
-            --set gateway.contentMode=off --set image.tag=v1.10.380 > /dev/null
+          assert_replicas "gateway persistence" gateway 1 \
+            --set gateway.persistence.enabled=true --set gateway.replicas=1
+          assert_replicas "content mode off on v1.10.380" optimizer 1 \
+            --set gateway.contentMode=off --set image.tag=v1.10.380
+          assert_replicas "v1.10.400" optimizer 1 --set image.tag=v1.10.400
 
       - name: appVersion must be a pinned vX.Y.Z (never a moving tag)
         run: |

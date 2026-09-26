@@ -69,3 +69,28 @@ spec:
           type: Utilization
           averageUtilization: {{ .Values.proxy.autoscaling.targetCPUUtilizationPercentage }}
 {{- end }}
+{{- $ec := index .Values "endpoint-control" }}
+{{- if and $ec.enabled $ec.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "anyray.fullname" . }}-endpoint-control
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: endpoint-control
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "anyray.fullname" . }}-endpoint-control
+  minReplicas: {{ $ec.autoscaling.minReplicas }}
+  maxReplicas: {{ $ec.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $ec.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

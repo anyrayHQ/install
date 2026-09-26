@@ -22,7 +22,9 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: endpoint-control
 spec:
+  {{- if not $ec.autoscaling.enabled }}
   replicas: {{ $ec.replicas }}
+  {{- end }}
   # No volume to detach: surge a replacement, let it pass /readyz, then retire
   # the outgoing pod. maxUnavailable 0 keeps the agent plane reachable
   # throughout, so no fleetd check-in lands on an empty Service.

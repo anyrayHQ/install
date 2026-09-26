@@ -18,16 +18,16 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: optimizer
 spec:
-  {{- if .Values.optimizer.autoscaling.enabled }}
-  {{- if eq (toString .Values.gateway.contentMode) "off" }}
-  {{- fail "optimizer.autoscaling.enabled needs gateway.contentMode != off: the durable CCR stash is disabled when content mode is off, so retrieval handles won't resolve across replicas" }}
+  {{- /* Before appVersion v1.10.393 an optimizer with content mode off still
+         minted memory-only retrieval handles, which a peer replica cannot
+         resolve. From that release it mints none under off (ANY-334, ANY-407),
+         so several replicas are safe at every content mode. Only an older pin
+         with contentMode: off is refused. */}}
+  {{- $multi := or .Values.optimizer.autoscaling.enabled (gt (int .Values.optimizer.replicas) 1) }}
+  {{- if and $multi (eq (toString .Values.gateway.contentMode) "off") (not (include "anyray.atLeastAppVersion" (dict "component" "optimizer" "floor" (include "anyray.multiOptimizerOffFloor" .) "context" .))) }}
+  {{- fail (printf "more than one optimizer replica with gateway.contentMode=off needs an optimizer image of %s or newer (this renders %s): older images mint per-pod retrieval handles a peer replica cannot resolve. Upgrade the image, or set optimizer.autoscaling.enabled=false and optimizer.replicas=1." (include "anyray.multiOptimizerOffFloor" .) (include "anyray.effectiveImageTag" (dict "component" "optimizer" "context" .))) }}
   {{- end }}
-  {{- else }}
-  {{- if gt (int .Values.optimizer.replicas) 1 }}
-  {{- if eq (toString .Values.gateway.contentMode) "off" }}
-  {{- fail "optimizer.replicas > 1 needs gateway.contentMode != off: the durable CCR stash is disabled when content mode is off, so retrieval handles won't resolve across replicas" }}
-  {{- end }}
-  {{- end }}
+  {{- if not .Values.optimizer.autoscaling.enabled }}
   replicas: {{ .Values.optimizer.replicas }}
   {{- end }}
   {{- if .Values.optimizer.persistence.enabled }}

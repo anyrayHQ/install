@@ -1983,8 +1983,11 @@ jobs:
               if ($appProcess.HasExited) {
                 throw 'installed Windows tray exited before creating autostart state'
               }
-              $runValue = Get-ItemPropertyValue -LiteralPath $runKey -Name $runName `
-                -ErrorAction SilentlyContinue
+              # Get-ItemProperty, not the -Value cmdlet: on PowerShell 7 that one throws a terminating
+              # PSArgumentException when the key exists but the value does not yet,
+              # whatever -ErrorAction says, so the first poll killed the smoke.
+              $runValue = (Get-ItemProperty -LiteralPath $runKey -Name $runName `
+                -ErrorAction SilentlyContinue).$runName
               # The tray may be mid-write; a torn read means "not yet", not failure.
               try { $observedProfile = Get-Content -Raw -LiteralPath $state | ConvertFrom-Json }
               catch { $observedProfile = $null }

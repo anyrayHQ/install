@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const feed = 'connect-desktop-staging';
-const names = ['connect-desktop-staging.json', 'connect-desktop-staging.json.asc'];
+import { channelConfig, feedFiles, releaseTag } from './desktop-channel.mjs';
+
 const gh = (args) => execFileSync('gh', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 
 export function compareVersions(left, right) {
@@ -24,16 +24,26 @@ export function compareVersions(left, right) {
 
 // Upload both candidates before touching live names. Retain old bytes remotely
 // for recovery even if the runner is killed or a rollback API request fails.
-export function publishFeed({ repo, version, tag, assetsDir }, run = gh) {
+export function publishFeed({ repo, version, tag, channel, assetsDir }, run = gh) {
   compareVersions(version, version);
+  const { feed } = channelConfig(channel);
+  const files = feedFiles(channel, version);
+  const names = files.map(({ name }) => name);
+  const sources = files.map(({ source }) => join(assetsDir, source));
   const api = (path, ...args) => run(['api', `repos/${repo}/${path}`, ...args]);
   const releases = JSON.parse(api('releases', '--paginate', '--slurp')).flat();
   const release = releases.find((item) => item.tag_name === feed);
-  const notes = `Updater feed for staging desktop builds. Points at ${tag}. Install from the versioned prerelease.`;
+  const notes = `Updater feed for ${channel} desktop builds. Points at ${tag}.`;
   if (!release) {
     // Listing errors throw; only a successful listing permits first publication.
-    run(['release', 'create', feed, '--repo', repo, '--title', 'Anyray Connect desktop staging feed',
-      '--notes', notes, '--prerelease', '--latest=false', ...names.map((name) => join(assetsDir, name))]);
+    const directory = mkdtempSync(join(tmpdir(), 'desktop-feed-'));
+    try {
+      for (let i = 0; i < names.length; i++) copyFileSync(sources[i], join(directory, names[i]));
+      run(['release', 'create', feed, '--repo', repo, '--title', `Anyray Connect desktop ${channel} feed`,
+        '--notes', notes, '--prerelease', '--latest=false', ...names.map((name) => join(directory, name))]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
     return;
   }
   if (!release.prerelease) throw new Error('Refusing to replace a non-prerelease feed');
@@ -47,13 +57,13 @@ export function publishFeed({ repo, version, tag, assetsDir }, run = gh) {
     return asset;
   });
   const current = JSON.parse(api(`releases/assets/${previous[0].id}`, '-H', 'Accept: application/octet-stream'));
-  if (compareVersions(current.version, version) > 0) throw new Error('Refusing to downgrade the staging feed');
+  if (compareVersions(current.version, version) > 0) throw new Error(`Refusing to downgrade the ${channel} feed`);
 
   const directory = mkdtempSync(join(tmpdir(), 'desktop-feed-'));
   const renames = [];
   const rename = (id, name) => api(`releases/assets/${id}`, '-X', 'PATCH', '-f', `name=${name}`);
   try {
-    for (const name of names) copyFileSync(join(assetsDir, name), join(directory, `${name}.pending`));
+    for (let i = 0; i < names.length; i++) copyFileSync(sources[i], join(directory, `${names[i]}.pending`));
     run(['release', 'upload', feed, '--repo', repo, ...names.map((name) => join(directory, `${name}.pending`))]);
     const staged = JSON.parse(api(`releases/${release.id}/assets`, '--paginate', '--slurp')).flat();
     const candidates = names.map((name) => {
@@ -92,6 +102,6 @@ export function publishFeed({ repo, version, tag, assetsDir }, run = gh) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  publishFeed({ repo: process.env.REPO, version: process.env.VERSION,
-    tag: `connect-desktop-staging-v${process.env.VERSION}-${process.env.SHORT_SHA}`, assetsDir: 'assets' });
+  const { REPO: repo, VERSION: version, SOURCE_SHA: sourceSha, CHANNEL: channel } = process.env;
+  publishFeed({ repo, version, channel, tag: releaseTag(channel, version, sourceSha), assetsDir: 'assets' });
 }

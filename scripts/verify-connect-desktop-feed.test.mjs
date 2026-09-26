@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { test } from 'node:test';
 import { compareVersions, publishFeed } from './publish-desktop-feed.mjs';
+import { STABLE_DOWNLOADS, feedFiles } from './desktop-channel.mjs';
 
 const names = ['connect-desktop-staging.json', 'connect-desktop-staging.json.asc'];
 function fixture(t, { current = '1.0.0', fail = () => false, exists = true } = {}) {
@@ -41,7 +42,7 @@ function fixture(t, { current = '1.0.0', fail = () => false, exists = true } = {
     return JSON.stringify(id === 1 ? { version: current } : manifest);
   };
   return { assets, calls, publish: () => publishFeed({ repo: 'anyrayHQ/install', version: manifest.version,
-    tag: manifest.tag, assetsDir: directory }, run) };
+    tag: manifest.tag, channel: 'staging', assetsDir: directory }, run) };
 }
 
 test('version comparison is numeric and rejects missing/malformed versions', () => {
@@ -160,4 +161,38 @@ test('rollback reports every failure after attempting every restoration', (t) =>
   });
   assert.deepEqual(f.calls.filter((args) => args.includes('PATCH')).slice(-4)
     .map((args) => Number(args[1].split('/').at(-1))), [4, 2, 3, 1]);
+});
+
+test('the stable feed serves its signed manifest plus one unversioned installer per OS', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'feed-test-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const version = '2.0.0';
+  const manifest = { version, tag: 'connect-desktop-v2.0.0-abcdef' };
+  for (const name of ['connect-desktop.json', 'connect-desktop.json.asc']) {
+    writeFileSync(join(directory, name), JSON.stringify(manifest));
+  }
+  for (const suffix of Object.keys(STABLE_DOWNLOADS)) {
+    writeFileSync(join(directory, `anyray-connect-desktop-${version}${suffix}`), suffix);
+  }
+  const calls = [];
+  const run = (args) => {
+    calls.push(args);
+    if (args[0] === 'api') return JSON.stringify([[{ id: 10, tag_name: 'connect-desktop-staging', prerelease: true }]]);
+    // The files are copied to a temp dir that is removed after create; read them now.
+    if (args[1] === 'create') calls.uploaded = args.slice(args.indexOf('--latest=false') + 1)
+      .map((path) => [basename(path), readFileSync(path, 'utf8')]);
+    return '';
+  };
+  publishFeed({ repo: 'anyrayHQ/install', version, tag: manifest.tag, channel: 'stable', assetsDir: directory }, run);
+  const create = calls.find((args) => args[0] === 'release' && args[1] === 'create');
+  assert.equal(create[2], 'connect-desktop');
+  assert.ok(create.includes('--latest=false'));
+  assert.deepEqual(calls.uploaded.map(([name]) => name), feedFiles('stable', version).map(({ name }) => name));
+  assert.deepEqual(calls.uploaded.slice(2).map(([, body]) => body), Object.keys(STABLE_DOWNLOADS));
+  assert.ok(calls.uploaded.slice(2).every(([name]) => !name.includes(version)));
+});
+
+test('the staging feed never carries installers, only the signed manifest pair', () => {
+  assert.deepEqual(feedFiles('staging', '2.0.0').map(({ name }) => name), names);
+  assert.throws(() => feedFiles('production', '2.0.0'), /Unknown desktop channel/);
 });

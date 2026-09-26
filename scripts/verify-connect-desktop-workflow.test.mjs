@@ -509,7 +509,16 @@ describe('desktop staging workflow safety contract', () => {
       'sudo installer -pkg "$pkg" -target /',
       plistBootstrap
     );
-    const plistUninstall = after('sudo "$uninstall"', plistInstall);
+    // This case leaves through the uninstaller pkg, from its installed path.
+    const plistUninstall = after(
+      'sudo installer -pkg "$uninstaller" -target /',
+      plistInstall
+    );
+    const nextScriptUninstall = mac.indexOf('sudo "$uninstall"', plistInstall);
+    assert.ok(
+      nextScriptUninstall === -1 || plistUninstall < nextScriptUninstall,
+      'the script must not clear the machine before the uninstaller pkg runs'
+    );
     for (const assertion of [
       'if pkgutil --pkg-info "$fleet_receipt" >/dev/null 2>&1; then',
       'if sudo /bin/launchctl print system/com.fleetdm.orbit >/dev/null 2>&1; then',
@@ -647,6 +656,77 @@ test('macOS pkg scripts ride the unsigned artifact from the monorepo source chec
   assert.doesNotMatch(sign, /sparse-checkout:[\s\S]*scripts\/desktop-pkg/);
 
   assert.doesNotMatch(workflow, /scripts\/desktop-pkg/);
+});
+
+test('ships a signed, notarized uninstaller pkg inside the desktop PKG payload', () => {
+  const build = job('build-macos-unsigned');
+  const staged = {
+    postinstall: 'uninstaller-postinstall',
+    'distribution.xml': 'uninstaller-distribution.xml',
+    'welcome.html': 'uninstaller-welcome.html',
+    'conclusion.html': 'uninstaller-conclusion.html',
+  };
+  // The artifact flattens to basenames, so the uninstaller's postinstall needs its own name.
+  for (const [source, name] of Object.entries(staged)) {
+    const from = `private-source/connect-tray/src-tauri/macos/uninstaller/${source}`;
+    assert.ok(build.includes(`test -f ${from}`), `build must require ${from}`);
+    assert.ok(build.includes(`cp ${from} out/pkg-scripts/${name}`));
+    assert.match(
+      build,
+      new RegExp(`path: out/connect-desktop-unsigned\\.zip .*out/pkg-scripts/${name.replace('.', '\\.')}`)
+    );
+  }
+
+  const sign = job('sign-macos');
+  const importStep = sign.indexOf('- name: Import the Developer ID Installer identity');
+  const uninstallerStep = sign.indexOf('- name: Build, sign and notarize the uninstaller pkg');
+  const mainStep = sign.indexOf('- name: Build and sign the macOS installer (Developer ID Installer)');
+  assert.ok(importStep > 0 && importStep < uninstallerStep && uninstallerStep < mainStep);
+
+  const uninstaller = sign.slice(uninstallerStep, mainStep);
+  for (const name of [...Object.values(staged), 'uninstall.sh']) {
+    assert.ok(uninstaller.includes(`test -f unsigned/${name}`));
+  }
+  assert.match(uninstaller, /pkgbuild \\\n\s+--nopayload/);
+  assert.match(uninstaller, /--identifier ai\.anyray\.connect-tray\.uninstaller/);
+  assert.match(uninstaller, /grep -Fq 'version="__VERSION__"'/);
+  assert.match(uninstaller, /@auth\)' "\$distribution_xml"\)" = root/);
+  assert.match(uninstaller, /productbuild \\\n\s+--distribution "\$distribution_xml"/);
+  assert.match(uninstaller, /productsign --sign "\$INSTALLER_IDENTITY"/);
+  assert.match(uninstaller, /xcrun notarytool submit "\$uninstaller"/);
+  assert.match(uninstaller, /xcrun stapler staple "\$uninstaller"/);
+  assert.match(uninstaller, /spctl -a -vvv -t install "\$uninstaller"/);
+  // A second pkg under out/ would be published and break the one-PKG asset contract.
+  assert.doesNotMatch(uninstaller, /(^|[\s"'=])out\//);
+
+  const main = sign.slice(mainStep);
+  assert.match(
+    main,
+    /install -m 0644 "\$RUNNER_TEMP\/connect-desktop-uninstaller\/Uninstall Anyray Connect\.pkg" \\\n\s+"\$root\/usr\/local\/lib\/anyray-connect\/Uninstall Anyray Connect\.pkg"/
+  );
+  assert.match(main, /usr\/local\/lib\/anyray-connect\/Uninstall Anyray Connect\\\.pkg\$/);
+  assert.match(main, /productsign --sign "\$INSTALLER_IDENTITY"/);
+  assert.doesNotMatch(main, /security import/);
+
+  const verify = job('verify-macos-signed');
+  assert.match(verify, /uninstaller='\/usr\/local\/lib\/anyray-connect\/Uninstall Anyray Connect\.pkg'/);
+  assert.match(verify, /pkgutil --check-signature "\$payload_uninstaller"/);
+  assert.match(verify, /xcrun stapler validate "\$payload_uninstaller"/);
+  assert.match(verify, /spctl -a -vvv -t install "\$payload_uninstaller"/);
+  // The engine opens it only when root owns it and nobody else can write it.
+  assert.match(verify, /stat -f '%u %g %Lp' "\$uninstaller"\)" = '0 0 644'/);
+  assert.match(verify, /stat -f '%u %Lp' \/usr\/local\/lib\/anyray-connect\)" = '0 755'/);
+  // Payload-free, so Installer writes no receipt; dropping --nopayload would start leaving one.
+  const pkgUninstall = verify.indexOf('sudo installer -pkg "$uninstaller" -target /');
+  const receiptCheck = verify.indexOf(
+    'if pkgutil --pkg-info ai.anyray.connect-tray.uninstaller >/dev/null 2>&1; then',
+    pkgUninstall
+  );
+  assert.ok(pkgUninstall > 0 && receiptCheck > pkgUninstall);
+  assert.ok(
+    receiptCheck < verify.indexOf('build_fleet_pkg', pkgUninstall),
+    'the receipt check belongs to the case that ran the uninstaller pkg'
+  );
 });
 
 test('desktop staging assets contain one PKG, one updater tarball, and no DMG', () => {

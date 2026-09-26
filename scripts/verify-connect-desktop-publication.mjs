@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { compareVersions } from './publish-desktop-feed.mjs';
-import { channelConfig, releaseTag } from './desktop-channel.mjs';
+import { channelConfig, feedFiles, releaseTag } from './desktop-channel.mjs';
 
 export async function verifyPublication({ repo, version, sourceSha, minVersion, channel, dryRun, token }, request = fetch) {
   compareVersions(version, version);
@@ -48,8 +48,11 @@ export async function verifyPublication({ repo, version, sourceSha, minVersion, 
     const stagingTag = releaseTag('staging', version, sourceSha);
     const staged = await api(`releases/tags/${stagingTag}`, true);
     if (!staged) throw new Error(`Stable requires staging release ${stagingTag}; publish ${version} at this commit on staging first`);
-    if (!(await listAssets(staged)).some(({ name }) => name === 'connect-desktop-staging.json')) {
-      throw new Error(`Staging release ${stagingTag} has no signed manifest; it did not finish publishing`);
+    const stagedNames = new Set((await listAssets(staged)).map(({ name }) => name));
+    for (const name of ['connect-desktop-staging.json', 'connect-desktop-staging.json.asc']) {
+      if (!stagedNames.has(name)) {
+        throw new Error(`Staging release ${stagingTag} is missing ${name}; it did not finish publishing`);
+      }
     }
     if (dryRun) return;
   }
@@ -66,7 +69,9 @@ export async function verifyPublication({ repo, version, sourceSha, minVersion, 
   if (assets.some(({ name }) => /\.(previous|pending)$/.test(name))) {
     throw new Error(`${feed} feed needs recovery of previous/pending assets before building`);
   }
-  for (const name of [`${feed}.json`, `${feed}.json.asc`]) {
+  // Every name publishFeed will swap, checked before the versioned tag exists: a feed
+  // that fails the swap after that point cannot be retried with a redispatch.
+  for (const { name } of feedFiles(channel, version)) {
     if (!assets.some((asset) => asset.name === name)) throw new Error(`${feed} feed is missing ${name}`);
   }
   // Public asset URL: do not send the GitHub token across download redirects.

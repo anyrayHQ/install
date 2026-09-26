@@ -684,9 +684,12 @@ gateway:
     maxReplicas: 4
 ```
 
-`postgres.maxConnections` defaults to 300. A gateway pod can hold about 47
-connections at peak, an optimizer or endpoint-control pod about 20. For external
-Postgres, size its limit the same way.
+`postgres.maxConnections` defaults to 300. From v1.10.431, each gateway pod
+opens up to 24 connections at peak, and each optimizer and endpoint-control pod
+up to 8, so the default two of each use up to 80. On older images, each gateway
+pod uses about 47 and each optimizer and endpoint-control pod about 20, or ~175
+for two of each. Raise the limit before raising replicas or enabling an HPA. For
+external Postgres, size its limit the same way.
 
 ## External Postgres
 

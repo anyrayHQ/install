@@ -109,18 +109,31 @@ if az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER" >/dev/null 2
   echo "→ AKS cluster $CLUSTER already exists — reusing it."
   # Chart 0.8.0 runs two of every service; a rollout then needs ~4 vCPU of
   # requests, which an existing 2 x D2s_v5 pool cannot schedule. Turn on the
-  # cluster autoscaler for a pool that has none, and never shrink one that does.
+  # cluster autoscaler for a pool that has none, or raise an existing pool's
+  # ceiling when needed. Never shrink either bound.
   POOL="$(az aks nodepool list --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
     --query "[?mode=='System'] | [0].name" -o tsv)"
-  if [ -n "$POOL" ] && [ "$(az aks nodepool show --resource-group "$RESOURCE_GROUP" \
-    --cluster-name "$CLUSTER" --name "$POOL" --query enableAutoScaling -o tsv)" != "true" ]; then
-    CUR="$(az aks nodepool show --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
-      --name "$POOL" --query count -o tsv)"
-    MIN=$(( CUR > NODE_COUNT ? CUR : NODE_COUNT ))
-    MAX=$(( MIN > NODE_MAX_COUNT ? MIN : NODE_MAX_COUNT ))
-    echo "→ Enabling the cluster autoscaler on node pool $POOL ($MIN-$MAX nodes)…"
-    az aks nodepool update --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
-      --name "$POOL" --enable-cluster-autoscaler --min-count "$MIN" --max-count "$MAX" >/dev/null
+  if [ -n "$POOL" ]; then
+    if [ "$(az aks nodepool show --resource-group "$RESOURCE_GROUP" \
+      --cluster-name "$CLUSTER" --name "$POOL" --query enableAutoScaling -o tsv)" != "true" ]; then
+      CUR="$(az aks nodepool show --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+        --name "$POOL" --query count -o tsv)"
+      MIN=$(( CUR > NODE_COUNT ? CUR : NODE_COUNT ))
+      MAX=$(( MIN > NODE_MAX_COUNT ? MIN : NODE_MAX_COUNT ))
+      echo "→ Enabling the cluster autoscaler on node pool $POOL ($MIN-$MAX nodes)…"
+      az aks nodepool update --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+        --name "$POOL" --enable-cluster-autoscaler --min-count "$MIN" --max-count "$MAX" >/dev/null
+    else
+      MIN="$(az aks nodepool show --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+        --name "$POOL" --query minCount -o tsv)"
+      MAX="$(az aks nodepool show --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+        --name "$POOL" --query maxCount -o tsv)"
+      if [ "$MAX" -lt "$NODE_MAX_COUNT" ]; then
+        echo "→ Raising the cluster autoscaler ceiling on node pool $POOL ($MIN-$NODE_MAX_COUNT nodes)…"
+        az aks nodepool update --resource-group "$RESOURCE_GROUP" --cluster-name "$CLUSTER" \
+          --name "$POOL" --update-cluster-autoscaler --min-count "$MIN" --max-count "$NODE_MAX_COUNT" >/dev/null
+      fi
+    fi
   fi
 else
   echo "→ Creating AKS cluster $CLUSTER in $LOCATION (this takes a few minutes)…"

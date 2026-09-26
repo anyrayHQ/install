@@ -551,9 +551,11 @@ endpoint-control:
 postgres:
   enabled: true
   # Connection limit for the bundled Postgres (the image default is 100). Each
-  # gateway pod can open about 47 connections at peak across its pools, each
-  # optimizer and endpoint-control pod about 20, so the default two of each
-  # already reaches ~175. Raise it before raising replicas or enabling an HPA.
+  # gateway pod opens up to 24 connections at peak from v1.10.431, and each
+  # optimizer and endpoint-control pod up to 8. The default two of each use up
+  # to 80 connections. On older images, each gateway pod uses about 47 and each
+  # optimizer and endpoint-control pod about 20, or ~175 for two of each. Raise
+  # it before raising replicas or enabling an HPA.
   # External Postgres: size its limit the same way.
   maxConnections: 300
   # The bundled Postgres is a SINGLE pod on a ReadWriteOnce volume. It is sized

@@ -546,6 +546,12 @@ true
 {{- include "anyray.atLeastAppVersion" (dict "component" .component "floor" (include "anyray.haFloor" .context) "context" .context) -}}
 {{- end }}
 
+{{- /* /livez ships in the optimizer from v1.10.432. Older or unrecognised
+       tags keep /health; atLeastAppVersion also accepts policy-stable. */ -}}
+{{- define "anyray.optimizerServesLivez" -}}
+{{- include "anyray.atLeastAppVersion" (dict "component" "optimizer" "floor" "v1.10.432" "context" .) -}}
+{{- end }}
+
 {{- define "anyray.livenessProbe" -}}
 {{- $context := .context -}}
 {{- $overrides := (index $context.Values .component | default dict) -}}
@@ -554,9 +560,8 @@ true
 {{- $probe = $overrides.livenessProbe -}}
 {{- end -}}
 {{- if and $probe $probe.enabled -}}
-{{- /* `unguarded` callers name a route that has existed in every released image
-       (the optimizer's static /health); everything else must clear the /livez
-       version floor or render nothing. */ -}}
+{{- /* `unguarded` callers select a route served by their effective image;
+       everything else must clear the /livez version floor or render nothing. */ -}}
 {{- if or .unguarded (include "anyray.servesLivez" (dict "component" .component "context" $context)) -}}
 livenessProbe:
   httpGet:

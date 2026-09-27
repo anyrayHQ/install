@@ -67,7 +67,40 @@ jobs:
               return 1
             fi
           }
+          assert_optimizer_probes() {
+            local case_name="$1" expected_path="$2" expected_tag="$3" render probe path snippet
+            shift 3
+            render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
+              --show-only templates/optimizer.yaml "$@")" || {
+              echo "::error::$case_name optimizer failed to render"
+              return 1
+            }
+            if [ -n "$expected_tag" ] && [[ "$render" != *"image: public.ecr.aws/anyray/optimizer:$expected_tag"* ]]; then
+              echo "::error::$case_name did not use optimizer image tag $expected_tag"
+              return 1
+            fi
+            for probe in readiness startup liveness; do
+              path="$expected_path"
+              [ "$probe" = readiness ] && path=/health
+              printf -v snippet '          %sProbe:\n            httpGet:\n              path: %s' "$probe" "$path"
+              if [[ "$render" != *"$snippet"* ]]; then
+                echo "::error::$case_name optimizer $probe path is not $path"
+                return 1
+              fi
+            done
+            printf -v snippet '          livenessProbe:\n            httpGet:\n              path: %s\n              port: 8088\n            initialDelaySeconds: 15\n            periodSeconds: 10\n            timeoutSeconds: 5\n            failureThreshold: 6' "$expected_path"
+            if [[ "$render" != *"$snippet"* ]]; then
+              echo "::error::$case_name optimizer liveness defaults were not applied"
+              return 1
+            fi
+          }
           assert_replicas "default values" optimizer 2
+          assert_optimizer_probes "default values" /livez ""
+          assert_optimizer_probes "v1.10.400" /health v1.10.400 --set image.tag=v1.10.400
+          assert_optimizer_probes "v1.10.431" /health v1.10.431 --set image.tag=v1.10.431
+          assert_optimizer_probes "v1.10.432" /livez v1.10.432 --set image.tag=v1.10.432
+          assert_optimizer_probes "optimizer liveness path override" /health "" \
+            --set optimizer.livenessProbe.enabled=true --set optimizer.livenessProbe.path=/health
           helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
             --set gateway.persistence.enabled=false --set gateway.replicas=2 \
             --set optimizer.persistence.enabled=false --set optimizer.replicas=2 \

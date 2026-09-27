@@ -127,21 +127,25 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 10
-          {{- /* The optimizer reuses /health for liveness rather than /livez, and
-                 needs no version guard for it: the route is a static
-                 dependency-free 200 present in every released image. Unlike the
-                 gateway's `/`, it deliberately does NOT flip to 503 while the
-                 process is draining — the optimizer has only this one health
-                 route, serving both probes, so a 503 on drain would make the
-                 LIVENESS probe restart the container in the middle of the very
-                 drain it was added to protect. Keep that property if you ever
-                 touch the route. What the probe does catch is the case that
-                 matters here — an onnxruntime inference wedging the Node event
-                 loop, which leaves the pod up, un-Ready, and never restarted, so
-                 every request takes the fail-open path and busts the prompt
-                 cache. */}}
-          {{- include "anyray.startupProbe" (dict "component" "optimizer" "port" 8088 "path" "/health" "unguarded" true "context" .) | nindent 10 }}
-          {{- include "anyray.livenessProbe" (dict "component" "optimizer" "port" 8088 "path" "/health" "unguarded" true "context" .) | nindent 10 }}
+          {{- /* Readiness uses /health, which returns 503 while warming. From
+                 v1.10.432, startup and liveness use /livez: a static,
+                 dependency-free 200 that does not turn 503 while warming or
+                 draining. Older pins keep /health, a static 200 on those images.
+                 Liveness catches an onnxruntime inference wedging the Node event
+                 loop, which otherwise leaves the pod un-Ready and never restarted,
+                 sending every request down the cache-busting fail-open path. */}}
+          {{- $probePath := "/health" -}}
+          {{- if include "anyray.optimizerServesLivez" . -}}
+          {{- $probePath = "/livez" -}}
+          {{- end -}}
+          {{- $livenessProbe := .Values.livenessProbe -}}
+          {{- if hasKey .Values.optimizer "livenessProbe" -}}
+          {{- $livenessProbe = .Values.optimizer.livenessProbe -}}
+          {{- end -}}
+          {{- /* Keep startup on the liveness route unless startup has its own path. */ -}}
+          {{- $startupPath := get ($livenessProbe | default dict) "path" | default $probePath -}}
+          {{- include "anyray.startupProbe" (dict "component" "optimizer" "port" 8088 "path" $startupPath "unguarded" true "context" .) | nindent 10 }}
+          {{- include "anyray.livenessProbe" (dict "component" "optimizer" "port" 8088 "path" $probePath "unguarded" true "context" .) | nindent 10 }}
           # Holds the pod open, still answering /v1/optimize, until its removal
           # from the Service endpoints has reached the gateway — without it an
           # upgrade produces a burst of fail-open (cache-busting) requests.

@@ -1109,9 +1109,9 @@ Resources:
                 # regions on purpose: a cross-region inference profile fans out
                 # to the foundation model in whichever region serves the call,
                 # so pinning this to the stack's own region breaks exactly the
-                # profiles Claude 4 and newer require. CountTokens answers the
-                # client's count_tokens call (Claude Code sizes its context with
-                # it) and never runs the model; AWS scopes it to foundation-model.
+                # profiles Claude 4 and newer require. CountTokens only counts
+                # the prompt and never runs the model; AWS authorizes it against
+                # the foundation-model ARN.
                 - Effect: Allow
                   Action:
                     - bedrock:InvokeModel
@@ -1121,10 +1121,8 @@ Resources:
                     - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
                     - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*'
                     - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:application-inference-profile/*'
-                # Claude 5 and Opus 4.7+ have no bedrock-runtime CountTokens; the
-                # gateway counts them on bedrock-mantle (bedrock-mantle.<region>.api.aws),
-                # whose CountTokens is scoped to the account's projects. Read only:
-                # it counts tokens and cannot invoke a model.
+                # Newer Claude token counts fall back to mantle, which
+                # authorizes requests against account project resources.
                 - Effect: Allow
                   Action:
                     - bedrock-mantle:CountTokens

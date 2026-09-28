@@ -134,7 +134,9 @@ Parameters:
       Bedrock has no reason to hold. The two List actions it also grants are
       what lets the gateway resolve a Claude model id to the id Bedrock serves
       in your region; without them only the model ids built into the gateway
-      resolve, and anything newer fails. Safe to turn on later — it is an IAM
+      resolve, and anything newer fails. It also grants the two read-only
+      CountTokens actions (bedrock and bedrock-mantle) that let clients such as
+      Claude Code count tokens before a request. Safe to turn on later — it is an IAM
       change, and no service is replaced.
   DefaultModel:
     Type: String
@@ -1107,15 +1109,25 @@ Resources:
                 # regions on purpose: a cross-region inference profile fans out
                 # to the foundation model in whichever region serves the call,
                 # so pinning this to the stack's own region breaks exactly the
-                # profiles Claude 4 and newer require.
+                # profiles Claude 4 and newer require. CountTokens only counts
+                # the prompt and never runs the model; AWS authorizes it against
+                # the foundation-model ARN.
                 - Effect: Allow
                   Action:
                     - bedrock:InvokeModel
                     - bedrock:InvokeModelWithResponseStream
+                    - bedrock:CountTokens
                   Resource:
                     - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
                     - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*'
                     - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:application-inference-profile/*'
+                # Newer Claude token counts fall back to mantle, which
+                # authorizes requests against account project resources.
+                - Effect: Allow
+                  Action:
+                    - bedrock-mantle:CountTokens
+                  Resource:
+                    - !Sub 'arn:${AWS::Partition}:bedrock-mantle:*:${AWS::AccountId}:project/*'
                 # Read-only discovery: turns a Claude model id into the id
                 # Bedrock actually serves here. These two actions do not accept
                 # a resource scope, so `*` is the only valid form.

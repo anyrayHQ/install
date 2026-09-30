@@ -296,7 +296,9 @@ Parameters:
       endpoint-control 7, and a rolling deploy runs old and new tasks side by
       side, so two of each already peaks near 160. db.t4g.micro allows about 80
       and is too small for any setting; db.t4g.small about 190; db.t4g.medium
-      about 410. Set a class explicitly only to go larger.
+      about 410. Set a class explicitly only to go larger. A stack still on the
+      old db.t4g.micro default is resized like a blank one as soon as
+      HighAvailability or EnableAutoscaling is turned on.
   DbAllocatedStorage:
     Type: Number
     Default: 150
@@ -389,8 +391,15 @@ Conditions:
   InternalLb: !Equals [!Ref LoadBalancerScheme, 'internal']
   Ha: !Equals [!Ref HighAvailability, 'true']
   Autoscale: !Equals [!Ref EnableAutoscaling, 'true']
-  AutoDbClass: !Equals [!Ref DbInstanceClass, '']
   LargeDb: !Or [!Condition Ha, !Condition Autoscale]
+  # Blank sizes the database. So does the old db.t4g.micro default once HA or
+  # autoscaling is on: stacks created before blank meant auto still carry it
+  # (UsePreviousValue), and it holds about 80 connections, below what either
+  # option runs. Without those options micro is left alone, so a plain
+  # template update never modifies the database.
+  AutoDbClass: !Or
+    - !Equals [!Ref DbInstanceClass, '']
+    - !And [!Equals [!Ref DbInstanceClass, db.t4g.micro], !Condition LargeDb]
   Bedrock: !Equals [!Ref EnableBedrock, 'true']
 
 Resources:
@@ -2050,7 +2059,10 @@ Resources:
     Properties:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
-      DesiredCount: !If [Ha, 2, 1]
+      # Omitted under autoscaling, which then owns the count; an update leaves
+      # it as is. Turning autoscaling off sets it again, which is what brings a
+      # scaled-out service back to its fixed count once the target is gone.
+      DesiredCount: !If [Autoscale, !Ref 'AWS::NoValue', !If [Ha, 2, 1]]
       # Same hardening the production stack runs: a deployment whose tasks keep
       # failing rolls back automatically instead of hanging the service (and the
       # CloudFormation update fails fast instead of waiting out the full timeout).
@@ -2077,7 +2089,10 @@ Resources:
     Properties:
       Cluster: !Ref Cluster
       LaunchType: FARGATE
-      DesiredCount: !If [Ha, 2, 1]
+      # Omitted under autoscaling, which then owns the count; an update leaves
+      # it as is. Turning autoscaling off sets it again, which is what brings a
+      # scaled-out service back to its fixed count once the target is gone.
+      DesiredCount: !If [Autoscale, !Ref 'AWS::NoValue', !If [Ha, 2, 1]]
       # Same hardening the production stack runs: a deployment whose tasks keep
       # failing rolls back automatically instead of hanging the service (and the
       # CloudFormation update fails fast instead of waiting out the full timeout).

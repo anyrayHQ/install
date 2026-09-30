@@ -653,6 +653,24 @@ Use `gateway.extraEnv`, `optimizer.extraEnv`, or `proxy.extraEnv` for advanced
 environment variables not modeled directly. Billing variables cannot be
 overridden through `gateway.extraEnv`.
 
+To mount a file such as a database CA bundle, set `extraVolumes` and
+`extraVolumeMounts` on `gateway`, `optimizer` and `endpoint-control` (the three
+pods that open Postgres), then point the URL at it with
+`sslrootcert=/etc/anyray/db-ca/ca.pem`. RDS needs none of this: the images ship
+Amazon's RDS roots, so `sslmode=verify-full` works as is.
+
+```yaml
+gateway:
+  extraVolumes: [{name: db-ca, secret: {secretName: db-ca}}]
+  extraVolumeMounts: [{name: db-ca, mountPath: /etc/anyray/db-ca, readOnly: true}]
+optimizer:
+  extraVolumes: [{name: db-ca, secret: {secretName: db-ca}}]
+  extraVolumeMounts: [{name: db-ca, mountPath: /etc/anyray/db-ca, readOnly: true}]
+endpoint-control:
+  extraVolumes: [{name: db-ca, secret: {secretName: db-ca}}]
+  extraVolumeMounts: [{name: db-ca, mountPath: /etc/anyray/db-ca, readOnly: true}]
+```
+
 ## Scaling
 
 Since chart 0.8.0 the gateway, optimizer, proxy and endpoint-control each run two

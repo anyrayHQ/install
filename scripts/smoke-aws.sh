@@ -15,6 +15,12 @@
 #             an existing customer takes — and probe again. Catches
 #             update-only failures (e.g. Cloud Map name collisions, in-place
 #             transitions ECS refuses) that a fresh create never sees.
+#   ha      — create the candidate with HighAvailability + EnableAutoscaling,
+#             assert the auto-sized Multi-AZ database and the scaling targets
+#             and policies, probe, delete.
+#
+# The candidate is staged in S3 (TEMPLATE_BUCKET) and deployed by URL: the
+# template is past CloudFormation's 51,200-byte --template-body cap.
 #
 # Probes (per round):
 #   1. GET :3000/console/ unauthenticated → 200 sign-in page, NOT an nginx 500.
@@ -22,8 +28,11 @@
 #   3. GET :3000/admin/health through the proxy → 200 (proxy→gateway seam).
 #   4. scripts/verify-deploy.sh against :8787 (deep per-leg health).
 #
-# Required env: TEMPLATE, LANE, VPC_ID, SUBNET_A, SUBNET_B.
+# Required env: TEMPLATE, LANE, VPC_ID, SUBNET_A, SUBNET_B, DEPLOYMENT_TOKEN
+#   (a real adt_ token; a placeholder never gets an entitlement lease, so the
+#   gateway's /readyz stays 503 and the stack never finishes creating).
 # Optional: STACK (name), PUBLISHED_URL, ALLOWED_CIDR (defaults to caller IP/32),
+#           TEMPLATE_BUCKET (defaults to anyray-cfn-smoke-tpl-<account>),
 #           KEEP=1 to skip teardown (debugging).
 set -euo pipefail
 
@@ -34,6 +43,11 @@ STACK="${STACK:-cfn-smoke-${LANE}-$(date +%s)}"
 PUBLISHED_URL="${PUBLISHED_URL:-https://anyray-quicklaunch.s3.us-east-1.amazonaws.com/anyray-quicklaunch.template.yaml}"
 ALLOWED_CIDR="${ALLOWED_CIDR:-$(curl -fsS --max-time 10 https://checkip.amazonaws.com)/32}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+DEPLOYMENT_TOKEN="${DEPLOYMENT_TOKEN:?a real adt_ deployment token (repo secret ANYRAY_CFN_SMOKE_DEPLOYMENT_TOKEN)}"
+REGION="${AWS_REGION:-$(aws configure get region)}"
+TEMPLATE_BUCKET="${TEMPLATE_BUCKET:-anyray-cfn-smoke-tpl-$(aws sts get-caller-identity --query Account --output text)}"
+CANDIDATE_KEY="candidate-${STACK}.yaml"
+CANDIDATE_URL="https://${TEMPLATE_BUCKET}.s3.${REGION}.amazonaws.com/${CANDIDATE_KEY}"
 
 template_image_tag() {
   awk '
@@ -53,7 +67,7 @@ BASE_PARAMS=(
   "ParameterKey=SubnetA,ParameterValue=${SUBNET_A}"
   "ParameterKey=SubnetB,ParameterValue=${SUBNET_B}"
   "ParameterKey=AllowedCidr,ParameterValue=${ALLOWED_CIDR}"
-  "ParameterKey=DeploymentToken,ParameterValue=adt_cismoke0000000000"
+  "ParameterKey=DeploymentToken,ParameterValue=${DEPLOYMENT_TOKEN}"
 )
 CANDIDATE_PARAMS=("${BASE_PARAMS[@]}")
 
@@ -66,6 +80,7 @@ cleanup() {
       --query "StackEvents[?contains(ResourceStatus,'FAILED')].[LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
       --output table 2>/dev/null || true
   fi
+  aws s3 rm --only-show-errors "s3://${TEMPLATE_BUCKET}/${CANDIDATE_KEY}" || true
   [ "${KEEP:-0}" = 1 ] && { echo "KEEP=1 — leaving stack ${STACK}"; return 0; }
   echo "→ teardown ${STACK}"
   aws cloudformation delete-stack --stack-name "$STACK" || true
@@ -117,15 +132,68 @@ probe() {
   echo "✓ [${round}] console + gateway healthy"
 }
 
+phys() {
+  aws cloudformation describe-stack-resource --stack-name "$STACK" --logical-resource-id "$1" \
+    --query StackResourceDetail.PhysicalResourceId --output text
+}
+
+# "<class>\t<MultiAZ>" of the stack's database.
+db_state() {
+  aws rds describe-db-instances --db-instance-identifier "$(phys Db)" \
+    --query 'DBInstances[0].[DBInstanceClass,MultiAZ]' --output text
+}
+
+# One "<resource id>\t<min>\t<max>" line per ECS scalable target in this stack.
+scalable_targets() {
+  aws application-autoscaling describe-scalable-targets --service-namespace ecs \
+    --query "ScalableTargets[?starts_with(ResourceId,'service/$(phys Cluster)/')].[ResourceId,MinCapacity,MaxCapacity]" \
+    --output text
+}
+
+expect() { # expect <what> <actual> <wanted>
+  [ "$2" = "$3" ] || { echo "::error::${1}: got '${2}', want '${3}'"; exit 1; }
+  echo "✓ ${1}: ${2}"
+}
+
+# Stage the candidate: it is past the 51,200-byte --template-body cap, so every
+# create/update of it goes through --template-url.
+aws s3api head-bucket --bucket "$TEMPLATE_BUCKET" 2>/dev/null || {
+  aws s3api create-bucket --bucket "$TEMPLATE_BUCKET" \
+    --create-bucket-configuration "LocationConstraint=${REGION}" >/dev/null
+  aws s3api put-public-access-block --bucket "$TEMPLATE_BUCKET" \
+    --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+}
+aws s3 cp --only-show-errors "$TEMPLATE" "s3://${TEMPLATE_BUCKET}/${CANDIDATE_KEY}"
+
 case "$LANE" in
   fresh)
     echo "→ create ${STACK} from candidate ${TEMPLATE}"
     aws cloudformation create-stack --stack-name "$STACK" \
-      --template-body "file://${TEMPLATE}" \
+      --template-url "$CANDIDATE_URL" \
       --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
       --parameters "${CANDIDATE_PARAMS[@]}" >/dev/null
     aws cloudformation wait stack-create-complete --stack-name "$STACK"
+    expect "database (blank class, no HA)" "$(db_state)" $'db.t4g.small\tFalse'
+    expect "scalable targets (autoscaling off)" "$(scalable_targets)" ""
     probe fresh
+    ;;
+  ha)
+    echo "→ create ${STACK} from candidate with HighAvailability + EnableAutoscaling"
+    aws cloudformation create-stack --stack-name "$STACK" \
+      --template-url "$CANDIDATE_URL" \
+      --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+      --parameters "${CANDIDATE_PARAMS[@]}" \
+        ParameterKey=HighAvailability,ParameterValue=true \
+        ParameterKey=EnableAutoscaling,ParameterValue=true >/dev/null
+    aws cloudformation wait stack-create-complete --stack-name "$STACK"
+    expect "database (blank class, HA)" "$(db_state)" $'db.t4g.medium\tTrue'
+    targets="$(scalable_targets)"
+    expect "gateway scaling range" "$(grep -F 'GatewayService' <<<"$targets" | cut -f2,3)" $'2\t3'
+    expect "optimizer scaling range" "$(grep -F 'OptimizerService' <<<"$targets" | cut -f2,3)" $'2\t6'
+    expect "scaling policies" "$(aws application-autoscaling describe-scaling-policies --service-namespace ecs \
+      --query "length(ScalingPolicies[?starts_with(PolicyName,'${STACK}-')])" --output text)" 2
+    probe ha
     ;;
   update)
     echo "→ create ${STACK} from PUBLISHED template"
@@ -153,7 +221,7 @@ case "$LANE" in
     ' <<<"$upd_params")"
     set +e
     upd_err="$(aws cloudformation update-stack --stack-name "$STACK" \
-      --template-body "file://${TEMPLATE}" \
+      --template-url "$CANDIDATE_URL" \
       --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
       --parameters "$upd_params" 2>&1 >/dev/null)"; rc=$?
     set -e

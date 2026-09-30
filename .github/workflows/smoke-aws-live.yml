@@ -3,17 +3,19 @@ name: AWS quicklaunch live smoke
 # Deploys the CloudFormation template FOR REAL and probes the golden paths.
 # cfn-lint (validate-artifacts) proves the template parses; it cannot prove it
 # behaves — the July 2026 console-500 passed every static check and was only
-# observable on a live stack (nginx runtime DNS vs ECS Service Connect). Two
-# lanes: a fresh create of the candidate, and the exact customer upgrade path
-# (create the published template, update-stack to the candidate).
+# observable on a live stack (nginx runtime DNS vs ECS Service Connect). Three
+# lanes: a fresh create of the candidate, the exact customer upgrade path
+# (create the published template, update-stack to the candidate), and a fresh
+# create with HighAvailability + EnableAutoscaling.
 #
 # Auth mirrors publish-quicklaunch.yml: GitHub OIDC → a dedicated role in the
 # staging account (PowerUser + IAM scoped to cfn-smoke-* roles). The role ARN
 # lives in the AWS_CFN_SMOKE_ROLE_ARN repo variable.
 #
-# Cost per run: ~30-40 min of db.t4g.small RDS + 2 ALBs + 6 Fargate tasks —
-# cents. Everything is torn down in `always()` steps; a janitor also reaps any
-# cfn-smoke-* stack older than 3 h left behind by cancelled runs.
+# Cost per run: ~30-40 min of three RDS instances (one a Multi-AZ
+# db.t4g.medium), 3 ALBs and ~16 Fargate tasks, about a dollar. Everything
+# is torn down in `always()` steps; a janitor also reaps any cfn-smoke-* stack
+# older than 3 h left behind by cancelled runs.
 #
 # Injection-safety note: the only ${{ }} used inside run: are matrix.lane
 # (defined in this file) and github.run_id (numeric) — no event-controlled text.
@@ -38,7 +40,9 @@ env:
 jobs:
   smoke:
     name: live ${{ matrix.lane }}
-    runs-on: ubuntu-latest
+    # AWS CodeBuild runner, like every other job here. The stacks it builds
+    # are the expensive part; the runner only drives the CLI.
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     if: vars.AWS_CFN_SMOKE_ROLE_ARN != ''
     timeout-minutes: 75
     permissions:
@@ -47,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [fresh, update]
+        lane: [fresh, update, ha]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -114,6 +118,10 @@ jobs:
           SUBNET_A: ${{ steps.vpc.outputs.subnet_a }}
           SUBNET_B: ${{ steps.vpc.outputs.subnet_b }}
           STACK: cfn-smoke-${{ matrix.lane }}-${{ github.run_id }}
+          # A real adt_ token for a dedicated smoke deployment. The gateway's
+          # /readyz stays 503 until Billing grants an entitlement lease, so a
+          # placeholder token can never pass the ECS deployment.
+          DEPLOYMENT_TOKEN: ${{ secrets.ANYRAY_CFN_SMOKE_DEPLOYMENT_TOKEN }}
         run: ./scripts/smoke-aws.sh
 
       # Belt + braces: the script's EXIT trap tears down, but a runner kill

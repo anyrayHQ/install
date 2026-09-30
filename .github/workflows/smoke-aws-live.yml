@@ -11,7 +11,7 @@ name: AWS quicklaunch live smoke
 # staging account (PowerUser + IAM scoped to cfn-smoke-* roles). The role ARN
 # lives in the AWS_CFN_SMOKE_ROLE_ARN repo variable.
 #
-# Cost per run: ~30-40 min of db.t4g.micro RDS + 2 ALBs + 6 Fargate tasks —
+# Cost per run: ~30-40 min of db.t4g.small RDS + 2 ALBs + 6 Fargate tasks —
 # cents. Everything is torn down in `always()` steps; a janitor also reaps any
 # cfn-smoke-* stack older than 3 h left behind by cancelled runs.
 #

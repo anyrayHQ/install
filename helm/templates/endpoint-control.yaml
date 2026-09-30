@@ -111,6 +111,14 @@ spec:
           {{- include "anyray.preStopDrain" (dict "component" "endpoint-control" "context" .) | nindent 10 }}
           resources:
             {{- toYaml $ec.resources | nindent 12 }}
+          {{- with $ec.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with $ec.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

@@ -43,7 +43,7 @@ Metadata:
             UpstreamUrl,
           ]
       - Label: { default: Availability }
-        Parameters: [HighAvailability]
+        Parameters: [HighAvailability, EnableAutoscaling]
       - Label: { default: Database }
         Parameters: [DbInstanceClass, DbAllocatedStorage, DbMaxAllocatedStorage, EnableRdsDeletionProtection]
       - Label: { default: Advanced networking (leave blank) }
@@ -53,6 +53,8 @@ Metadata:
       LoadBalancerScheme: { default: "Load balancer reachability (internal = private, VPC-only)" }
       EnableRdsDeletionProtection: { default: "Protect the database from deletion (production)" }
       HighAvailability: { default: "Run redundant tasks and a Multi-AZ database (production)" }
+      EnableAutoscaling: { default: "Scale the gateway and optimizer out on CPU load" }
+      DbInstanceClass: { default: "Database instance class (leave blank = sized for the options above)" }
       EnableBedrock: { default: "Let the gateway call Bedrock with this stack's own role (no access keys)" }
       VpcId: { default: "VPC (leave blank = account default VPC)" }
       SubnetA: { default: "Public subnet in AZ 1 (leave blank)" }
@@ -283,8 +285,18 @@ Parameters:
     Description: Retired and ignored; the gateway sets its own optimizer budget.
   DbInstanceClass:
     Type: String
-    Default: db.t4g.micro
-    Description: RDS PostgreSQL instance class.
+    Default: ''
+    AllowedPattern: '^(db\.[a-z0-9]+\.[a-z0-9]+)?$'
+    ConstraintDescription: Must be blank or an RDS instance class such as db.t4g.medium.
+    Description: >-
+      RDS PostgreSQL instance class. Leave blank and the stack sizes it:
+      db.t4g.small for a single task per service, db.t4g.medium when
+      HighAvailability or EnableAutoscaling is on. The limit that bites first is
+      connections, not CPU: a gateway task holds up to 24, an optimizer task 8,
+      endpoint-control 7, and a rolling deploy runs old and new tasks side by
+      side, so two of each already peaks near 160. db.t4g.micro allows about 80
+      and is too small for any setting; db.t4g.small about 190; db.t4g.medium
+      about 410. Set a class explicitly only to go larger.
   DbAllocatedStorage:
     Type: Number
     Default: 150
@@ -318,6 +330,19 @@ Parameters:
       database still go down with that AZ. This roughly doubles the compute and
       database cost of the stack, which is why it is off by default. Safe to turn
       on later — it is a rolling change, not a rebuild.
+  EnableAutoscaling:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Add CPU target tracking (60%) to the gateway (up to 3 tasks) and the
+      optimizer (up to 6), never below the HighAvailability task count. Off by
+      default, matching the Helm chart: scaling IN stops tasks mid-session, which
+      cuts open streams and starts each new task with a cold per-task prompt
+      prefix memo, so a steady fleet is cheaper than a churning one. Turn it on
+      when load swings past what the fixed task count absorbs (optimizer
+      timeouts on the console's Optimizer panel are the signal). With the class
+      left blank the database is sized for the scaled-out peak.
   EnableRdsDeletionProtection:
     Type: String
     Default: 'false'
@@ -363,6 +388,9 @@ Conditions:
   AutoUpdate: !Equals [!Ref EnableAutoUpdate, 'true']
   InternalLb: !Equals [!Ref LoadBalancerScheme, 'internal']
   Ha: !Equals [!Ref HighAvailability, 'true']
+  Autoscale: !Equals [!Ref EnableAutoscaling, 'true']
+  AutoDbClass: !Equals [!Ref DbInstanceClass, '']
+  LargeDb: !Or [!Condition Ha, !Condition Autoscale]
   Bedrock: !Equals [!Ref EnableBedrock, 'true']
 
 Resources:
@@ -927,7 +955,10 @@ Resources:
     Properties:
       Engine: postgres
       EngineVersion: '17.5'
-      DBInstanceClass: !Ref DbInstanceClass
+      DBInstanceClass: !If
+        - AutoDbClass
+        - !If [LargeDb, db.t4g.medium, db.t4g.small]
+        - !Ref DbInstanceClass
       AllocatedStorage: !Ref DbAllocatedStorage
       MaxAllocatedStorage: !Ref DbMaxAllocatedStorage
       StorageType: gp3
@@ -2140,6 +2171,55 @@ Resources:
       LoadBalancers:
         - { TargetGroupArn: !Ref ProxyTg, ContainerName: proxy, ContainerPort: 80 }
 
+  # ---- Autoscaling (EnableAutoscaling) -----------------------------------------
+  # Mirrors the production stack's CPU target tracking. The floor is the
+  # service's own DesiredCount, so HighAvailability's two-task redundancy holds.
+  # Scale-in waits 5 min; scale-out reacts in 1. No RoleARN: Application Auto
+  # Scaling uses its ECS service-linked role, created on first use.
+  GatewayScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: Autoscale
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub 'service/${Cluster}/${GatewayServiceV2.Name}'
+      MinCapacity: !If [Ha, 2, 1]
+      MaxCapacity: 3
+  GatewayCpuScaling:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: Autoscale
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-gateway-cpu'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref GatewayScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 60
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+  OptimizerScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: Autoscale
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub 'service/${Cluster}/${OptimizerServiceV2.Name}'
+      MinCapacity: !If [Ha, 2, 1]
+      MaxCapacity: 6
+  OptimizerCpuScaling:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: Autoscale
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-optimizer-cpu'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref OptimizerScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 60
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
 Outputs:
   ConsoleURL:
     Description: Open this and sign in with the admin token (see AdminTokenCmd below).

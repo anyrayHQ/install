@@ -165,7 +165,13 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- with .Values.optimizer.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
+        {{- with .Values.optimizer.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         - name: data
           {{- if .Values.optimizer.persistence.enabled }}
           persistentVolumeClaim:

@@ -390,6 +390,13 @@ gateway:
   # Extra env vars (provider-key fallbacks, rate limits, …)
   # in plain k8s env syntax: [{name: ANYRAY_RATE_LIMIT_RPM, value: "600"}]
   extraEnv: []
+  # Extra volumes for this pod, and where to mount them in its container, in
+  # plain k8s syntax. The usual case is a database CA bundle for a URL that
+  # sets sslrootcert= (RDS needs none: the images ship Amazon's roots):
+  #   extraVolumes: [{name: db-ca, secret: {secretName: db-ca}}]
+  #   extraVolumeMounts: [{name: db-ca, mountPath: /etc/anyray/db-ca, readOnly: true}]
+  extraVolumes: []
+  extraVolumeMounts: []
   # OFF by default since chart 0.5.0, and that single value is the difference
   # between a gateway that can stay up and one that cannot.
   #
@@ -478,6 +485,9 @@ optimizer:
       cpu: "2000m"
       memory: "4Gi"
   extraEnv: []
+  # Same shape as gateway.extraVolumes / gateway.extraVolumeMounts.
+  extraVolumes: []
+  extraVolumeMounts: []
 
 # Proxy (nginx reverse proxy / console)
 proxy:
@@ -543,6 +553,9 @@ endpoint-control:
       cpu: "250m"
       memory: "256Mi"
   extraEnv: []
+  # Same shape as gateway.extraVolumes / gateway.extraVolumeMounts.
+  extraVolumes: []
+  extraVolumeMounts: []
 
 # Postgres — the Anyray spend + trace store. The gateway persists content-free
 # traces + observations to the anyray_traces / anyray_observations tables

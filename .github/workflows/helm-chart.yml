@@ -153,6 +153,27 @@ jobs:
           fi
           [ "$fail" = 0 ]
 
+      - name: Extra volumes reach every Postgres-reading pod
+        run: |
+          set -euo pipefail
+          # The documented way to mount a database CA bundle for sslrootcert=.
+          # Each of the three pods that open the database must carry both the
+          # volume and its mount, or the URL points at a file that is not there.
+          args=()
+          for c in gateway optimizer endpoint-control; do
+            args+=(--set "${c}.extraVolumes[0].name=db-ca"
+                   --set "${c}.extraVolumes[0].secret.secretName=db-ca"
+                   --set "${c}.extraVolumeMounts[0].name=db-ca"
+                   --set "${c}.extraVolumeMounts[0].mountPath=/etc/anyray/db-ca")
+          done
+          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi "${args[@]}")"
+          mounts="$(printf '%s\n' "$render" | grep -c 'mountPath: /etc/anyray/db-ca' || true)"
+          volumes="$(printf '%s\n' "$render" | grep -c 'secretName: db-ca' || true)"
+          if [ "$mounts" != 3 ] || [ "$volumes" != 3 ]; then
+            echo "::error::extraVolumes/extraVolumeMounts rendered ${volumes} volume(s) and ${mounts} mount(s); want 3 of each (gateway, optimizer, endpoint-control)"
+            exit 1
+          fi
+
       - name: One-line opt-in turns the whole feature on
         run: |
           set -euo pipefail

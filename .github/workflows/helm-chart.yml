@@ -157,22 +157,36 @@ jobs:
         run: |
           set -euo pipefail
           # The documented way to mount a database CA bundle for sslrootcert=.
-          # Each of the three pods that open the database must carry both the
-          # volume and its mount, or the URL points at a file that is not there.
+          # Each pod that opens the database must carry its OWN volume and
+          # mount, or its URL points at a file that is not there. Names are per
+          # component and each Deployment is checked on its own, so one pod
+          # cannot pass on another's values.
           args=()
           for c in gateway optimizer endpoint-control; do
-            args+=(--set "${c}.extraVolumes[0].name=db-ca"
-                   --set "${c}.extraVolumes[0].secret.secretName=db-ca"
-                   --set "${c}.extraVolumeMounts[0].name=db-ca"
-                   --set "${c}.extraVolumeMounts[0].mountPath=/etc/anyray/db-ca")
+            args+=(--set "${c}.extraVolumes[0].name=ca-${c}"
+                   --set "${c}.extraVolumes[0].secret.secretName=ca-${c}"
+                   --set "${c}.extraVolumeMounts[0].name=ca-${c}"
+                   --set "${c}.extraVolumeMounts[0].mountPath=/etc/anyray/ca-${c}")
           done
           render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi "${args[@]}")"
-          mounts="$(printf '%s\n' "$render" | grep -c 'mountPath: /etc/anyray/db-ca' || true)"
-          volumes="$(printf '%s\n' "$render" | grep -c 'secretName: db-ca' || true)"
-          if [ "$mounts" != 3 ] || [ "$volumes" != 3 ]; then
-            echo "::error::extraVolumes/extraVolumeMounts rendered ${volumes} volume(s) and ${mounts} mount(s); want 3 of each (gateway, optimizer, endpoint-control)"
-            exit 1
-          fi
+          fail=0
+          for c in gateway optimizer endpoint-control; do
+            doc="$(printf '%s\n' "$render" | awk -v want="anyray-${c}" '
+              /^---/ { if (dep && hit) printf "%s", buf; buf=""; dep=0; hit=0; next }
+              { buf = buf $0 "\n" }
+              /^kind: Deployment$/ { dep=1 }
+              $0 == "  name: " want { hit=1 }
+              END { if (dep && hit) printf "%s", buf }')"
+            if [ -z "$doc" ]; then
+              echo "::error::no Deployment anyray-${c} in the render"; fail=1; continue
+            fi
+            for want in "secretName: ca-${c}" "mountPath: /etc/anyray/ca-${c}"; do
+              if [ "$(printf '%s\n' "$doc" | grep -c "$want" || true)" != 1 ]; then
+                echo "::error::Deployment anyray-${c} does not carry exactly one '${want}'"; fail=1
+              fi
+            done
+          done
+          [ "$fail" = 0 ]
 
       - name: One-line opt-in turns the whole feature on
         run: |

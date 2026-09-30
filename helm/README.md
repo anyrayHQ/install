@@ -663,6 +663,12 @@ Amazon's RDS roots, so `sslmode=verify-full` works as is.
 gateway:
   extraVolumes: [{name: db-ca, secret: {secretName: db-ca}}]
   extraVolumeMounts: [{name: db-ca, mountPath: /etc/anyray/db-ca, readOnly: true}]
+optimizer:
+  extraVolumes: [{name: db-ca, secret: {secretName: db-ca}}]
+  extraVolumeMounts: [{name: db-ca, mountPath: /etc/anyray/db-ca, readOnly: true}]
+endpoint-control:
+  extraVolumes: [{name: db-ca, secret: {secretName: db-ca}}]
+  extraVolumeMounts: [{name: db-ca, mountPath: /etc/anyray/db-ca, readOnly: true}]
 ```
 
 ## Scaling

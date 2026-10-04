@@ -21,7 +21,7 @@
 #   ZONE              VM zone (default: us-central1-a)
 #   INSTANCE          VM name (default: anyray)
 #   MACHINE_TYPE      VM size (default: e2-standard-2 — 2 vCPU / 8 GB)
-#   DISK_SIZE         Persistent data-disk size (default: 50GB — holds the
+#   DISK_SIZE         Persistent data-disk size (default: 200GB — holds the
 #                     gateway's 90-day trace retention window)
 #   ALLOWED_CIDR      CIDR allowed to reach the console/gateway. REQUIRED.
 #                     Scope to your office/VPN range — never 0.0.0.0/0.

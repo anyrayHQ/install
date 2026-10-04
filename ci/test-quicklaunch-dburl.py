@@ -82,13 +82,17 @@ class FakeSm:
         self.store[SecretId] = SecretString
         self.written[SecretId] = NOW
 
-    def list_secret_version_ids(self, SecretId):
+    def list_secret_version_ids(self, SecretId, NextToken=None):
+        # Two pages, AWSCURRENT on the second, so every case reads past page one.
+        if NextToken is None:
+            return {'Versions': [
+                {'VersionId': 'previous', 'VersionStages': ['AWSPREVIOUS'],
+                 'CreatedDate': T0 - timedelta(days=30)}],
+                'NextToken': 'p2'}
+        assert NextToken == 'p2', NextToken
         return {'Versions': [
-            {'VersionId': 'previous', 'VersionStages': ['AWSPREVIOUS'],
-             'CreatedDate': T0 - timedelta(days=30)},
             {'VersionId': 'current', 'VersionStages': ['AWSCURRENT'],
-             'CreatedDate': self.written[SecretId]},
-        ]}
+             'CreatedDate': self.written[SecretId]}]}
 
     def create_secret(self, Name, SecretString):
         if Name in self.store:
@@ -109,11 +113,12 @@ class FakeEcs:
     """A cluster of services, each with its live deployments."""
 
     def __init__(self, services, fail=None):
-        # name -> list of deployment createdAt; status per name (default ACTIVE)
+        # name -> list of deployment createdAt; status per name (default ACTIVE);
+        # fail: name -> the exception update_service raises for that service.
         self.services = services
         self.status = {}
         self.forced = []
-        self.fail = fail
+        self.fail = fail or {}
 
     def list_services(self, cluster, maxResults, nextToken=None):
         assert cluster == 'anyray-cluster', cluster
@@ -137,8 +142,8 @@ class FakeEcs:
         return {'services': out}
 
     def update_service(self, cluster, service, forceNewDeployment):
-        if self.fail:
-            raise self.fail
+        if service in self.fail:
+            raise self.fail[service]
         assert forceNewDeployment is True
         self.forced.append(service)
 
@@ -346,15 +351,27 @@ mod, sent = load(sm, ecs)
 out = mod.handler({'ResourceProperties': SCHEDULED}, CTX)
 check('an absent db-url restarts nothing', ecs.forced == [], ecs.forced)
 
-print('== a failed restart is reported, and never fails the refresh ==')
+print('== a failed restart blocks no other service, and fails the run ==')
+# One service's error must not strand the rest on the stale credential, and it
+# must reach the function's error metric: nothing reads the scheduled result.
 sm = FakeSm({PREFIX + 'db-url': url_for('old-synthetic')}, 'new-synthetic')
-ecs = FakeEcs({'gateway': [BEFORE]}, fail=RuntimeError('AccessDeniedException'))
+ecs = FakeEcs({'endpoint': [BEFORE], 'gateway': [BEFORE], 'proxy': [BEFORE]},
+              fail={'endpoint': RuntimeError('AccessDeniedException')})
 mod, sent = load(sm, ecs)
-out = mod.handler({'ResourceProperties': SCHEDULED}, CTX)
-check('the rewrite still lands', out.get('Changed') is True
-      and sm.store[PREFIX + 'db-url'] == url_for('new-synthetic'), out)
-check('the failure is named, not swallowed',
-      out.get('RollFailed') == 'RuntimeError' and 'Rolled' not in out, out)
+raised = None
+try:
+    mod.handler({'ResourceProperties': SCHEDULED}, CTX)
+except Exception as e:
+    raised = e
+check('every other stale service still restarts',
+      sorted(ecs.forced) == ['gateway', 'proxy'], ecs.forced)
+check('the run fails, naming the service and the error',
+      raised is not None and 'endpoint' in str(raised) and 'RuntimeError' in str(raised),
+      repr(raised))
+check('the rewrite still lands',
+      sm.store[PREFIX + 'db-url'] == url_for('new-synthetic'), 'db-url not rewritten')
+check('and no CloudFormation reply is sent', sent == [], sent)
+
 del os.environ['CLUSTER']
 
 print('== the schedule passes RollStale; the updater does not ==')

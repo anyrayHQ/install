@@ -686,22 +686,30 @@ Resources:
               # right before registering new task definitions, and a restart
               # there would start a deployment it immediately replaces.
               if props.get('RollStale'):
-                  try:
-                      result['Rolled'] = roll_stale_services(name)
-                  except Exception as e:
-                      # The rewrite above already landed; a failed restart must
-                      # not undo or hide it. Named in the result, so the outcome
-                      # this tick reports is the true one; retried next hour.
-                      print('SecretFn restart FAILED:', traceback.format_exc())
-                      result['RollFailed'] = type(e).__name__
+                  rolled, failed = roll_stale_services(name)
+                  result['Rolled'] = rolled
+                  if failed:
+                      # The rewrite above already landed and a raise cannot undo
+                      # it. Raise anyway: nothing reads a scheduled result, so
+                      # the function's error metric is the only place a stalled
+                      # recovery shows. The next tick retries the failed ones.
+                      print('db-url refresh:', json.dumps(dict(result, RollFailed=failed)))
+                      raise Exception('restart failed for %s' % ', '.join(
+                          '%s (%s)' % f for f in failed))
               return result
 
           def current_version_date(name):
               """When the value a starting task reads now was written."""
-              for v in sm.list_secret_version_ids(SecretId=name).get('Versions') or []:
-                  if 'AWSCURRENT' in (v.get('VersionStages') or []):
-                      return v.get('CreatedDate')
-              return None
+              token = None
+              while True:
+                  page = sm.list_secret_version_ids(
+                      SecretId=name, **({'NextToken': token} if token else {}))
+                  for v in page.get('Versions') or []:
+                      if 'AWSCURRENT' in (v.get('VersionStages') or []):
+                          return v.get('CreatedDate')
+                  token = page.get('NextToken')
+                  if not token:
+                      return None
 
           def roll_stale_services(name):
               """Restart every service still running on an older db-url.
@@ -717,12 +725,13 @@ Resources:
               mid-rollout, or not ACTIVE, is left alone and checked next tick,
               so this never races a deployment CloudFormation or the updater
               is driving. A restart creates a newer deployment, so a service
-              is restarted once per change, never in a loop.
+              is restarted once per change, never in a loop. One service's
+              failure does not stop the others: returns (rolled, failed).
               """
               cluster = os.environ.get('CLUSTER')
               written = current_version_date(name)
               if not cluster or written is None:
-                  return []
+                  return [], []
               ecs = boto3.client('ecs')
               arns, token = [], None
               while True:
@@ -732,7 +741,7 @@ Resources:
                   token = page.get('nextToken')
                   if not token:
                       break
-              rolled = []
+              rolled, failed = [], []
               for i in range(0, len(arns), 10):
                   for svc in ecs.describe_services(cluster=cluster,
                                                    services=arns[i:i + 10])['services']:
@@ -740,10 +749,15 @@ Resources:
                       if svc.get('status') != 'ACTIVE' or len(deployments) != 1:
                           continue
                       if deployments[0]['createdAt'] < written:
-                          ecs.update_service(cluster=cluster, service=svc['serviceName'],
-                                             forceNewDeployment=True)
-                          rolled.append(svc['serviceName'])
-              return rolled
+                          try:
+                              ecs.update_service(cluster=cluster, service=svc['serviceName'],
+                                                 forceNewDeployment=True)
+                              rolled.append(svc['serviceName'])
+                          except Exception as e:
+                              print('SecretFn restart FAILED for %s:' % svc['serviceName'],
+                                    traceback.format_exc())
+                              failed.append((svc['serviceName'], type(e).__name__))
+              return rolled, failed
 
           def handler(event, context):
               # Two callers, two contracts. CloudFormation sends RequestType and

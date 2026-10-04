@@ -12,6 +12,14 @@ name: AWS quicklaunch live smoke
 # staging account (PowerUser + IAM scoped to cfn-smoke-* roles). The role ARN
 # lives in the AWS_CFN_SMOKE_ROLE_ARN repo variable.
 #
+# The job runs in the `cfn-smoke` environment, which needs a reviewer's
+# approval before it starts. The role trusts that environment's OIDC subject
+# (repo:anyrayHQ/install:environment:cfn-smoke), so a template PR can be smoked
+# from its own branch BEFORE merge: a push to main that touches the template
+# publishes it (publish-quicklaunch.yml), so a main-only smoke ran too late.
+# The approval is what keeps arbitrary branch code off the PowerUser role.
+# The deployment token is an environment secret of the internal smoke tenant.
+#
 # Cost per run: ~30-40 min of three RDS instances (one a Multi-AZ
 # db.t4g.medium), 3 ALBs and ~16 Fargate tasks, about a dollar. Everything
 # is torn down in `always()` steps; a janitor also reaps any cfn-smoke-* stack
@@ -44,6 +52,7 @@ jobs:
     # are the expensive part; the runner only drives the CLI.
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     if: vars.AWS_CFN_SMOKE_ROLE_ARN != ''
+    environment: cfn-smoke
     timeout-minutes: 75
     permissions:
       id-token: write

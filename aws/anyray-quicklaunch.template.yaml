@@ -581,10 +581,22 @@ Resources:
                   - secretsmanager:GetSecretValue
                   - secretsmanager:DeleteSecret
                   - secretsmanager:TagResource
+                  # When db-url's current value was written, so the scheduled
+                  # refresh can tell which services started before it.
+                  - secretsmanager:ListSecretVersionIds
                 Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/anyray/*'
               # The master credential is now <stack>/anyray/db-master, already
               # covered by the prefixed grant above — no separate statement, and
               # no read of an RDS-managed rds!db-… secret any more.
+              # Restart services still running on an older db-url (see
+              # roll_stale_services below). Scoped to this stack's cluster, the
+              # same shape as UpdaterRole's grant.
+              - Effect: Allow
+                Action: [ecs:ListServices, ecs:DescribeServices, ecs:UpdateService]
+                Resource: '*'
+                Condition:
+                  ArnEquals:
+                    ecs:cluster: !GetAtt Cluster.Arn
 
   SecretFn:
     Type: AWS::Lambda::Function
@@ -593,9 +605,12 @@ Resources:
       Handler: index.handler
       Timeout: 60
       Role: !GetAtt SecretFnRole.Arn
+      Environment:
+        Variables:
+          CLUSTER: !Ref Cluster
       Code:
         ZipFile: |
-          import json, secrets as rnd, urllib.request, urllib.parse, traceback, boto3
+          import json, os, secrets as rnd, urllib.request, urllib.parse, traceback, boto3
           sm = boto3.client('secretsmanager')
 
           def send(event, context, status, data=None, pid=None):
@@ -662,12 +677,87 @@ Resources:
                       sm.exceptions.InvalidRequestException):
                   return {'Changed': False, 'Reason': 'absent'}
               url = compose_db_url(props)
-              if current == url:
-                  return {'Changed': False}
-              sm.put_secret_value(SecretId=name, SecretString=url)
-              # Never log the URL itself: it carries the master password.
-              print('db-url recomposed from the rotated master secret')
-              return {'Changed': True}
+              result = {'Changed': current != url}
+              if result['Changed']:
+                  sm.put_secret_value(SecretId=name, SecretString=url)
+                  # Never log the URL itself: it carries the master password.
+                  print('db-url recomposed from the rotated master secret')
+              # Only the schedule asks. The updater calls this same refresh
+              # right before registering new task definitions, and a restart
+              # there would start a deployment it immediately replaces.
+              if props.get('RollStale'):
+                  rolled, failed = roll_stale_services(name)
+                  result['Rolled'] = rolled
+                  if failed:
+                      # The rewrite above already landed and a raise cannot undo
+                      # it. Raise anyway: nothing reads a scheduled result, so
+                      # the function's error metric is the only place a stalled
+                      # recovery shows. The next tick retries the failed ones.
+                      print('db-url refresh:', json.dumps(dict(result, RollFailed=failed)))
+                      raise Exception('restart failed for %s' % ', '.join(
+                          '%s (%s)' % f for f in failed))
+              return result
+
+          def current_version_date(name):
+              """When the value a starting task reads now was written."""
+              token = None
+              while True:
+                  page = sm.list_secret_version_ids(
+                      SecretId=name, **({'NextToken': token} if token else {}))
+                  for v in page.get('Versions') or []:
+                      if 'AWSCURRENT' in (v.get('VersionStages') or []):
+                          return v.get('CreatedDate')
+                  token = page.get('NextToken')
+                  if not token:
+                      return None
+
+          def roll_stale_services(name):
+              """Restart every service still running on an older db-url.
+
+              A task reads db-url once, when it starts (the execution role
+              injects it), so a rewritten secret reaches nothing until its
+              service rolls. A stack update that recomposes the URL without
+              changing an image, or a hand rotation of db-master caught up by
+              this refresh, otherwise leaves every running task on a
+              credential the database rejects: the gateway keeps serving and
+              records no spend. A service whose one live deployment began
+              before the current value was written is restarted. One that is
+              mid-rollout, or not ACTIVE, is left alone and checked next tick,
+              so this never races a deployment CloudFormation or the updater
+              is driving. A restart creates a newer deployment, so a service
+              is restarted once per change, never in a loop. One service's
+              failure does not stop the others: returns (rolled, failed).
+              """
+              cluster = os.environ.get('CLUSTER')
+              written = current_version_date(name)
+              if not cluster or written is None:
+                  return [], []
+              ecs = boto3.client('ecs')
+              arns, token = [], None
+              while True:
+                  page = ecs.list_services(cluster=cluster, maxResults=100,
+                                           **({'nextToken': token} if token else {}))
+                  arns += page.get('serviceArns') or []
+                  token = page.get('nextToken')
+                  if not token:
+                      break
+              rolled, failed = [], []
+              for i in range(0, len(arns), 10):
+                  for svc in ecs.describe_services(cluster=cluster,
+                                                   services=arns[i:i + 10])['services']:
+                      deployments = svc.get('deployments') or []
+                      if svc.get('status') != 'ACTIVE' or len(deployments) != 1:
+                          continue
+                      if deployments[0]['createdAt'] < written:
+                          try:
+                              ecs.update_service(cluster=cluster, service=svc['serviceName'],
+                                                 forceNewDeployment=True)
+                              rolled.append(svc['serviceName'])
+                          except Exception as e:
+                              print('SecretFn restart FAILED for %s:' % svc['serviceName'],
+                                    traceback.format_exc())
+                              failed.append((svc['serviceName'], type(e).__name__))
+              return rolled, failed
 
           def handler(event, context):
               # Two callers, two contracts. CloudFormation sends RequestType and
@@ -792,7 +882,8 @@ Resources:
               "Prefix": "${AWS::StackName}/anyray/",
               "MasterSecretArn": "${AppSecrets.DbMasterArn}",
               "DbHost": "${Db.Endpoint.Address}",
-              "DbName": "postgres"
+              "DbName": "postgres",
+              "RollStale": true
             }}
 
   DbUrlRefreshPermission:

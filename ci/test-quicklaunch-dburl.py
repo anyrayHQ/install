@@ -19,6 +19,7 @@ long after the rotation that actually caused it.
 Run: python3 ci/test-quicklaunch-dburl.py
 """
 import json, os, re, sys, types, urllib.parse
+from datetime import datetime, timedelta, timezone
 
 TPL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    'aws', 'anyray-quicklaunch.template.yaml')
@@ -37,6 +38,8 @@ for ln in src[zf:].split('\n')[1:]:
     lines.append(ln[10:])
 CODE = '\n'.join(lines)
 
+T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
 MASTER_ARN = 'arn:aws:secretsmanager:eu-central-1:111122223333:secret:rds!db-synthetic'
 PREFIX = 'anyray/anyray/'
 PROPS = {'Action': 'composeDbUrl', 'Prefix': PREFIX, 'MasterSecretArn': MASTER_ARN,
@@ -51,9 +54,12 @@ class InvalidRequest(Exception): pass
 class FakeSm:
     """Only the calls the handler makes; every write is recorded."""
 
-    def __init__(self, store, password):
+    def __init__(self, store, password, written=None):
         self.store = dict(store)
         self.password = password
+        # When each secret's AWSCURRENT value was written. A put moves it to
+        # NOW, as Secrets Manager does with the new version it creates.
+        self.written = {k: written or T0 for k in store}
         self.puts, self.creates, self.deleted = [], [], []
         self.master_error = None
         self.exceptions = types.SimpleNamespace(
@@ -74,6 +80,15 @@ class FakeSm:
     def put_secret_value(self, SecretId, SecretString):
         self.puts.append(SecretId)
         self.store[SecretId] = SecretString
+        self.written[SecretId] = NOW
+
+    def list_secret_version_ids(self, SecretId):
+        return {'Versions': [
+            {'VersionId': 'previous', 'VersionStages': ['AWSPREVIOUS'],
+             'CreatedDate': T0 - timedelta(days=30)},
+            {'VersionId': 'current', 'VersionStages': ['AWSCURRENT'],
+             'CreatedDate': self.written[SecretId]},
+        ]}
 
     def create_secret(self, Name, SecretString):
         if Name in self.store:
@@ -90,10 +105,48 @@ class FakeSm:
         self.store.pop(SecretId, None)
 
 
-def load(sm):
+class FakeEcs:
+    """A cluster of services, each with its live deployments."""
+
+    def __init__(self, services, fail=None):
+        # name -> list of deployment createdAt; status per name (default ACTIVE)
+        self.services = services
+        self.status = {}
+        self.forced = []
+        self.fail = fail
+
+    def list_services(self, cluster, maxResults, nextToken=None):
+        assert cluster == 'anyray-cluster', cluster
+        names = sorted(self.services)
+        # Two pages, so pagination is exercised whenever there is more than one.
+        half = (len(names) + 1) // 2 if len(names) > 1 else len(names)
+        page = names[:half] if nextToken is None else names[half:]
+        arns = ['arn:aws:ecs:eu-central-1:111122223333:service/anyray-cluster/' + n
+                for n in page]
+        return {'serviceArns': arns,
+                **({'nextToken': 'p2'} if nextToken is None and half < len(names) else {})}
+
+    def describe_services(self, cluster, services):
+        assert len(services) <= 10, services
+        out = []
+        for arn in services:
+            name = arn.split('/')[-1]
+            out.append({'serviceName': name,
+                        'status': self.status.get(name, 'ACTIVE'),
+                        'deployments': [{'createdAt': at} for at in self.services[name]]})
+        return {'services': out}
+
+    def update_service(self, cluster, service, forceNewDeployment):
+        if self.fail:
+            raise self.fail
+        assert forceNewDeployment is True
+        self.forced.append(service)
+
+
+def load(sm, ecs=None):
     """Import the extracted handler with boto3 and the CFN reply stubbed."""
     fake_boto3 = types.ModuleType('boto3')
-    fake_boto3.client = lambda *a, **k: sm
+    fake_boto3.client = lambda name, *a, **k: (ecs if name == 'ecs' else sm)
     sys.modules['boto3'] = fake_boto3
     mod = types.ModuleType('secretfn')
     mod.__dict__['__name__'] = 'secretfn'
@@ -235,6 +288,87 @@ check('a stack update does not re-mint the password',
                          if before.get(k) != sm.store.get(k))})
 check('and writes nothing at all', sm.puts == [] and sm.creates == [],
       {'puts': sm.puts, 'creates': sm.creates})
+
+print('== the hourly refresh restarts services still on an older db-url ==')
+# A task reads db-url once, when it starts, so a rewritten secret reaches
+# nothing until its service rolls. Two ways the value changes with no roll
+# behind it: a stack update that recomposes db-url without changing an image
+# (salt-security, ANY-784: every service kept the stale credential), and a hand
+# rotation of db-master caught up by this refresh.
+os.environ['CLUSTER'] = 'anyray-cluster'
+SCHEDULED = dict(PROPS, RollStale=True)
+BEFORE = T0 - timedelta(hours=1)
+AFTER = T0 + timedelta(hours=1)
+
+sm = FakeSm({PREFIX + 'db-url': url_for('same-synthetic')}, 'same-synthetic')
+ecs = FakeEcs({'gateway': [BEFORE], 'optimizer': [AFTER], 'proxy': [BEFORE]})
+mod, sent = load(sm, ecs)
+out = mod.handler({'ResourceProperties': SCHEDULED}, CTX)
+check('a service started before the current db-url is restarted',
+      sorted(ecs.forced) == ['gateway', 'proxy'], ecs.forced)
+check('one started after it is left alone', 'optimizer' not in ecs.forced, ecs.forced)
+check('the refresh reports what it restarted',
+      out.get('Changed') is False and sorted(out.get('Rolled') or []) == ['gateway', 'proxy'],
+      out)
+
+print('== a rewrite in the same tick restarts every service ==')
+sm = FakeSm({PREFIX + 'db-url': url_for('old-synthetic')}, 'new-synthetic')
+ecs = FakeEcs({'gateway': [AFTER], 'optimizer': [AFTER]})
+mod, sent = load(sm, ecs)
+out = mod.handler({'ResourceProperties': SCHEDULED}, CTX)
+check('both services predate the new value and restart',
+      out.get('Changed') is True and sorted(ecs.forced) == ['gateway', 'optimizer'],
+      '%s %s' % (out, ecs.forced))
+
+print('== a rollout already in progress is left to finish ==')
+sm = FakeSm({PREFIX + 'db-url': url_for('same-synthetic')}, 'same-synthetic')
+ecs = FakeEcs({'gateway': [BEFORE, AFTER], 'proxy': [BEFORE]})
+ecs.status['proxy'] = 'DRAINING'
+mod, sent = load(sm, ecs)
+out = mod.handler({'ResourceProperties': SCHEDULED}, CTX)
+check('two live deployments, or a service not ACTIVE, is skipped',
+      ecs.forced == [] and out.get('Rolled') == [], '%s %s' % (out, ecs.forced))
+
+print('== only the schedule restarts anything ==')
+# The updater calls the same refresh right before it registers new task
+# definitions; restarting there would start a deployment it immediately
+# replaces.
+sm = FakeSm({PREFIX + 'db-url': url_for('old-synthetic')}, 'new-synthetic')
+ecs = FakeEcs({'gateway': [BEFORE]})
+mod, sent = load(sm, ecs)
+out = mod.handler({'ResourceProperties': PROPS}, CTX)
+check('without RollStale nothing is restarted',
+      ecs.forced == [] and 'Rolled' not in out, '%s %s' % (out, ecs.forced))
+
+sm = FakeSm({}, 'synthetic')
+ecs = FakeEcs({'gateway': [BEFORE]})
+mod, sent = load(sm, ecs)
+out = mod.handler({'ResourceProperties': SCHEDULED}, CTX)
+check('an absent db-url restarts nothing', ecs.forced == [], ecs.forced)
+
+print('== a failed restart is reported, and never fails the refresh ==')
+sm = FakeSm({PREFIX + 'db-url': url_for('old-synthetic')}, 'new-synthetic')
+ecs = FakeEcs({'gateway': [BEFORE]}, fail=RuntimeError('AccessDeniedException'))
+mod, sent = load(sm, ecs)
+out = mod.handler({'ResourceProperties': SCHEDULED}, CTX)
+check('the rewrite still lands', out.get('Changed') is True
+      and sm.store[PREFIX + 'db-url'] == url_for('new-synthetic'), out)
+check('the failure is named, not swallowed',
+      out.get('RollFailed') == 'RuntimeError' and 'Rolled' not in out, out)
+del os.environ['CLUSTER']
+
+print('== the schedule passes RollStale; the updater does not ==')
+rule = src[src.index('  DbUrlRefreshRule:'):src.index('  DbUrlRefreshPermission:')]
+check('DbUrlRefreshRule asks for the restart', '"RollStale": true' in rule, 'flag missing')
+upd = src[src.index('  UpdaterFn:'):src.index('  UpdaterUrl:')]
+check("the updater's pre-roll refresh does not", 'RollStale' not in upd, 'flag present')
+fn = src[src.index('  SecretFn:'):src.index('      Code:', src.index('  SecretFn:'))]
+check('SecretFn knows its cluster', 'CLUSTER: !Ref Cluster' in fn, 'env missing')
+role = src[src.index('  SecretFnRole:'):src.index('  SecretFn:')]
+check('SecretFnRole may restart services in its own cluster only',
+      'ecs:UpdateService' in role and 'ecs:cluster: !GetAtt Cluster.Arn' in role, 'grant missing')
+check('SecretFnRole may read version dates', 'secretsmanager:ListSecretVersionIds' in role,
+      'grant missing')
 
 print()
 print('FAILED: %d' % len(fails) if fails else 'ALL PASS')

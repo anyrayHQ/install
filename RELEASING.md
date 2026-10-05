@@ -443,15 +443,27 @@ by ARN with no wildcard, so a new runner project dies in `QUEUED` with
 the failure IS the inability to write logs) until its group is granted in a
 per-addition inline policy.
 
-Both persistent projects and the ephemeral mac project are webhook-driven
+The persistent runner projects (`anyray-install-runner`, `anyray-install-runner-ubuntu`,
+`anyray-install-runner-win`) and the ephemeral mac project are webhook-driven
 (`WORKFLOW_JOB_QUEUED`) and **gated to the release maintainers' GitHub account ids** —
-required because the repo is public, so a fork-PR actor can never start a runner. The list is
-`MAINTAINER_ACCOUNT_IDS` in `scripts/mac-fleet.sh` (today `0xtechdean` and `Dima-Othentic`).
-A dispatch by anyone else leaves the macOS jobs queued with no runner until the watchdog cancels
-them. To add a maintainer, append their id (`gh api users/<login> --jq .id`) there; `mac-fleet.sh
-up` rewrites the ephemeral project's webhook on every release, so the change takes effect on the
-next release after it merges. The persistent Linux and Windows projects carry their own filters,
-configured outside this repo.
+required because the repo is public, so a fork-PR actor can never start a runner. A dispatch by
+anyone outside a project's filter leaves that project's jobs queued with no runner until the
+watchdog cancels them.
+
+To add a release maintainer (`gh api users/<login> --jq .id` gives the id), update both places:
+
+1. **Ephemeral mac project:** append the id to `MAINTAINER_ACCOUNT_IDS` in `scripts/mac-fleet.sh`
+   (today `0xtechdean` and `Dima-Othentic`). `mac-fleet.sh up` rewrites this webhook on every
+   release, so it takes effect on the next release after the change merges.
+2. **Persistent projects:** their filters live in AWS, not in this repo. Read them, then add the
+   id to each project's `ACTOR_ACCOUNT_ID` pattern with `aws codebuild update-webhook
+   --project-name <project> --filter-groups '<the read groups, pattern extended>'`:
+
+   ```bash
+   aws codebuild batch-get-projects --region eu-central-1 \
+     --names anyray-install-runner anyray-install-runner-ubuntu anyray-install-runner-win \
+     --query 'projects[].{name:name,filters:webhook.filterGroups}'
+   ```
 
 Apple signing secrets (all required): `APPLE_SIGNING_CERT_P12` +
 `APPLE_SIGNING_CERT_PASSWORD` for the inner binaries,

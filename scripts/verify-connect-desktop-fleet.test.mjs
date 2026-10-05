@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-function runFleet(t, action, fleetStatus, { connections = ['arn:aws:codeconnections:test:connection/example'], webhookStatus = 'ACTIVE' } = {}) {
+function runFleet(t, action, fleetStatus, { connections = ['arn:aws:codeconnections:test:connection/example'], webhookStatus = 'ACTIVE', projectExists = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'desktop-fleet-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // `list-connections` returns tab-separated ARNs with --output text, and an
@@ -18,6 +18,7 @@ case "$*" in
   *batch-get-fleets*status.statusCode*) echo "$FLEET_TEST_STATUS" ;;
   *batch-get-fleets*) echo arn:aws:codebuild:test:fleet/example ;;
   *batch-get-projects*webhook.status*) echo "$FLEET_TEST_WEBHOOK_STATUS" ;;
+  *batch-get-projects*projects\\[0\\].name*) echo "$FLEET_TEST_PROJECT_NAME" ;;
   *batch-get-projects*) echo None ;;
   *codeconnections*list-connections*) printf '%s\\n' "$FLEET_TEST_CONNECTIONS" ;;
 esac
@@ -29,6 +30,7 @@ esac
       FLEET_TEST_LOG: join(dir, 'calls'), FLEET_TEST_STATUS: fleetStatus,
       FLEET_TEST_CONNECTIONS: connections.join('\t'),
       FLEET_TEST_WEBHOOK_STATUS: webhookStatus,
+      FLEET_TEST_PROJECT_NAME: projectExists ? 'anyray-install-runner-mac' : 'None',
       // Never inherit a real override from the developer's shell: it would skip
       // discovery entirely and quietly pass the tests that exercise it.
       ANYRAY_CODECONNECTION_ARN: '' },
@@ -115,4 +117,40 @@ test('a webhook stuck CREATING fails instead of stranding sign-macos', (t) => {
   const result = runFleet(t, 'up', 'PENDING_DELETION', { webhookStatus: 'CREATING' });
   assert.equal(result.status, 1);
   assert.match(result.stdout, /never became ACTIVE \(last status: CREATING\)/);
+});
+
+// Every release maintainer must be able to start the Mac runner; anyone else
+// (a fork-PR actor on this public repo) must not.
+const MAINTAINER_IDS = ['16443050', '187185370'];
+
+function actorPattern(calls) {
+  const line = calls.split('\n').find((c) => c.includes('create-webhook'));
+  assert.ok(line, 'create-webhook was never called');
+  const match = line.match(/"type":"ACTOR_ACCOUNT_ID","pattern":"([^"]+)"/);
+  assert.ok(match, 'the webhook has no ACTOR_ACCOUNT_ID filter');
+  return new RegExp(match[1]);
+}
+
+test('the runner webhook admits every release maintainer and nobody else', (t) => {
+  const result = runFleet(t, 'up', 'PENDING_DELETION');
+  assert.equal(result.status, 0, result.stderr);
+  const pattern = actorPattern(result.calls);
+  for (const id of MAINTAINER_IDS) assert.ok(pattern.test(id), `maintainer ${id} cannot start the runner`);
+  for (const id of ['1', '1644305', '164430500', '187185370 ', 'x16443050']) {
+    assert.ok(!pattern.test(id), `non-maintainer ${JSON.stringify(id)} can start the runner`);
+  }
+});
+
+test('an existing runner project gets the current maintainer filter before handoff', (t) => {
+  const result = runFleet(t, 'up', 'PENDING_DELETION', { projectExists: true });
+  assert.equal(result.status, 0, result.stderr);
+  const calls = result.calls.split('\n');
+  assert.ok(calls.some((c) => c.includes('update-project')), 'the existing project was not repointed');
+  const deleted = calls.findIndex((c) => c.includes('delete-webhook'));
+  const created = calls.findIndex((c) => c.includes('create-webhook'));
+  const polled = calls.findIndex((c, i) => i > created && c.includes('webhook.status'));
+  assert.ok(deleted >= 0 && created > deleted, 'the stale webhook was not replaced');
+  assert.ok(polled > created, 'webhook status was not checked after it was replaced');
+  const pattern = actorPattern(result.calls);
+  for (const id of MAINTAINER_IDS) assert.ok(pattern.test(id), `maintainer ${id} cannot start the runner`);
 });

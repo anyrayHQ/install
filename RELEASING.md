@@ -444,9 +444,14 @@ the failure IS the inability to write logs) until its group is granted in a
 per-addition inline policy.
 
 Both persistent projects and the ephemeral mac project are webhook-driven
-(`WORKFLOW_JOB_QUEUED`) and **gated to the maintainer actor** (`ACTOR_ACCOUNT_ID` = 16443050) —
-required because the repo is public, so a fork-PR actor can never start a runner. Adding a
-release maintainer means extending that id in the webhook filters and `mac-fleet.sh`.
+(`WORKFLOW_JOB_QUEUED`) and **gated to the release maintainers' GitHub account ids** —
+required because the repo is public, so a fork-PR actor can never start a runner. The list is
+`MAINTAINER_ACCOUNT_IDS` in `scripts/mac-fleet.sh` (today `0xtechdean` and `Dima-Othentic`).
+A dispatch by anyone else leaves the macOS jobs queued with no runner until the watchdog cancels
+them. To add a maintainer, append their id (`gh api users/<login> --jq .id`) there; `mac-fleet.sh
+up` rewrites the ephemeral project's webhook on every release, so the change takes effect on the
+next release after it merges. The persistent Linux and Windows projects carry their own filters,
+configured outside this repo.
 
 Apple signing secrets (all required): `APPLE_SIGNING_CERT_P12` +
 `APPLE_SIGNING_CERT_PASSWORD` for the inner binaries,

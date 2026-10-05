@@ -73,8 +73,10 @@ codeconnection() {
     *) echo "::error::${#conns[@]} AVAILABLE GitHub CodeConnections in this account/${REGION}; set ANYRAY_CODECONNECTION_ARN to pick one." >&2; return 1 ;;
   esac
 }
-# Only this GitHub account id may start a runner (fork-PR RCE guard on a PUBLIC repo).
-ACTOR_ACCOUNT_ID="16443050"
+# Only these GitHub account ids may start a runner (fork-PR RCE guard on a PUBLIC repo).
+# Release maintainers: 0xtechdean, Dima-Othentic. Ids, not logins: a login can be renamed and reused.
+MAINTAINER_ACCOUNT_IDS="16443050 187185370"
+ACTOR_PATTERN="^($(printf '%s' "$MAINTAINER_ACCOUNT_IDS" | tr ' ' '|'))\$"
 SOURCE_URL="https://github.com/anyrayHQ/install.git"
 
 # Block until the runner webhook will actually start a build (see its caller).
@@ -103,6 +105,14 @@ wait_webhook_active() {
   fi
   echo "webhook ACTIVE; settling ${WEBHOOK_SETTLE}s before sign-macos queues"
   sleep "$WEBHOOK_SETTLE"
+}
+
+# Replaces any existing webhook, so a project that outlived a teardown never
+# keeps a stale maintainer list.
+create_runner_webhook() {
+  aws codebuild delete-webhook --region "$REGION" --project-name "$PROJECT" >/dev/null 2>&1 || true
+  aws codebuild create-webhook --region "$REGION" --project-name "$PROJECT" \
+    --filter-groups "[[{\"type\":\"EVENT\",\"pattern\":\"WORKFLOW_JOB_QUEUED\"},{\"type\":\"ACTOR_ACCOUNT_ID\",\"pattern\":\"${ACTOR_PATTERN}\"}]]" >/dev/null
 }
 
 fleet_arn() {
@@ -152,6 +162,8 @@ up() {
     echo "updating existing project $PROJECT -> fleet $arn"
     aws codebuild update-project --region "$REGION" --name "$PROJECT" \
       --environment "type=MAC_ARM,image=aws/codebuild/macos-arm-base:14,computeType=BUILD_GENERAL1_MEDIUM,fleet={fleetArn=$arn}" >/dev/null
+    create_runner_webhook
+    wait_webhook_active || exit 1
   else
     echo "creating project $PROJECT bound to fleet $arn"
     local conn; conn="$(codeconnection)"
@@ -161,10 +173,9 @@ up() {
       --artifacts type=NO_ARTIFACTS \
       --environment "type=MAC_ARM,image=aws/codebuild/macos-arm-base:14,computeType=BUILD_GENERAL1_MEDIUM,fleet={fleetArn=$arn}" \
       --service-role "$RUNNER_SERVICE_ROLE" >/dev/null
-    # Webhook: start a runner on a queued job, but ONLY for the maintainer actor
+    # Webhook: start a runner on a queued job, but ONLY for a release maintainer
     # (public repo — a fork-PR actor must never start a Mac).
-    aws codebuild create-webhook --region "$REGION" --project-name "$PROJECT" \
-      --filter-groups "[[{\"type\":\"EVENT\",\"pattern\":\"WORKFLOW_JOB_QUEUED\"},{\"type\":\"ACTOR_ACCOUNT_ID\",\"pattern\":\"^${ACTOR_ACCOUNT_ID}$\"}]]" >/dev/null
+    create_runner_webhook
     # `create-webhook` returning is NOT the webhook being able to act on an
     # event, and sign-macos queues the instant this job ends. GitHub delivers a
     # job's `queued` event exactly once and never retries, so an event that

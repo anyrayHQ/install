@@ -166,14 +166,14 @@ describe('desktop release workflow safety contract', () => {
     assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) && needs\.provision-mac\.result != 'skipped' \}\}/);
   });
 
-  test('bootstraps pinned Rust and MSVC on both Windows compile jobs', () => {
-    for (const name of ['build-windows-unsigned', 'bundle-windows-unsigned']) {
-      const body = job(name);
-      assert.match(body, /Rust toolchain and MSVC build tools \(pinned\)/);
-      assert.match(body, /VS_BUILDTOOLS_SHA256/);
-      assert.match(body, /RUSTUP_INIT_SHA256_WINDOWS_X64/);
-      assert.match(body, /Microsoft\.VisualStudio\.Workload\.VCTools/);
-    }
+  test('bootstraps pinned Rust on both Windows jobs and MSVC once, in the build job', () => {
+    const build = job('build-windows-unsigned');
+    assert.match(build, /Rust toolchain and MSVC build tools \(pinned\)/);
+    assert.match(build, /VS_BUILDTOOLS_SHA256/);
+    assert.match(build, /Microsoft\.VisualStudio\.Workload\.VCTools/);
+    const bundle = job('bundle-windows-unsigned');
+    assert.doesNotMatch(bundle, /VS_BUILDTOOLS|vswhere|VCTools/);
+    for (const body of [build, bundle]) assert.match(body, /RUSTUP_INIT_SHA256_WINDOWS_X64/);
     assert.match(workflow, /VS_BUILDTOOLS_URL: 'https:\/\/download\.visualstudio\.microsoft\.com\//);
     assert.doesNotMatch(workflow, /aka\.ms/);
   });

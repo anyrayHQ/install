@@ -63,6 +63,11 @@ CLI release.
 | `prepare` | Compiles the CLI from `connect-sets/<set_key>/npm/anyray-connect-<version>.tgz` in the CI artifacts bucket (not npm), signs and verifies the CLI and every desktop OS, publishes nothing, and stores the signed set under `connect-sets/<set_key>/` (`set_key` defaults to the version). The CLI set must be complete or nothing is stored. `MISSING` is always written, empty when every desktop OS verified, otherwise one OS name per line. `PACKAGE_SHA256` is the hash of the `.tgz` that was compiled: the caller must match it to the one it uploaded. |
 | `publish` | Builds nothing. Refuses the set unless the hash of its `SHA256SUMS` equals `set_sums_sha256`, and fetches only the files that file lists, each checked against it. The set records the `VERSION` and `SOURCE_SHA` it was prepared for; a different `version` or `source_sha` is refused. Publishes the CLI release (a no-op when `connect-v<version>` already exists with every set file uploaded, rebuilt when assets are missing, refused when older than the published one), then calls the desktop workflow to publish each OS present and reconcile the feed. |
 
+A partial publication from a `publish` run can be completed by dispatching `mode=publish`
+again with the same `version` and `set_sums_sha256`: it loads the same stored set, so
+files already on the release carry identical bytes and are skipped, and only the missing
+ones upload. (A `release` run cannot be completed this way, because rebuilding re-signs.)
+
 The signed set sits in the CI artifacts bucket, which any job in this repo or the
 monorepo can write, so the only trust anchor is `set_sums_sha256` coming from a
 record only `main` can write. Build provenance is attested at `publish`, not

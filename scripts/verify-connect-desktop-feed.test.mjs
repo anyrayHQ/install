@@ -218,3 +218,47 @@ test('a stable switch failing on an installer restores every old asset', (t) => 
   assert.ok(!f.calls.some((args) => args.includes('DELETE')));
   assert.throws(f.publish, /Incomplete feed publication/);
 });
+
+test('feedFiles keeps only the installer downloads whose source file is available', () => {
+  const version = '2.0.0';
+  const available = [`anyray-connect-desktop-${version}-macos-universal.pkg`];
+  assert.deepEqual(
+    feedFiles('stable', version, available).map(({ name }) => name),
+    ['connect-desktop.json', 'connect-desktop.json.asc', 'anyray-connect-desktop-macos-universal.pkg']
+  );
+  assert.equal(feedFiles('stable', version, []).length, 2);
+  assert.equal(feedFiles('stable', version).length, 6);
+});
+
+test('a partial stable feed adds an OS download it never had and swaps the rest', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'feed-test-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const version = '2.0.0';
+  const manifest = { version, tag: 'connect-desktop-v2.0.0-abcdef' };
+  const present = ['-macos-universal.pkg', '-windows-x64.msi'].map((suffix) => `anyray-connect-desktop-${version}${suffix}`);
+  for (const name of ['connect-desktop.json', 'connect-desktop.json.asc', ...present]) writeFileSync(join(directory, name), JSON.stringify(manifest));
+  // The live feed already serves the manifest pair and the macOS download only.
+  const assets = ['connect-desktop.json', 'connect-desktop.json.asc', 'anyray-connect-desktop-macos-universal.pkg']
+    .map((name, index) => ({ id: index + 1, name }));
+  const run = (args) => {
+    if (args[0] === 'release') {
+      if (args[1] === 'upload') for (const path of args.slice(5)) assets.push({ id: assets.length + 1, name: basename(path) });
+      return '';
+    }
+    const path = args[1];
+    if (path.endsWith('/releases')) return JSON.stringify([[{ id: 10, tag_name: 'connect-desktop', prerelease: true }]]);
+    if (path.endsWith('/10/assets')) return JSON.stringify([assets]);
+    const id = Number(path.split('/').at(-1));
+    const asset = assets.find((item) => item.id === id);
+    if (args.includes('PATCH')) { asset.name = args.at(-1).slice(5); return '{}'; }
+    if (args.includes('DELETE')) { assets.splice(assets.indexOf(asset), 1); return ''; }
+    return JSON.stringify(id === 1 ? { version: '1.0.0' } : manifest);
+  };
+  publishFeed({ repo: 'anyrayHQ/install', version, tag: manifest.tag, channel: 'stable', assetsDir: directory, available: present }, run);
+  assert.deepEqual(assets.map((asset) => asset.name).sort(), [
+    'anyray-connect-desktop-macos-universal.pkg',
+    'anyray-connect-desktop-windows-x64.msi',
+    'connect-desktop.json',
+    'connect-desktop.json.asc',
+  ]);
+});

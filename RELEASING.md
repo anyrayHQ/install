@@ -13,6 +13,42 @@ becomes latest. A re-cut of an older version is published with
 `--latest=false`, so `connect.sh`, `connect.ps1`, and managed self-update do not
 downgrade clients. Prerelease package versions belong in the staging lane.
 
+## Releasing the desktop app in the same run
+
+Pass `source_sha` (the exact 40-hex monorepo commit, reachable from `origin/main`)
+with an explicit `x.y.z` `version` and the run also builds, signs and publishes the
+Connect desktop app on the stable channel. Empty `source_sha` is the CLI-only
+release above, unchanged. `staging: true` stays CLI-only and ignores `source_sha`.
+Dispatch from `main`. Bad desktop inputs fail in `signing-preflight`, before the CLI
+ships.
+
+The app's jobs live only in `release-connect-desktop.yml`. The `desktop` job here
+calls it (`workflow_call`, `secrets: inherit`) once `release` and `teardown-mac`
+are done, so the app ships after the CLI and a desktop failure never touches the
+CLI release.
+
+- **One engine.** A called run shares this run's id, so it reads the engines
+  `build` uploaded through the usual S3 artifact keys (`reuse_engines`). The macOS
+  universal and Linux x64 bundles embed those bytes as the sidecar (macOS re-signs
+  it inside the app). The MSI bundles the Authenticode-signed `.exe` the CLI lane
+  signed, so the desktop lane signs only `connect-tray.exe`. Run by hand, the
+  desktop workflow still compiles its own engines.
+- **Its own Mac.** The called workflow provisions and tears down a Mac of its own;
+  `mac-fleet.sh up` reuses a live fleet.
+- **Per-OS publication.** `publish-macos`, `publish-windows` and `publish-linux`
+  run one after another, each uploading its signed files to the versioned
+  `connect-desktop[-staging]-v<version>-<sha12>` release (created if missing,
+  uploads retried with `--clobber`) and rewriting the signed manifest and the
+  channel feed from every asset on that release (`scripts/publish-desktop-release.sh`).
+  An OS whose chain failed is skipped and its clients stay on their version.
+  `reconcile-feed` rewrites the feed once more and fails naming any OS still
+  missing. `minVersion` is written only when all three OSes are on the release,
+  because a floor in a feed that lacks an OS would strand it. This applies to manual
+  desktop runs too, staging included.
+- **No staging-first gate.** Stable no longer requires the same version and commit to
+  have published on staging first. `channel: staging` still works for manual runs.
+- `dry_run` builds, signs and verifies everything and publishes nothing.
+
 ## Signing (RFC 0010 §6)
 
 Signing is **mandatory on every platform**, and the `signing-preflight` job

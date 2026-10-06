@@ -29,7 +29,7 @@ const job = (name) => {
 describe('desktop release workflow safety contract', () => {
   test('is manual-only and selects the channel through one staging-default choice', () => {
     const trigger = workflow.slice(0, workflow.indexOf('\npermissions:'));
-    assert.match(trigger, /\non:\n  workflow_dispatch:\n/);
+    assert.match(trigger, /\non:\n  workflow_call:\n[\s\S]*?\n  workflow_dispatch:\n/);
     assert.doesNotMatch(trigger, /\n  (push|pull_request|workflow_run|repository_dispatch|schedule):/);
     assert.match(trigger, /\n      version:/);
     assert.match(trigger, /\n      source_sha:/);
@@ -97,7 +97,10 @@ describe('desktop release workflow safety contract', () => {
       'sign-windows-inner',
       'sign-windows-installer',
       'sign-linux-artifacts',
-      'assemble-signed-release',
+      'publish-macos',
+      'publish-windows',
+      'publish-linux',
+      'reconcile-feed',
     ]) {
       assert.doesNotMatch(job(name), /private-source|MONOREPO_READ_APP|monorepo-token/);
     }
@@ -429,10 +432,9 @@ describe('desktop release workflow safety contract', () => {
     assert.match(linux, /dbus-run-session -- xvfb-run -a "\$main"/);
     assert.match(linux, /kill -KILL -- "-\$tray_pid"/);
     assert.match(linux, /rm -f "\$autostart"/);
-    assert.match(
-      job('assemble-signed-release'),
-      /- verify-macos-signed[\s\S]*- verify-windows-signatures[\s\S]*- smoke-linux-installers/
-    );
+    assert.match(job('publish-macos'), /needs\.verify-macos-signed\.result == 'success'/);
+    assert.match(job('publish-windows'), /needs\.verify-windows-signatures\.result == 'success'/);
+    assert.match(job('publish-linux'), /needs\.smoke-linux-installers\.result == 'success'/);
   });
 
   test('exercises owned and foreign fleetd branches after planting real receipts', () => {
@@ -637,22 +639,15 @@ describe('desktop release workflow safety contract', () => {
     }
   });
 
-  test('publishes per channel while preserving releases/latest', () => {
-    const publish = job('publish-release');
-    assert.match(publish, /if: \$\{\{ !inputs\.dry_run \}\}/);
-    assert.match(publish, /staging:connect-desktop-staging-v\*\) prerelease=true ;;/);
-    assert.match(publish, /stable:connect-desktop-v\*\) prerelease=false ;;/);
-    assert.match(publish, /\*\) echo "::error::refusing desktop tag/);
-    assert.match(publish, /--prerelease/);
-    // Every create, on both channels, keeps releases/latest on the CLI.
-    const creates = publish.match(/gh release create[\s\S]*?assets\/\*/g) ?? [];
-    assert.equal(creates.length, 2);
-    for (const create of creates) assert.match(create, /--latest=false/);
-    assert.match(publish, /group: \$\{\{ needs\.preflight\.outputs\.feed \}\}-feed/);
-    assert.match(publish, /latest_before/);
-    assert.match(publish, /latest_after/);
-    assert.doesNotMatch(publish, /release delete|--clobber|echo 0/);
-    assert.match(publish, /node scripts\/publish-desktop-feed\.mjs/);
+  test('publishes each OS on its own, sequentially, and never on a dry run', () => {
+    for (const name of ['publish-macos', 'publish-windows', 'publish-linux', 'reconcile-feed']) {
+      assert.match(job(name), /!inputs\.dry_run/);
+      assert.match(job(name), /CHANNEL: \$\{\{ needs\.preflight\.outputs\.channel \}\}/);
+    }
+    assert.match(job('publish-windows'), /needs: \[preflight, verify-windows-signatures, publish-macos\]/);
+    assert.match(job('publish-linux'), /needs: \[[^\]]*publish-windows\]/);
+    assert.match(job('reconcile-feed'), /always\(\)/);
+    assert.match(job('reconcile-feed'), /publish-desktop-release\.sh --require-all/);
     assert.doesNotMatch(workflow, /connect-update\.json|npm publish|gen-winget|gen-homebrew/);
   });
 });
@@ -759,18 +754,20 @@ test('ships a signed, notarized uninstaller pkg inside the desktop PKG payload',
   );
 });
 
-test('desktop staging assets contain one PKG, one updater tarball, and no DMG', () => {
-  const assemble = job('assemble-signed-release');
-  assert.match(assemble, /cp platform\/macos\/\*\.pkg assets\//);
-  assert.match(assemble, /cp platform\/macos\/\*\.app\.tar\.gz assets\//);
-  assert.match(assemble, /-name '\*\.pkg'[\s\S]*-eq 1/);
-  assert.match(assemble, /-name '\*\.dmg'[\s\S]*-eq 0/);
+test('the macOS set is one PKG plus one updater tarball, published by its own job', () => {
+  assert.match(job('sign-macos'), /path: out\/\*\.pkg out\/\*\.app\.tar\.gz/);
+  assert.match(job('publish-macos'), /name: connect-desktop-macos-signed/);
+  assert.match(job('publish-macos'), /publish-desktop-release\.sh platform\/macos/);
 });
 
 test('all Mac fleet owners serialize the full workflow, including cleanup', () => {
   for (const file of ['release-connect-desktop.yml', 'release-connect-binaries.yml', 'release-fleetd-installer.yml']) {
     const text = readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), 'utf8');
-    assert.match(text, /^concurrency:\n(?:  #[^\n]*\n)*  group: anyray-install-mac-release\n  cancel-in-progress: false/m);
+    // A called desktop run holds its caller's group already, so it takes its own and avoids waiting on itself.
+    const group = file === 'release-connect-desktop.yml'
+      ? "\\$\\{\\{ inputs\\.reuse_engines && format\\('connect-desktop-called-\\{0\\}', github\\.run_id\\) \\|\\| 'anyray-install-mac-release' \\}\\}"
+      : 'anyray-install-mac-release';
+    assert.match(text, new RegExp(`^concurrency:\\n(?:  #[^\\n]*\\n)*  group: ${group}\\n  cancel-in-progress: false`, 'm'));
   }
 });
 
@@ -789,7 +786,7 @@ test('native builds use the source-pinned pnpm before any packaging command', ()
 test('MSI verification uses Windows trust rather than the PE-only parser', () => {
   assert.doesNotMatch(job('sign-windows-installer'), /verify-authenticode\.py/);
   assert.match(job('verify-windows-signatures'), /\$installers \| ForEach-Object \{\s*\.\/scripts\/verify-authenticode-windows\.ps1/);
-  assert.match(job('assemble-signed-release'), /- verify-windows-signatures/);
+  assert.match(job('publish-windows'), /verify-windows-signatures/);
 });
 
 test('universal builds stage a validated engine for both compile targets and bundling', () => {

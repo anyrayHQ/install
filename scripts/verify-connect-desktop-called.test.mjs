@@ -17,7 +17,7 @@ const job = (text, name) => {
 
 describe('the CLI release calls the desktop workflow', () => {
   test('desktop jobs live only in release-connect-desktop.yml', () => {
-    for (const name of ['build-macos-unsigned', 'sign-windows-inner', 'build-linux-unsigned', 'publish-macos']) {
+    for (const name of ['build-macos-unsigned', 'sign-windows-inner', 'build-linux-unsigned', 'publish']) {
       assert.doesNotMatch(caller, new RegExp(`\\n  ${name}:\\n`));
       assert.match(callee, new RegExp(`\\n  ${name}:\\n`));
     }
@@ -76,7 +76,7 @@ describe('prepare and publish modes', () => {
   });
 
   test('publish builds nothing and has its own concurrency group', () => {
-    assert.match(job(caller, 'build'), /if: \$\{\{ inputs\.mode != 'publish' \}\}/);
+    assert.match(job(caller, 'build'), /inputs\.mode != 'publish'/);
     assert.match(caller, /group: \$\{\{ inputs\.mode == 'publish' && 'anyray-install-connect-publish' \|\| 'anyray-install-mac-release' \}\}/);
     assert.match(job(caller, 'teardown-mac'), /needs\.provision-mac\.result != 'skipped'/);
   });
@@ -104,11 +104,43 @@ describe('prepare and publish modes', () => {
   });
 
   test('the desktop workflow publishes only staged OSes in publish mode and nothing in prepare', () => {
-    for (const name of ['publish-macos', 'publish-windows', 'publish-linux', 'reconcile-feed']) {
+    for (const name of ['publish', 'reconcile-feed']) {
       assert.match(job(callee, name), /inputs\.mode != 'prepare'/);
+      assert.match(job(callee, name), /needs\.validate-source\.result == 'success' \|\| inputs\.mode == 'publish'/);
     }
-    assert.match(job(callee, 'publish-macos'), /contains\(inputs\.present, 'macos'\)/);
+    assert.match(job(callee, 'publish'), /contains\(inputs\.present, 'macos'\)/);
     assert.match(job(callee, 'validate-source'), /if: \$\{\{ inputs\.mode != 'publish' \}\}/);
     assert.match(callee, /outputs:\n\s+macos:[\s\S]*?jobs\.outcome\.outputs\.macos/);
+  });
+});
+
+describe('validation gates what ships', () => {
+  test('the caller proves the source commit before build, and a failed proof blocks it', () => {
+    const validate = job(caller, 'validate-desktop');
+    assert.match(validate, /uses: \.\/\.github\/actions\/gate-private-source/);
+    assert.match(validate, /verify_npm_head: \$\{\{ inputs\.mode == 'release' && 'true' \|\| 'false' \}\}/);
+    assert.match(job(caller, 'build'), /needs: \[signing-preflight, validate-desktop\]/);
+    assert.match(job(caller, 'build'), /needs\.validate-desktop\.result != 'failure'/);
+  });
+
+  test('the desktop validate-source uses the same shared gate, not a copy', () => {
+    assert.match(job(callee, 'validate-source'), /uses: \.\/\.github\/actions\/gate-private-source/);
+    assert.doesNotMatch(job(callee, 'validate-source'), /verify-connect-desktop-source\.mjs/);
+  });
+
+  test('the shared gate compares the npm gitHead with source_sha', () => {
+    const gate = readFileSync(new URL('../.github/actions/gate-private-source/action.yml', import.meta.url), 'utf8');
+    assert.match(gate, /npm view "anyray-connect@\$\{PACKAGE_VERSION\}" gitHead/);
+    assert.match(gate, /test "\$head" = "\$EXPECTED_SOURCE_SHA"/);
+  });
+
+  test('neither the per-OS publish nor reconcile-feed runs unless validation succeeded', () => {
+    for (const name of ['publish', 'reconcile-feed']) {
+      const body = job(callee, name);
+      assert.match(body, /needs: \[[^\]]*validate-source/);
+      assert.match(body, /needs\.validate-source\.result == 'success'/);
+    }
+    // publish mode builds nothing, so load-set (the caller's gate for the call) stands in for validate-source.
+    assert.match(job(caller, 'desktop'), /needs\.load-set\.result == 'success'/);
   });
 });

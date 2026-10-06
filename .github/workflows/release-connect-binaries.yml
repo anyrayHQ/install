@@ -206,7 +206,8 @@ jobs:
             echo "::error::publish needs set_sums_sha256 (64 lowercase hex), the hash of the set SHA256SUMS"
             exit 1
           fi
-      # The desktop job runs after the CLI is out, so a bad input must fail here, before anything ships.
+      # The desktop job runs after the CLI is out, so a bad input must fail before anything ships.
+      # validate-desktop then proves the commit itself (ancestry, versions).
       - name: Desktop inputs (a source_sha releases the desktop app in this run)
         env:
           DISPATCH_REF: ${{ github.ref }}
@@ -378,9 +379,27 @@ jobs:
           path: connect-tray/src-tauri/target/release/connect-tray connect-tray/src-tauri/target/release/BUILD_INFO
           if-no-files-found: error
 
-  build:
+  # The desktop commit is proven releasable before the CLI is built, let alone published.
+  validate-desktop:
     needs: signing-preflight
-    if: ${{ inputs.mode != 'publish' }}
+    if: ${{ inputs.source_sha != '' && !inputs.staging }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/gate-private-source
+        with:
+          app-id: ${{ secrets.MONOREPO_READ_APP_ID }}
+          private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
+          version: ${{ inputs.version }}
+          source_sha: ${{ inputs.source_sha }}
+          # release mode compiles the CLI from npm, so npm must hold this commit; prepare is bound by the main-only record and PACKAGE_SHA256
+          verify_npm_head: ${{ inputs.mode == 'release' && 'true' || 'false' }}
+
+  build:
+    needs: [signing-preflight, validate-desktop]
+    # validate-desktop is skipped for a CLI-only release; only its failure blocks the build.
+    if: ${{ !cancelled() && inputs.mode != 'publish' && needs.signing-preflight.result == 'success' && needs.validate-desktop.result != 'failure' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:

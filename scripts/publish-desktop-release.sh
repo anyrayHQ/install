@@ -197,6 +197,6 @@ else
 fi
 
 if [ "$require_all" -eq 1 ] && [ "${#missing[@]}" -gt 0 ]; then
-  echo "::error::desktop release ${VERSION} is missing: ${missing[*]}. The CLI and the other OSes are published; dispatch again with the same version and source_sha (published assets are skipped) or cut a new version."
+  echo "::error::desktop release ${VERSION} is missing: ${missing[*]}. The CLI and the other OSes are published; a rebuild re-signs to new bytes, so release a new version."
   exit 1
 fi

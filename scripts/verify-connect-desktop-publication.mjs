@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { compareVersions } from './publish-desktop-feed.mjs';
-import { channelConfig, feedFiles, releaseTag } from './desktop-channel.mjs';
+import { channelConfig, feedFiles } from './desktop-channel.mjs';
 
 export async function verifyPublication({ repo, version, sourceSha, minVersion, channel, dryRun, token }, request = fetch) {
   compareVersions(version, version);
@@ -21,7 +21,7 @@ export async function verifyPublication({ repo, version, sourceSha, minVersion, 
       if (left < right) break;
     }
   }
-  if (dryRun && channel !== 'stable') return;
+  if (dryRun) return;
   const api = async (path, optional = false) => {
     const response = await request(`https://api.github.com/repos/${repo}/${path}`, {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
@@ -41,25 +41,6 @@ export async function verifyPublication({ repo, version, sourceSha, minVersion, 
     }
     return assets;
   };
-  if (channel === 'stable') {
-    // Production only ships bytes built from a commit that already built, passed its
-    // smokes and published on staging at this exact version. Dry runs included: a
-    // rehearsal of a stable build nobody may publish proves nothing.
-    const stagingTag = releaseTag('staging', version, sourceSha);
-    const staged = await api(`releases/tags/${stagingTag}`, true);
-    if (!staged) throw new Error(`Stable requires staging release ${stagingTag}; publish ${version} at this commit on staging first`);
-    const stagedNames = new Set((await listAssets(staged)).map(({ name }) => name));
-    for (const name of ['connect-desktop-staging.json', 'connect-desktop-staging.json.asc']) {
-      if (!stagedNames.has(name)) {
-        throw new Error(`Staging release ${stagingTag} is missing ${name}; it did not finish publishing`);
-      }
-    }
-    if (dryRun) return;
-  }
-  const tag = releaseTag(channel, version, sourceSha);
-  if (await api(`releases/tags/${tag}`, true)) {
-    throw new Error(`Release ${tag} already exists; use a new version/source, or recover its feed without rebuilding`);
-  }
   // The publishing job preserves latest and therefore requires it to exist.
   await api('releases/latest');
   const release = await api(`releases/tags/${feed}`, true);
@@ -69,9 +50,8 @@ export async function verifyPublication({ repo, version, sourceSha, minVersion, 
   if (assets.some(({ name }) => /\.(previous|pending)$/.test(name))) {
     throw new Error(`${feed} feed needs recovery of previous/pending assets before building`);
   }
-  // Every name publishFeed will swap, checked before the versioned tag exists: a feed
-  // that fails the swap after that point cannot be retried with a redispatch.
-  for (const { name } of feedFiles(channel, version)) {
+  // The manifest pair publishFeed swaps; installer downloads are added per OS as they publish.
+  for (const { name } of feedFiles(channel, version, [])) {
     if (!assets.some((asset) => asset.name === name)) throw new Error(`${feed} feed is missing ${name}`);
   }
   // Public asset URL: do not send the GitHub token across download redirects.

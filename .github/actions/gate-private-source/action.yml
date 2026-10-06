@@ -1,0 +1,98 @@
+name: Gate the private monorepo source
+description: >-
+  Checks out the exact private monorepo commit with a short-lived read-only token and
+  proves it is releasable: the commit is reachable from origin/main, and the CLI, Cargo
+  and Tauri versions all equal the one being released. Used by the desktop workflow and
+  by the CLI workflow before anything is built or published. The caller must have checked
+  out this repository first, so this action and its script resolve.
+
+inputs:
+  app-id:
+    description: App ID of the monorepo read GitHub App.
+    required: true
+  private-key:
+    description: Private key of that GitHub App.
+    required: true
+  version:
+    description: Plain x.y.z version being released.
+    required: true
+  source_sha:
+    description: Exact 40-hex monorepo commit.
+    required: true
+  verify_npm_head:
+    description: 'true when the engines come from the published npm package: its gitHead must equal source_sha, or the app would embed an engine built from other source.'
+    required: false
+    default: 'false'
+  min_version:
+    description: Optional update floor, checked for attainability.
+    required: false
+    default: ''
+  channel:
+    description: Desktop channel whose feed and release must be publishable.
+    required: false
+    default: stable
+  dry_run:
+    description: 'true skips the remote publication checks.'
+    required: false
+    default: 'false'
+  path:
+    description: Directory to check the source out into.
+    required: false
+    default: private-source
+
+runs:
+  using: composite
+  steps:
+    - name: Mint a short-lived read-only token for the private monorepo
+      id: monorepo-token
+      uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: anyrayHQ
+        repositories: monorepo
+        permission-contents: read
+    - name: Checkout the exact reviewed private source
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        repository: anyrayHQ/monorepo
+        ref: ${{ inputs.source_sha }}
+        token: ${{ steps.monorepo-token.outputs.token }}
+        path: ${{ inputs.path }}
+        fetch-depth: 0
+        persist-credentials: false
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      with:
+        node-version: 24
+    - name: Gate source SHA, origin/main ancestry, versions, and externalBin
+      shell: bash
+      env:
+        EXPECTED_VERSION: ${{ inputs.version }}
+        EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+        SOURCE_PATH: ${{ inputs.path }}
+      run: node scripts/verify-connect-desktop-source.mjs "$SOURCE_PATH" "$EXPECTED_VERSION" "$EXPECTED_SOURCE_SHA"
+    - name: The published package was built from this commit
+      if: ${{ inputs.verify_npm_head == 'true' }}
+      shell: bash
+      env:
+        PACKAGE_VERSION: ${{ inputs.version }}
+        EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+      run: |
+        set -euo pipefail
+        # Not visible yet is retried (same budget as the CLI's package fetch); a version that is
+        # visible with another gitHead fails at once.
+        head="$(./scripts/retry-npm.sh npm view --prefer-online "anyray-connect@${PACKAGE_VERSION}" gitHead)"
+        test "$head" = "$EXPECTED_SOURCE_SHA" || {
+          echo "::error::anyray-connect@${PACKAGE_VERSION} on npm was built from '${head}', not source_sha ${EXPECTED_SOURCE_SHA}"
+          exit 1
+        }
+    - name: Check publication eligibility
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        VERSION: ${{ inputs.version }}
+        MIN_VERSION: ${{ inputs.min_version }}
+        CHANNEL: ${{ inputs.channel }}
+        DRY_RUN: ${{ inputs.dry_run }}
+      run: node scripts/verify-connect-desktop-publication.mjs

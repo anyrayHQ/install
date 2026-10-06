@@ -35,16 +35,15 @@ export const releaseTag = (channel, version, sourceSha) =>
 
 // What the feed release serves, as { name, source } with source relative to the
 // release's assets directory. The manifest stays first: publishFeed reads it to
-// refuse a downgrade.
-export function feedFiles(channel, version) {
+// refuse a downgrade. `available` (file names) drops downloads for OSes not built yet.
+export function feedFiles(channel, version, available) {
   const { feed } = channelConfig(channel);
   const files = [`${feed}.json`, `${feed}.json.asc`].map((name) => ({ name, source: name }));
   if (channel !== 'stable') return files;
   return [
     ...files,
-    ...Object.entries(STABLE_DOWNLOADS).map(([suffix, name]) => ({
-      name,
-      source: `anyray-connect-desktop-${version}${suffix}`,
-    })),
+    ...Object.entries(STABLE_DOWNLOADS)
+      .map(([suffix, name]) => ({ name, source: `anyray-connect-desktop-${version}${suffix}` }))
+      .filter(({ source }) => !available || available.includes(source)),
   ];
 }

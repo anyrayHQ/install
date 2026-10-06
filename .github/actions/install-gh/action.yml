@@ -1,0 +1,27 @@
+name: Install the gh CLI
+description: >-
+  The CodeBuild AL2 runner image ships no gh CLI. Installs a pinned release,
+  checksum-verified. The caller must have checked out the repo so the local
+  fetch-pinned action resolves.
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch gh CLI (pinned + checksum-verified)
+      env:
+        GH_VERSION: '2.76.1'
+        GH_SHA256: 18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
+      uses: ./.github/actions/fetch-pinned
+      with:
+        url: https://github.com/cli/cli/releases/download/v${{ env.GH_VERSION }}/gh_${{ env.GH_VERSION }}_linux_amd64.tar.gz
+        sha256: ${{ env.GH_SHA256 }}
+        dest: /tmp/gh.tgz
+    - name: Install gh CLI
+      shell: bash
+      env:
+        GH_VERSION: '2.76.1'
+      run: |
+        set -euo pipefail
+        tar -xzf /tmp/gh.tgz -C /tmp
+        install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
+        gh --version

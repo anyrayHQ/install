@@ -3,12 +3,15 @@ name: Release Anyray Connect desktop
 # Manual, isolated release lane for the self-contained Tauri desktop app.
 # `channel: staging` (default) builds against app-staging and the staging feed;
 # `channel: stable` builds against app.anyray.ai and the production feed, and is
-# refused for any version/commit that has not already published on staging.
+# needs no staging release first.
 #
-# This workflow is deliberately NOT called by release-connect-binaries.yml and
-# has no push, tag, workflow_run, or repository_dispatch trigger. It never
-# resolves the CLI from npm or updates releases/latest. It never renders or
-# publishes the CLI's connect manifests, Homebrew cask, or Winget manifests.
+# release-connect-binaries.yml calls this workflow (workflow_call, stable, with
+# reuse_engines) after its CLI release, so the CLI and the app ship from one
+# dispatch. Run by hand it stays the isolated lane for staging builds and for
+# retrying the app alone. It has no push, tag, workflow_run, or
+# repository_dispatch trigger. It never resolves the CLI from npm or updates
+# releases/latest. It never renders or publishes the CLI's connect manifests,
+# Homebrew cask, or Winget manifests.
 # This lane publishes the desktop update feed as a manifest only, with no updater signatures.
 # A failure here therefore cannot block or downgrade the existing CLI release.
 #
@@ -29,6 +32,30 @@ name: Release Anyray Connect desktop
 # provisioned after source/publication validation and released after the signed smoke.
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      min_version:
+        required: false
+        type: string
+        default: ''
+      channel:
+        required: true
+        type: string
+      dry_run:
+        required: false
+        type: boolean
+        default: true
+      reuse_engines:
+        description: 'Use the engines the calling workflow compiled (same run, S3 artifacts) instead of compiling them from the private source.'
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       version:
@@ -51,7 +78,7 @@ on:
         options: [staging, stable]
         default: staging
       dry_run:
-        description: 'Build, sign, notarize, and retain a workflow artifact only. When false, publish the versioned release and moving updater feed for the channel; neither becomes latest.'
+        description: 'Build, sign, notarize, and retain workflow artifacts only. When false, publish each finished OS to the versioned release and the moving updater feed for the channel; neither becomes latest.'
         required: false
         type: boolean
         default: true
@@ -60,8 +87,9 @@ permissions:
   contents: read
 
 concurrency:
-  # Shared with the CLI and fleetd releases: all own the same Mac project.
-  group: anyray-install-mac-release
+  # Shared with the CLI and fleetd releases: all own the same Mac project. A called run
+  # already holds its caller's group, so it takes its own to avoid waiting on itself.
+  group: ${{ inputs.reuse_engines && format('connect-desktop-called-{0}', github.run_id) || 'anyray-install-mac-release' }}
   cancel-in-progress: false
 
 env:
@@ -197,46 +225,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Mint a short-lived read-only token for the private monorepo
-        id: monorepo-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+      - uses: ./.github/actions/gate-private-source
         with:
           app-id: ${{ secrets.MONOREPO_READ_APP_ID }}
           private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
-          owner: anyrayHQ
-          repositories: monorepo
-          permission-contents: read
-      - name: Checkout and gate the exact reviewed private source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          repository: anyrayHQ/monorepo
-          ref: ${{ needs.preflight.outputs.source_sha }}
-          token: ${{ steps.monorepo-token.outputs.token }}
-          path: private-source
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
-        with:
-          node-version: 24
-      - name: Gate source SHA, origin/main ancestry, versions, and externalBin
-        env:
-          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
-          EXPECTED_SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
-        run: >-
-          node scripts/verify-connect-desktop-source.mjs
-          private-source
-          "$EXPECTED_VERSION"
-          "$EXPECTED_SOURCE_SHA"
-      - name: Check publication eligibility before native builds
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          VERSION: ${{ needs.preflight.outputs.version }}
-          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
-          MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
-          CHANNEL: ${{ needs.preflight.outputs.channel }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: node scripts/verify-connect-desktop-publication.mjs
+          version: ${{ needs.preflight.outputs.version }}
+          source_sha: ${{ needs.preflight.outputs.source_sha }}
+          min_version: ${{ needs.preflight.outputs.min_version }}
+          channel: ${{ needs.preflight.outputs.channel }}
+          dry_run: ${{ inputs.dry_run }}
 
   provision-mac:
     needs: [preflight, validate-source]
@@ -307,10 +304,42 @@ jobs:
           "$EXPECTED_SOURCE_SHA"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: ${{ !inputs.reuse_engines }}
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      - uses: ./.github/actions/s3-artifact-download
+        if: ${{ inputs.reuse_engines }}
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          name: binaries-unsigned
+          path: engine-in
+
+      - name: Stage the universal engine the CLI build compiled
+        if: ${{ inputs.reuse_engines }}
+        run: |
+          set -euo pipefail
+          mkdir -p engine
+          lipo -create \
+            engine-in/anyray-connect-darwin-arm64 \
+            engine-in/anyray-connect-darwin-x64 \
+            -output engine/anyray-connect-universal
+          lipo -archs engine/anyray-connect-universal | grep -q arm64
+          lipo -archs engine/anyray-connect-universal | grep -q x86_64
+          # A cross-compiled Mach-O will not run unsigned on Apple silicon; sign-macos re-signs it.
+          codesign --force --sign - engine/anyray-connect-universal
+          chmod +x engine/anyray-connect-universal
+          (
+            cd private-source
+            for sidecar_target in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
+              node scripts/stage-connect-tray-engine.mjs \
+                "$sidecar_target" \
+                "$GITHUB_WORKSPACE/engine/anyray-connect-universal"
+            done
+          )
+
       - name: Build the matching self-contained universal engine
+        if: ${{ !inputs.reuse_engines }}
         run: |
           set -euo pipefail
           (
@@ -1387,10 +1416,32 @@ jobs:
           "$env:EXPECTED_SOURCE_SHA"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: ${{ !inputs.reuse_engines }}
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      - uses: ./.github/actions/s3-artifact-download
+        if: ${{ inputs.reuse_engines }}
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          name: binaries-windows
+          path: engine
+
+      - name: Stage the Authenticode-signed engine the CLI release signed
+        if: ${{ inputs.reuse_engines }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
+          $PSNativeCommandUseErrorActionPreference = $true
+          Push-Location private-source
+          node scripts/stage-connect-tray-engine.mjs `
+            $env:TARGET_TRIPLE `
+            "$env:GITHUB_WORKSPACE/engine/anyray-connect-windows-x64.exe"
+          Pop-Location
+
       - name: Build and stage the matching Windows engine
+        if: ${{ !inputs.reuse_engines }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -1530,10 +1581,17 @@ jobs:
       - name: Authenticode-sign and independently verify both inner executables
         env:
           JSIGN_JAR: ${{ runner.temp }}/jsign.jar
+          REUSE_ENGINES: ${{ inputs.reuse_engines }}
         run: |
           set -euo pipefail
           for exe in out/*.exe; do
+            # A reused engine already carries the CLI release's signature; signing again would only stack one.
+            if [ "$REUSE_ENGINES" = true ] && [ "$exe" = out/anyray-connect-engine-windows-x64.exe ]; then
+              continue
+            fi
             ./scripts/azure-artifact-sign.sh "$exe" 'Anyray Connect Desktop' 'https://anyray.ai'
+          done
+          for exe in out/*.exe; do
             python3 scripts/verify-authenticode.py "$exe" \
               --ca-file "$RUNNER_TEMP/ms-root.pem" \
               --expect-publisher 'Othentic Labs LTD'
@@ -2177,9 +2235,28 @@ jobs:
           rm -f rustup-init
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: ${{ !inputs.reuse_engines }}
         with:
           bun-version: ${{ env.BUN_VERSION }}
+      - uses: ./.github/actions/s3-artifact-download
+        if: ${{ inputs.reuse_engines }}
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          name: binaries-unsigned
+          path: engine
+      - name: Stage the Linux engine the CLI build compiled
+        if: ${{ inputs.reuse_engines }}
+        run: |
+          set -euo pipefail
+          chmod +x engine/anyray-connect-linux-x64
+          (
+            cd private-source
+            node scripts/stage-connect-tray-engine.mjs \
+              "$TARGET_TRIPLE" \
+              "$GITHUB_WORKSPACE/engine/anyray-connect-linux-x64"
+          )
       - name: Build and stage the matching Linux engine
+        if: ${{ !inputs.reuse_engines }}
         run: |
           set -euo pipefail
           (
@@ -2641,14 +2718,116 @@ jobs:
           test ! -e "$rpm_main"
           assert_existing_state_untouched
 
+  # One leg per OS, strictly one at a time (one release and one feed to rewrite). A failed or
+  # unfinished OS is skipped without stopping the next; reconcile-feed names it. Nothing publishes
+  # unless the source and publication checks passed, and never on a dry run.
+  publish:
+    needs: [preflight, validate-source, verify-macos-signed, verify-windows-signatures, smoke-linux-installers, sign-linux-artifacts]
+    if: ${{ always() && needs.preflight.result == 'success' && needs.validate-source.result == 'success' && !inputs.dry_run }}
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            ready: ${{ needs.verify-macos-signed.result == 'success' }}
+            artifact: connect-desktop-macos-signed
+            artifact2: ''
+          - os: windows
+            ready: ${{ needs.verify-windows-signatures.result == 'success' }}
+            artifact: connect-desktop-windows-inner-signed
+            artifact2: connect-desktop-windows-installer-signed
+          - os: linux
+            ready: ${{ needs.smoke-linux-installers.result == 'success' && needs.sign-linux-artifacts.result == 'success' }}
+            artifact: connect-desktop-linux-signed
+            artifact2: ''
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
+    permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
+      contents: write # the versioned desktop release and its feed
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+      FEED: ${{ needs.preflight.outputs.feed }}
+      ARTIFACT: ${{ needs.preflight.outputs.artifact }}
+      MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
+      CHANNEL: ${{ needs.preflight.outputs.channel }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/install-gh
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+      - name: Download this OS's signed files
+        if: ${{ format('{0}', matrix.ready) == 'true' }}
+        uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          name: ${{ matrix.artifact }}
+          path: platform/${{ matrix.artifact }}
+      - name: Download this OS's second signed set
+        if: ${{ format('{0}', matrix.ready) == 'true' && matrix.artifact2 != '' }}
+        uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          name: ${{ matrix.artifact2 }}
+          path: platform/${{ matrix.artifact2 }}
+      - name: Publish ${{ matrix.os }}
+        if: ${{ format('{0}', matrix.ready) == 'true' }}
+        run: ./scripts/publish-desktop-release.sh platform/*
 
-  assemble-signed-release:
-    needs:
-      - preflight
-      - verify-macos-signed
-      - verify-windows-signatures
-      - smoke-linux-installers
-      - sign-linux-artifacts
+  # Rewrites the feed once more from what is on the release, then fails naming any OS that never
+  # made it, so a green run means all three shipped. Also gated on validation: a rejected dispatch
+  # (say a min_version that cannot apply) must not rewrite a live feed.
+  reconcile-feed:
+    needs: [preflight, validate-source, publish]
+    if: ${{ always() && needs.preflight.result == 'success' && needs.validate-source.result == 'success' && !inputs.dry_run }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
+    permissions:
+      id-token: write # assume the CI-artifacts role for the S3 handoff
+      contents: write # the versioned desktop release and its feed
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+      FEED: ${{ needs.preflight.outputs.feed }}
+      ARTIFACT: ${{ needs.preflight.outputs.artifact }}
+      MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
+      CHANNEL: ${{ needs.preflight.outputs.channel }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/install-gh
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: 24
+      - run: ./scripts/publish-desktop-release.sh --require-all
+
+  # dry_run publishes nothing, but the consolidated checksums and signed channel manifest the real
+  # publish would write are built here and kept as a workflow artifact for inspection.
+  assemble-dry-run:
+    needs: [preflight, verify-macos-signed, verify-windows-signatures, smoke-linux-installers, sign-linux-artifacts]
+    if: ${{ always() && inputs.dry_run && needs.preflight.result == 'success' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -2657,15 +2836,22 @@ jobs:
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+      FEED: ${{ needs.preflight.outputs.feed }}
+      ARTIFACT: ${{ needs.preflight.outputs.artifact }}
+      MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
+      CHANNEL: ${{ needs.preflight.outputs.channel }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
           role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
           aws-region: eu-central-1
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/s3-artifact-download
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
@@ -2686,184 +2872,10 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-linux-signed
           path: platform/linux
-      - name: Assemble signed platform outputs
-        run: |
-          set -euo pipefail
-          mkdir -p assets
-          cp platform/macos/*.pkg assets/
-          cp platform/macos/*.app.tar.gz assets/
-          cp platform/windows-inner/*.exe assets/
-          cp platform/windows-installer/*.msi assets/
-          cp platform/linux/* assets/
-          test "$(find assets -maxdepth 1 -type f -name '*.pkg' | wc -l)" -eq 1
-          test "$(find assets -maxdepth 1 -type f -name '*.dmg' | wc -l)" -eq 0
-          test "$(find assets -maxdepth 1 -type f -name '*.app.tar.gz' | wc -l)" -eq 1
-          test "$(find assets -maxdepth 1 -type f -name '*windows*x64*.exe' | wc -l)" -eq 2
-          test "$(find assets -maxdepth 1 -type f -name '*windows*x64.msi' | wc -l)" -eq 1
-          test "$(find assets -maxdepth 1 -type f -name '*linux*x64*' ! -name '*.asc' | wc -l)" -eq 4
-          test "$(find assets -maxdepth 1 -type f -name '*linux*x64*.asc' | wc -l)" -eq 4
-          test -f assets/anyray-connect-desktop-signing-key.asc
-
-      - name: Generate desktop asset checksums
-        run: |
-          set -euo pipefail
-          (
-            cd assets
-            sha256sum -- * > SHA256SUMS
-          )
-
-      - name: Generate and sign the content-addressed channel manifest
-        env:
-          MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
-          FEED: ${{ needs.preflight.outputs.feed }}
-          ARTIFACT: ${{ needs.preflight.outputs.artifact }}
-          TAG: ${{ needs.preflight.outputs.tag }}
-        run: |
-          set -euo pipefail
-          manifest="assets/${FEED}.json"
-          jq -Rn \
-            --arg version "$VERSION" \
-            --arg sourceCommit "$SOURCE_SHA" \
-            --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg tag "$TAG" \
-            --arg artifact "$ARTIFACT" \
-            --arg feed "${FEED}.json" \
-            --arg min "$MIN_VERSION" \
-            '[inputs | capture("^(?<sha256>[0-9a-f]{64})  (?<name>.+)$")] as $artifacts
-             | {schemaVersion: 1, artifact: $artifact, version: $version, sourceCommit: $sourceCommit, createdAt: $createdAt, tag: $tag}
-             + (if $min == "" then {} else {minVersion: $min} end)
-             + {updater: {feed: $feed}, artifacts: $artifacts}' \
-            assets/SHA256SUMS > "$manifest"
-          key_check="$RUNNER_TEMP/connect-desktop-public-key-check"
-          mkdir -p "$key_check"
-          ./scripts/sign-gpg-artifacts.sh "$key_check" \
-            assets/SHA256SUMS "$manifest"
-          cmp "$key_check/anyray-endpoint-signing-key.asc" \
-            assets/anyray-connect-desktop-signing-key.asc
-          export GNUPGHOME="$RUNNER_TEMP/gv"
-          mkdir -m 700 "$GNUPGHOME"
-          gpg --batch --import assets/anyray-connect-desktop-signing-key.asc
-          gpg --batch --verify assets/SHA256SUMS.asc assets/SHA256SUMS
-          gpg --batch --verify "${manifest}.asc" "$manifest"
-          test "$(jq -r .version "$manifest")" = "$VERSION"
-          test "$(jq -r .sourceCommit "$manifest")" = "$SOURCE_SHA"
-          test "$(jq -r .artifact "$manifest")" = "$ARTIFACT"
-          test "$(jq -r .tag "$manifest")" = "$TAG"
-          jq -e --arg feed "${FEED}.json" '.updater.feed == $feed' "$manifest"
-          jq -e '[.artifacts[] | select(.name | endswith(".app.tar.gz"))] | length == 1' "$manifest"
-          jq -e '[.artifacts[] | select(.name | endswith("windows-x64.msi"))] | length == 1' "$manifest"
-          cat assets/SHA256SUMS
-
+      - run: DRY_RUN=true ./scripts/publish-desktop-release.sh --require-all platform/macos platform/windows-inner platform/windows-installer platform/linux
       - uses: ./.github/actions/s3-artifact-upload
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: ${{ needs.preflight.outputs.feed }}-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
           path: assets/
           if-no-files-found: error
-
-  publish-release:
-    needs: [preflight, assemble-signed-release]
-    if: ${{ !inputs.dry_run }}
-    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 40
-    # Every run rewrites its channel's one feed; serialize across versions.
-    concurrency:
-      group: ${{ needs.preflight.outputs.feed }}-feed
-      cancel-in-progress: false
-    permissions:
-      id-token: write # assume the CI-artifacts role for the S3 handoff
-      contents: write
-    env:
-      VERSION: ${{ needs.preflight.outputs.version }}
-      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
-      SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
-      CHANNEL: ${{ needs.preflight.outputs.channel }}
-      FEED: ${{ needs.preflight.outputs.feed }}
-      TAG: ${{ needs.preflight.outputs.tag }}
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
-    steps:
-      # Also needed for the local fetch-pinned action below (the s3-artifact-
-      # download checkout was already required later in this job).
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Authenticate for the S3 artifact handoff
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
-        with:
-          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
-          aws-region: eu-central-1
-      - name: Fetch pinned gh CLI (checksum-verified)
-        env:
-          GH_VERSION: '2.76.1'
-          GH_SHA256: 18367ca38b4462889ae38fba6a18c53a4c2818b6af309bbe53d0810bb06036e9
-        uses: ./.github/actions/fetch-pinned
-        with:
-          url: https://github.com/cli/cli/releases/download/v${{ env.GH_VERSION }}/gh_${{ env.GH_VERSION }}_linux_amd64.tar.gz
-          sha256: ${{ env.GH_SHA256 }}
-          dest: /tmp/gh.tgz
-      - name: Install pinned gh CLI
-        env:
-          GH_VERSION: '2.76.1'
-        run: |
-          set -euo pipefail
-          tar -xzf /tmp/gh.tgz -C /tmp
-          install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
-      - uses: ./.github/actions/s3-artifact-download
-        with:
-          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
-          name: ${{ needs.preflight.outputs.feed }}-assets-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_sha }}
-          path: assets
-      - name: Publish the versioned channel release and preserve latest
-        run: |
-          set -euo pipefail
-          latest_before="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
-          case "$CHANNEL:$TAG" in
-            staging:connect-desktop-staging-v*) prerelease=true ;;
-            stable:connect-desktop-v*) prerelease=false ;;
-            *) echo "::error::refusing desktop tag $TAG on channel $CHANNEL"; exit 1 ;;
-          esac
-          test "$(jq -r .version "assets/${FEED}.json")" = "$VERSION"
-          test "$(jq -r .sourceCommit "assets/${FEED}.json")" = "$SOURCE_SHA"
-
-          # Create-only: an existing tag fails publication without changing bytes
-          # referenced by a live or cached feed. Rebuilds need a new version/source.
-          # --latest=false on both channels: releases/latest belongs to the CLI
-          # (connect.sh, connect.ps1 and its self-updater download through it).
-          if [ "$CHANNEL" = stable ]; then
-            gh release create "$TAG" \
-              --title "Anyray Connect desktop ${VERSION}" \
-              --notes "Signed desktop installers and update manifest built from private monorepo commit ${SOURCE_SHA}, the same commit and version published on staging as connect-desktop-staging-v${VERSION}-${SHORT_SHA}. Download from the connect-desktop release for a stable link per OS." \
-              --latest=false \
-              assets/*
-          else
-            gh release create "$TAG" \
-              --title "Anyray Connect desktop ${VERSION} (${SHORT_SHA}, staging only)" \
-              --notes "Signed staging-only desktop installers and update manifest built from private monorepo commit ${SOURCE_SHA}. This versioned prerelease is deliberately never latest; connect.sh, connect.ps1, npm, Homebrew, Winget, and the existing CLI release lane are unchanged." \
-              --prerelease \
-              --latest=false \
-              assets/*
-          fi
-
-          published="$(gh api "repos/${REPO}/releases/tags/${TAG}" --jq .prerelease)"
-          latest_after="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
-          test "$published" = "$prerelease" || {
-            echo "::error::$TAG published with prerelease=$published, expected $prerelease"
-            exit 1
-          }
-          test "$latest_after" = "$latest_before" || {
-            echo "::error::desktop $CHANNEL release changed releases/latest from $latest_before to $latest_after"
-            exit 1
-          }
-          echo "published $CHANNEL release $TAG; releases/latest remains $latest_after"
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
-        with:
-          node-version: 24
-      - name: Point the channel feed at this release
-        run: |
-          set -euo pipefail
-          latest_before="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
-          node scripts/publish-desktop-feed.mjs
-          test "$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)" = "$latest_before" || {
-            echo "::error::feed release changed releases/latest"; exit 1; }
-          curl -fsSL "https://github.com/${REPO}/releases/download/${FEED}/${FEED}.json" \
-            | jq -e --arg v "$VERSION" '.version == $v'

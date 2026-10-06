@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -24,10 +24,10 @@ export function compareVersions(left, right) {
 
 // Upload both candidates before touching live names. Retain old bytes remotely
 // for recovery even if the runner is killed or a rollback API request fails.
-export function publishFeed({ repo, version, tag, channel, assetsDir }, run = gh) {
+export function publishFeed({ repo, version, tag, channel, assetsDir, available }, run = gh) {
   compareVersions(version, version);
   const { feed } = channelConfig(channel);
-  const files = feedFiles(channel, version);
+  const files = feedFiles(channel, version, available);
   const names = files.map(({ name }) => name);
   const sources = files.map(({ source }) => join(assetsDir, source));
   const api = (path, ...args) => run(['api', `repos/${repo}/${path}`, ...args]);
@@ -51,9 +51,12 @@ export function publishFeed({ repo, version, tag, channel, assetsDir }, run = gh
   if (assets.some((asset) => /\.(previous|pending)$/.test(asset.name))) {
     throw new Error('Incomplete feed publication: recover previous/pending assets before retrying');
   }
-  const previous = names.map((name) => {
+  // With `available`, only the manifest pair must already be live; a download for an OS never
+  // published before is added rather than swapped.
+  const required = available ? 2 : names.length;
+  const previous = names.map((name, i) => {
     const asset = assets.find((item) => item.name === name);
-    if (!asset) throw new Error(`Existing feed is missing ${name}`);
+    if (!asset && i < required) throw new Error(`Existing feed is missing ${name}`);
     return asset;
   });
   const current = JSON.parse(api(`releases/assets/${previous[0].id}`, '-H', 'Accept: application/octet-stream'));
@@ -73,8 +76,10 @@ export function publishFeed({ repo, version, tag, channel, assetsDir }, run = gh
     });
     for (let i = 0; i < names.length; i++) {
       // Record before the request: an error response may follow a server-side change.
-      renames.push([previous[i].id, names[i]]);
-      rename(previous[i].id, `${names[i]}.previous`);
+      if (previous[i]) {
+        renames.push([previous[i].id, names[i]]);
+        rename(previous[i].id, `${names[i]}.previous`);
+      }
       renames.push([candidates[i].id, `${names[i]}.pending`]);
       rename(candidates[i].id, names[i]);
     }
@@ -98,10 +103,10 @@ export function publishFeed({ repo, version, tag, channel, assetsDir }, run = gh
   }
   // Only remove backups after the whole switch succeeds. Failed cleanup blocks
   // retries rather than silently discarding recovery state.
-  for (const asset of previous) api(`releases/assets/${asset.id}`, '-X', 'DELETE');
+  for (const asset of previous) if (asset) api(`releases/assets/${asset.id}`, '-X', 'DELETE');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const { REPO: repo, VERSION: version, SOURCE_SHA: sourceSha, CHANNEL: channel } = process.env;
-  publishFeed({ repo, version, channel, tag: releaseTag(channel, version, sourceSha), assetsDir: 'assets' });
+  publishFeed({ repo, version, channel, tag: releaseTag(channel, version, sourceSha), assetsDir: 'assets', available: readdirSync('assets') });
 }

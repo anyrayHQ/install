@@ -35,19 +35,21 @@ CLI release.
   desktop workflow still compiles its own engines.
 - **Its own Mac.** The called workflow provisions and tears down a Mac of its own;
   `mac-fleet.sh up` reuses a live fleet.
-- **Per-OS publication.** `publish-macos`, `publish-windows` and `publish-linux`
-  run one after another, each uploading its signed files to the versioned
-  `connect-desktop[-staging]-v<version>-<sha12>` release (created if missing,
-  uploads retried with `--clobber`) and rewriting the signed manifest and the
-  channel feed from every asset on that release (`scripts/publish-desktop-release.sh`).
-  An OS whose chain failed is skipped and its clients stay on their version.
-  `reconcile-feed` rewrites the feed once more and fails naming any OS still
-  missing. `minVersion` is written only when all three OSes are on the release,
+- **Per-OS publication.** One `publish` job runs a leg per OS, strictly one at a time,
+  each uploading its signed files to the versioned
+  `connect-desktop[-staging]-v<version>-<sha12>` release (created if missing; an asset
+  already published is never replaced, see "Releasing a build") and rewriting the signed
+  manifest and the channel feed from every asset on that release
+  (`scripts/publish-desktop-release.sh`). An OS whose chain failed is skipped and its
+  clients stay on their version. Nothing publishes unless source validation succeeded.
+  `reconcile-feed`, gated the same way, rewrites the feed once more and fails naming any
+  OS still missing. `minVersion` is written only when all three OSes are on the release,
   because a floor in a feed that lacks an OS would strand it. This applies to manual
   desktop runs too, staging included.
 - **No staging-first gate.** Stable no longer requires the same version and commit to
   have published on staging first. `channel: staging` still works for manual runs.
-- `dry_run` builds, signs and verifies everything and publishes nothing.
+- `dry_run` builds, signs and verifies everything, publishes nothing, and keeps the
+  consolidated checksums and signed manifest as a workflow artifact.
 
 ## Signing (RFC 0010 §6)
 
@@ -510,21 +512,23 @@ the abandoned rcodesign path and is unused.)
 
 ## Connect desktop installers: staging and stable lanes (ANY-250, ANY-337)
 
-`.github/workflows/release-connect-desktop.yml` is a **manual**
-release lane for the self-contained Tauri desktop app. It is intentionally a
-separate workflow from `release-connect-binaries.yml`: the CLI publisher does
-not call it, and a desktop failure cannot block an npm or CLI-binary release.
-It has no push, tag, `workflow_run`, or repository-dispatch trigger.
+`.github/workflows/release-connect-desktop.yml` is the release lane for the
+self-contained Tauri desktop app. `release-connect-binaries.yml` calls it
+(`workflow_call`, see "Releasing the desktop app in the same run") after the CLI
+release, so a desktop failure cannot block an npm or CLI-binary release; run by
+hand it is the lane for staging builds and for retrying the app alone. It has no
+push, tag, `workflow_run`, or repository-dispatch trigger.
 
-The dispatch has exactly five inputs:
+The manual dispatch has exactly five inputs (a call adds `reuse_engines`, `mode`
+and `present`):
 
 | Input | Contract |
 | --- | --- |
-| `channel` | `staging` (default) or `stable`. Staging compiles with `ANYRAY_CONNECT_DESKTOP_DISTRIBUTION=staging` (app-staging, the `connect-desktop-staging` feed). Stable compiles with `production` (app.anyray.ai, the `connect-desktop` feed) and is refused unless `connect-desktop-staging-v<version>-<short-sha>` already published with its signed manifest. |
+| `channel` | `staging` (default) or `stable`. Staging compiles with `ANYRAY_CONNECT_DESKTOP_DISTRIBUTION=staging` (app-staging, the `connect-desktop-staging` feed). Stable compiles with `production` (app.anyray.ai, the `connect-desktop` feed); it needs no staging release first. |
 | `version` | Explicit plain `x.y.z`; `latest` and moving ranges are rejected. |
 | `source_sha` | Exact lowercase 40-hex commit in the private `anyrayHQ/monorepo`; it must be reachable from the fetched `origin/main`. The workflow never checks out moving `main`. |
-| `min_version` | Optional numeric dotted version with two to four components. Installs older than this floor update without asking; empty omits `minVersion` from the staging manifest. |
-| `dry_run` | Defaults to `true`. A dry run retains signed assets only as a workflow artifact. `false` creates the versioned release and re-points the channel's feed release; neither becomes latest. |
+| `min_version` | Optional numeric dotted version with two to four components. Installs older than this floor update without asking; empty omits `minVersion`. It is written only once all three OSes are on the release. |
+| `dry_run` | Defaults to `true`. A dry run retains the signed assets, consolidated checksums and signed channel manifest only as workflow artifacts. `false` publishes each finished OS to the versioned release and re-points the channel's feed release; neither becomes latest. |
 
 | | staging | stable |
 | --- | --- | --- |
@@ -549,27 +553,27 @@ docs download page and the console's enrollment page point at:
 and likewise for the MSI, deb and rpm. They are byte-identical to the
 versioned release's files, and they move with the feed in one switch.
 
-### Promoting a build to stable
+### Releasing a build
 
-1. Dispatch with `channel: staging`, `dry_run` unchecked. Install that build on
-   macOS, Windows and Linux and confirm sign-in, update and uninstall.
-2. Dispatch again with `channel: stable`, the **same** `version` and
-   `source_sha`. Leave `dry_run` checked for the first rehearsal if you want;
-   the staging gate applies to dry runs too.
-3. Uncheck `dry_run` and dispatch. The versioned stable release is created,
-   then the `connect-desktop` feed and download links switch to it.
+There is no mandatory staging step: dispatching `channel: stable` with a `version`
+and `source_sha` builds, signs and publishes the production app directly, and the
+combined CLI release does the same. Staging stays available for manual testing:
+dispatch `channel: staging` with `dry_run` unchecked, install that build on each OS
+and confirm sign-in, update and uninstall. A stable build is always rebuilt from
+source with the production marker; it never copies staging bytes.
 
-Stable rebuilds from source with the production marker. It does not copy the
-staging bytes, so the stable artifact carries the same commit and version but
-its own signatures and checksums.
-
-Versioned releases are create-only: redispatching the same version/source cannot
-replace their bytes. Use a new version/source for a rebuild. If publication of
-the feed fails after the versioned release was created, recover the feed and
-run `node scripts/publish-desktop-feed.mjs` with `REPO`, `VERSION`,
-`SOURCE_SHA`, `CHANNEL` and `GH_TOKEN` set, from a directory containing
-`assets/` with the original manifest, signature and (stable) installers
-downloaded from that release. Do not regenerate them.
+Published versioned assets are never replaced. `scripts/publish-desktop-release.sh`
+uploads a file only when the release lacks it, skips it when the release already
+holds the same sha256, and fails naming it when the bytes differ, because clients
+hold the earlier checksums. An asset an interrupted attempt left half-uploaded is
+deleted and sent again. So a retry of the same version and source only adds what is
+missing; a rebuild with different bytes needs a new version or source. The derived
+`SHA256SUMS`, signed manifest and public key are rewritten from whatever is on the
+release each time. If feed publication fails, re-run the failed publish job, or run
+`node scripts/publish-desktop-feed.mjs` with `REPO`, `VERSION`, `SOURCE_SHA`,
+`CHANNEL` and `GH_TOKEN` set, from a directory containing `assets/` with the
+manifest, signature and (stable) installers downloaded from that release. Do not
+regenerate them.
 
 Feed publication aborts on lookup errors, malformed versions, and backward
 version changes. Both replacement assets upload as `.pending` before any live
@@ -599,9 +603,9 @@ secrets or any job fetches private source.
 Paste the Connect version and the full private-monorepo commit, leave `dry_run`
 checked for the first rehearsal, optionally set `min_version`, and inspect the
 retained
-`<feed>-assets-<version>-<short-sha>` artifact. On staging, unchecking it
-creates the versioned staging prerelease and re-points the staging feed; only
-`channel: stable` publishes anything customers download.
+`<feed>-assets-<version>-<short-sha>` artifact. Unchecking it publishes each
+finished OS to the versioned release (a prerelease on staging) and re-points the
+channel's feed; only `channel: stable` publishes anything customers download.
 
 The retained/published set contains one signed/notarized universal macOS
 `.pkg`, one universal `.app.tar.gz` containing the signed and stapled app, one
@@ -613,10 +617,14 @@ channel manifest binding them to `version` and `source_sha`.
 ### Build time and early failure checks
 
 Before starting native runners, a Linux job checks the source SHA/version and
-publication eligibility: duplicate releases, a newer feed, or a feed awaiting
-recovery fail before Mac allocation. `min_version` must not exceed `version`,
-and the release version must fit MSI's `255.255.65535` limits. Dry runs skip
-remote publication checks but still validate the source and version inputs.
+publication eligibility: a newer feed or a feed awaiting recovery fails the run
+before any publication. `min_version` must not exceed `version`, and the release
+version must fit MSI's `255.255.65535` limits. Dry runs skip remote publication
+checks but still validate the source and version inputs. Nothing publishes, and the
+feed is never rewritten, unless that check succeeded. The combined CLI release runs
+the same check (`gate-private-source`) before it builds anything, and also requires
+the npm package's `gitHead` to equal `source_sha`, so the reused engines come from
+the commit being released.
 
 Run Corepack from inside `private-source` so it uses the source's pinned pnpm.
 The dependency install selects Connect and the VS Code extension that Connect

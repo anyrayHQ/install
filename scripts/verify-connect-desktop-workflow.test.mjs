@@ -74,12 +74,17 @@ describe('desktop release workflow safety contract', () => {
   });
 
   test('uses isolated read-only private checkouts and never uploads source', () => {
+    // Four native jobs check out inline; validate-source uses the shared gate-private-source action.
     assert.equal(
       (workflow.match(/actions\/create-github-app-token@/g) ?? []).length,
-      5
+      4
     );
-    assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 5);
-    assert.equal((workflow.match(/fetch-depth: 0/g) ?? []).length, 5);
+    assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 4);
+    assert.equal((workflow.match(/fetch-depth: 0/g) ?? []).length, 4);
+    assert.match(job('validate-source'), /uses: \.\/\.github\/actions\/gate-private-source/);
+    const gate = readFileSync(new URL('../.github/actions/gate-private-source/action.yml', import.meta.url), 'utf8');
+    assert.match(gate, /permission-contents: read/);
+    assert.match(gate, /persist-credentials: false/);
     assert.doesNotMatch(workflow, /private-monorepo-source|source-candidate/);
 
     const uploadBlocks = workflow.match(
@@ -97,10 +102,9 @@ describe('desktop release workflow safety contract', () => {
       'sign-windows-inner',
       'sign-windows-installer',
       'sign-linux-artifacts',
-      'publish-macos',
-      'publish-windows',
-      'publish-linux',
+      'publish',
       'reconcile-feed',
+      'assemble-dry-run',
     ]) {
       assert.doesNotMatch(job(name), /private-source|MONOREPO_READ_APP|monorepo-token/);
     }
@@ -432,9 +436,10 @@ describe('desktop release workflow safety contract', () => {
     assert.match(linux, /dbus-run-session -- xvfb-run -a "\$main"/);
     assert.match(linux, /kill -KILL -- "-\$tray_pid"/);
     assert.match(linux, /rm -f "\$autostart"/);
-    assert.match(job('publish-macos'), /needs\.verify-macos-signed\.result == 'success'/);
-    assert.match(job('publish-windows'), /needs\.verify-windows-signatures\.result == 'success'/);
-    assert.match(job('publish-linux'), /needs\.smoke-linux-installers\.result == 'success'/);
+    const publish = job('publish');
+    assert.match(publish, /ready: \$\{\{ needs\.verify-macos-signed\.result == 'success' \}\}/);
+    assert.match(publish, /ready: \$\{\{ needs\.verify-windows-signatures\.result == 'success' \}\}/);
+    assert.match(publish, /needs\.smoke-linux-installers\.result == 'success'/);
   });
 
   test('exercises owned and foreign fleetd branches after planting real receipts', () => {
@@ -623,32 +628,42 @@ describe('desktop release workflow safety contract', () => {
     assert.equal(
       (workflow.match(/EXPECTED_VERSION: \$\{\{ needs\.preflight\.outputs\.version \}\}/g) ?? [])
         .length,
-      5
+      4
     );
     assert.equal(
       (workflow.match(/EXPECTED_SOURCE_SHA: \$\{\{ needs\.preflight\.outputs\.source_sha \}\}/g) ?? [])
         .length,
-      5
+      4
     );
     const validators = workflow.match(
       /- name: Gate source SHA,[\s\S]*?(?=\n      - )/g
     );
-    assert.equal(validators?.length, 5);
+    assert.equal(validators?.length, 4);
     for (const validator of validators ?? []) {
       assert.doesNotMatch(validator, /run:[\s\S]*needs\.preflight\.outputs/);
     }
   });
 
-  test('publishes each OS on its own, sequentially, and never on a dry run', () => {
-    for (const name of ['publish-macos', 'publish-windows', 'publish-linux', 'reconcile-feed']) {
-      assert.match(job(name), /!inputs\.dry_run/);
-      assert.match(job(name), /CHANNEL: \$\{\{ needs\.preflight\.outputs\.channel \}\}/);
-    }
-    assert.match(job('publish-windows'), /needs: \[preflight, verify-windows-signatures, publish-macos\]/);
-    assert.match(job('publish-linux'), /needs: \[[^\]]*publish-windows\]/);
-    assert.match(job('reconcile-feed'), /always\(\)/);
-    assert.match(job('reconcile-feed'), /publish-desktop-release\.sh --require-all/);
+  test('publishes through one sequential matrix job, never on a dry run, never after a failed validation', () => {
+    const publish = job('publish');
+    assert.match(publish, /max-parallel: 1\n\s+fail-fast: false/);
+    assert.match(publish, /!inputs\.dry_run/);
+    assert.match(publish, /needs\.validate-source\.result == 'success'/);
+    assert.match(publish, /CHANNEL: \$\{\{ needs\.preflight\.outputs\.channel \}\}/);
+    for (const os of ['macos', 'windows', 'linux']) assert.match(publish, new RegExp(`- os: ${os}\\n`));
+    const reconcile = job('reconcile-feed');
+    assert.match(reconcile, /always\(\)/);
+    assert.match(reconcile, /needs\.validate-source\.result == 'success'/);
+    assert.match(reconcile, /!inputs\.dry_run/);
+    assert.match(reconcile, /publish-desktop-release\.sh --require-all/);
     assert.doesNotMatch(workflow, /connect-update\.json|npm publish|gen-winget|gen-homebrew/);
+  });
+
+  test('a dry run assembles the consolidated checksums and signed manifest as an artifact', () => {
+    const dry = job('assemble-dry-run');
+    assert.match(dry, /inputs\.dry_run/);
+    assert.match(dry, /DRY_RUN=true \.\/scripts\/publish-desktop-release\.sh --require-all/);
+    assert.match(dry, /s3-artifact-upload/);
   });
 });
 
@@ -756,8 +771,7 @@ test('ships a signed, notarized uninstaller pkg inside the desktop PKG payload',
 
 test('the macOS set is one PKG plus one updater tarball, published by its own job', () => {
   assert.match(job('sign-macos'), /path: out\/\*\.pkg out\/\*\.app\.tar\.gz/);
-  assert.match(job('publish-macos'), /name: connect-desktop-macos-signed/);
-  assert.match(job('publish-macos'), /publish-desktop-release\.sh platform\/macos/);
+  assert.match(job('publish'), /artifact: connect-desktop-macos-signed/);
 });
 
 test('all Mac fleet owners serialize the full workflow, including cleanup', () => {
@@ -786,7 +800,7 @@ test('native builds use the source-pinned pnpm before any packaging command', ()
 test('MSI verification uses Windows trust rather than the PE-only parser', () => {
   assert.doesNotMatch(job('sign-windows-installer'), /verify-authenticode\.py/);
   assert.match(job('verify-windows-signatures'), /\$installers \| ForEach-Object \{\s*\.\/scripts\/verify-authenticode-windows\.ps1/);
-  assert.match(job('publish-windows'), /verify-windows-signatures/);
+  assert.match(job('publish'), /verify-windows-signatures/);
 });
 
 test('universal builds stage a validated engine for both compile targets and bundling', () => {

@@ -133,7 +133,7 @@ describe('validation gates what ships', () => {
 
   test('the shared gate compares the npm gitHead with source_sha', () => {
     const gate = readFileSync(new URL('../.github/actions/gate-private-source/action.yml', import.meta.url), 'utf8');
-    assert.match(gate, /npm view "anyray-connect@\$\{PACKAGE_VERSION\}" gitHead/);
+    assert.match(gate, /npm view --prefer-online "anyray-connect@\$\{PACKAGE_VERSION\}" gitHead/);
     assert.match(gate, /test "\$head" = "\$EXPECTED_SOURCE_SHA"/);
   });
 
@@ -198,5 +198,58 @@ esac
     assert.equal(result.status, 0, result.stderr);
     assert.match(output, /cli_published=false/);
     assert.match(result.stdout + result.stderr, /lacks: anyray-connect\.deb/);
+  });
+});
+
+describe('the shared gate and the npm retry', () => {
+  const gate = readFileSync(new URL('../.github/actions/gate-private-source/action.yml', import.meta.url), 'utf8');
+
+  test('publication eligibility lives in the gate only, used by both workflows', () => {
+    assert.match(gate, /run: node scripts\/verify-connect-desktop-publication\.mjs/);
+    assert.doesNotMatch(callee, /verify-connect-desktop-publication\.mjs/);
+    assert.doesNotMatch(caller, /verify-connect-desktop-publication\.mjs/);
+    assert.match(job(caller, 'validate-desktop'), /min_version: \$\{\{ inputs\.min_version \}\}/);
+    assert.match(job(callee, 'validate-source'), /min_version: \$\{\{ needs\.preflight\.outputs\.min_version \}\}/);
+  });
+
+  test('the gitHead check retries visibility through the one shared budget, then compares', () => {
+    assert.match(gate, /\.\/scripts\/retry-npm\.sh npm view --prefer-online "anyray-connect@\$\{PACKAGE_VERSION\}" gitHead/);
+    assert.match(job(caller, 'build'), /\.\/scripts\/retry-npm\.sh npm pack --prefer-online/);
+    assert.doesNotMatch(caller, /FETCH_DEADLINE/);
+  });
+
+  const tmp = (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'retry-npm-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    mkdirSync(join(dir, 'bin'));
+    return dir;
+  };
+  const fakeNpm = (dir, failures) => {
+    writeFileSync(join(dir, 'count'), '0');
+    writeFileSync(join(dir, 'bin/npm'), `#!/usr/bin/env bash
+n=$(( $(cat "${dir}/count") + 1 )); echo $n > "${dir}/count"
+if [ $n -le ${failures} ]; then echo "npm error code E404" >&2; exit 1; fi
+echo abc123
+`, { mode: 0o755 });
+  };
+  const retry = (dir, env) => spawnSync('bash', [new URL('./retry-npm.sh', import.meta.url).pathname, 'npm', 'view', 'x'], {
+    encoding: 'utf8', env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, NPM_RETRY_SLEEP: '0', ...env },
+  });
+
+  test('a version that appears after two misses is returned, with only its value on stdout', (t) => {
+    const dir = tmp(t);
+    fakeNpm(dir, 2);
+    const result = retry(dir, {});
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), 'abc123');
+    assert.equal(readFileSync(join(dir, 'count'), 'utf8').trim(), '3');
+  });
+
+  test('a version that never appears fails once the deadline passes', (t) => {
+    const dir = tmp(t);
+    fakeNpm(dir, 1000);
+    const result = retry(dir, { NPM_RETRY_SECONDS: '0' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /still failing after/);
   });
 });

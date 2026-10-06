@@ -593,7 +593,11 @@ hold the earlier checksums. An asset an interrupted attempt left half-uploaded i
 deleted and sent again. So a retry of the same version and source only adds what is
 missing; a rebuild with different bytes needs a new version or source. The derived
 `SHA256SUMS`, signed manifest and public key are rewritten from whatever is on the
-release each time. If feed publication fails, re-run the failed publish job, or run
+release each time. Artifact keys include the run attempt, so "re-run failed jobs"
+cannot recover a desktop publish: the re-run consumer finds no artifacts from the
+earlier attempt. Recover by dispatching again with the same `version` and
+`source_sha`: published assets are never replaced, a retry only adds what is missing,
+and the feed is rebuilt from the release's own assets. Or run
 `node scripts/publish-desktop-feed.mjs` with `REPO`, `VERSION`, `SOURCE_SHA`,
 `CHANNEL` and `GH_TOKEN` set, from a directory containing `assets/` with the
 manifest, signature and (stable) installers downloaded from that release. Do not

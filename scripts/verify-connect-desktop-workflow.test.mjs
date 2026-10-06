@@ -54,7 +54,9 @@ describe('desktop release workflow safety contract', () => {
 
   test('the stable gate runs before any paid Mac or signing job', () => {
     const validate = job('validate-source');
-    assert.match(validate, /CHANNEL: \$\{\{ needs\.preflight\.outputs\.channel \}\}[\s\S]*node scripts\/verify-connect-desktop-publication\.mjs/);
+    assert.match(validate, /channel: \$\{\{ needs\.preflight\.outputs\.channel \}\}/);
+    const gate = readFileSync(new URL('../.github/actions/gate-private-source/action.yml', import.meta.url), 'utf8');
+    assert.match(gate, /CHANNEL: \$\{\{ inputs\.channel \}\}[\s\S]*node scripts\/verify-connect-desktop-publication\.mjs/);
     assert.match(job('provision-mac'), /needs: \[preflight, validate-source\]/);
     assert.match(job('build-windows-unsigned'), /needs: \[preflight, validate-source\]/);
     assert.match(job('build-linux-unsigned'), /needs: \[preflight, validate-source\]/);

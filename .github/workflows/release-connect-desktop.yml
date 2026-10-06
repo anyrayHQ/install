@@ -252,15 +252,9 @@ jobs:
           private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
           version: ${{ needs.preflight.outputs.version }}
           source_sha: ${{ needs.preflight.outputs.source_sha }}
-      - name: Check publication eligibility before native builds
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          VERSION: ${{ needs.preflight.outputs.version }}
-          MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
-          CHANNEL: ${{ needs.preflight.outputs.channel }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: node scripts/verify-connect-desktop-publication.mjs
+          min_version: ${{ needs.preflight.outputs.min_version }}
+          channel: ${{ needs.preflight.outputs.channel }}
+          dry_run: ${{ inputs.dry_run }}
 
   provision-mac:
     needs: [preflight, validate-source]

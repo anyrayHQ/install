@@ -259,6 +259,8 @@ jobs:
           source_sha: ${{ inputs.source_sha }}
           # release mode compiles the CLI from npm, so npm must hold this commit; prepare is bound by the main-only record and PACKAGE_SHA256
           verify_npm_head: ${{ inputs.mode == 'release' && 'true' || 'false' }}
+          min_version: ${{ inputs.min_version }}
+          dry_run: ${{ inputs.dry_run }}
 
   build:
     needs: [signing-preflight, validate-desktop]
@@ -277,7 +279,9 @@ jobs:
       # on disk before it can be resolved.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            scripts
           sparse-checkout-cone-mode: false
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
@@ -371,23 +375,13 @@ jobs:
           # check exits immediately rather than sleeping first.
           # Work after this step is ~30s (deps 9s, compile 5s, upload 16s), so
           # even a deadline-length wait leaves ~29m of the 40m timeout unused.
-          FETCH_DEADLINE=$(( $(date +%s) + 600 ))
-          attempt=0
-          while :; do
-            attempt=$(( attempt + 1 ))
-            # Clear any partial artifact first: the extract below globs, and two
-            # tarballs would make `tar xzf` fail on an argument it cannot take.
-            rm -f anyray-connect-*.tgz
-            if npm pack --prefer-online "anyray-connect@${VERSION_INPUT}"; then
-              break
-            fi
-            if [ "$(date +%s)" -ge "$FETCH_DEADLINE" ]; then
-              echo "::error::anyray-connect@${VERSION_INPUT} still unfetchable from npm after 10 minutes (${attempt} attempts). npm holds a version this lane has no assets for, so releases/latest stays on the PREVIOUS connect; re-run this workflow for ${VERSION_INPUT} once the registry serves it."
-              exit 1
-            fi
-            echo "npm does not serve ${VERSION_INPUT} yet — retrying (attempt ${attempt})"
-            sleep 10
-          done
+          # Clear any partial artifact first: the extract below globs, and two
+          # tarballs would make `tar xzf` fail on an argument it cannot take.
+          rm -f anyray-connect-*.tgz
+          if ! ./scripts/retry-npm.sh npm pack --prefer-online "anyray-connect@${VERSION_INPUT}"; then
+            echo "::error::anyray-connect@${VERSION_INPUT} is still unfetchable from npm. npm holds a version this lane has no assets for, so releases/latest stays on the PREVIOUS connect; re-dispatch this workflow for ${VERSION_INPUT} once the registry serves it."
+            exit 1
+          fi
           tar xzf anyray-connect-*.tgz
           # Resolve the concrete version even when 'latest' was requested.
           VERSION="$(node -p "require('./package/package.json').version")"

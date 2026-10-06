@@ -78,10 +78,25 @@ on:
         description: 'Also release the desktop app in this run: the exact 40-hex anyrayHQ/monorepo commit (reachable from origin/main) it is built from. Needs an explicit x.y.z version. Empty = CLI only. Ignored on staging.'
         required: false
         default: ''
+      mode:
+        description: 'release = build, sign and publish in one run. prepare = build and sign the CLI and desktop app from the .tgz the monorepo uploaded, publish nothing, store the signed set in S3. publish = publish a stored set (needs set_sums_sha256 and source_sha), build nothing.'
+        required: false
+        type: choice
+        options: [release, prepare, publish]
+        default: release
+      set_key:
+        description: 'prepare/publish: the set directory under connect-sets/ in the CI artifacts bucket. Empty = the version.'
+        required: false
+        default: ''
+      set_sums_sha256:
+        description: 'publish: sha256 of the set SHA256SUMS file, from the monorepo record. The set is refused unless it matches.'
+        required: false
+        default: ''
 
 # Serialize owners of the shared Mac runner through teardown.
 concurrency:
-  group: anyray-install-mac-release
+  # A publish needs no Mac; keeping it out of the build group stops a queued build replacing it.
+  group: ${{ inputs.mode == 'publish' && 'anyray-install-connect-publish' || 'anyray-install-mac-release' }}
   cancel-in-progress: false
 
 permissions:
@@ -112,6 +127,8 @@ jobs:
   signing-preflight:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
+    outputs:
+      set_key: ${{ steps.set.outputs.set_key }}
     env:
       # A step `if:` cannot read `secrets.*`, and neither can a job-level `if:` —
       # so the values are mapped into env and checked in a `run:` block, the same
@@ -153,6 +170,42 @@ jobs:
             exit 1
           fi
           echo 'all signing lanes configured: macOS (Developer ID + notarization), Windows (Azure Artifact Signing), Linux (GPG)'
+      - name: Mode inputs (prepare and publish work on a stored set)
+        id: set
+        env:
+          MODE_INPUT: ${{ inputs.mode }}
+          VERSION_INPUT: ${{ inputs.version }}
+          SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          SET_KEY_INPUT: ${{ inputs.set_key }}
+          SET_SUMS_INPUT: ${{ inputs.set_sums_sha256 }}
+          STAGING_INPUT: ${{ inputs.staging }}
+        run: |
+          set -euo pipefail
+          set_key="${SET_KEY_INPUT:-$VERSION_INPUT}"
+          echo "set_key=$set_key" >> "$GITHUB_OUTPUT"
+          if [ "$MODE_INPUT" = release ]; then
+            exit 0
+          fi
+          if [[ ! "$VERSION_INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$MODE_INPUT needs an explicit plain x.y.z version, got '$VERSION_INPUT'"
+            exit 1
+          fi
+          if [[ ! "$set_key" =~ ^[A-Za-z0-9._-]{1,80}$ ]]; then
+            echo "::error::set_key must be 1-80 of A-Za-z0-9._-, got '$set_key'"
+            exit 1
+          fi
+          if [ "$STAGING_INPUT" = true ]; then
+            echo "::error::staging releases are CLI-only and never go through $MODE_INPUT"
+            exit 1
+          fi
+          if [ -z "$SOURCE_SHA_INPUT" ]; then
+            echo "::error::$MODE_INPUT handles the CLI and the desktop app together; source_sha is required"
+            exit 1
+          fi
+          if [ "$MODE_INPUT" = publish ] && [[ ! "$SET_SUMS_INPUT" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::publish needs set_sums_sha256 (64 lowercase hex), the hash of the set SHA256SUMS"
+            exit 1
+          fi
       # The desktop job runs after the CLI is out, so a bad input must fail before anything ships.
       # validate-desktop then proves the commit itself (ancestry, versions).
       - name: Desktop inputs (a source_sha releases the desktop app in this run)
@@ -340,21 +393,23 @@ jobs:
           private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
           version: ${{ inputs.version }}
           source_sha: ${{ inputs.source_sha }}
-          verify_npm_head: 'true' # the CLI engines compile from the npm package
+          # release mode compiles the CLI from npm, so npm must hold this commit; prepare is bound by the main-only record and PACKAGE_SHA256
+          verify_npm_head: ${{ inputs.mode == 'release' && 'true' || 'false' }}
           min_version: ${{ inputs.min_version }}
           dry_run: ${{ inputs.dry_run }}
 
   build:
     needs: [signing-preflight, validate-desktop]
     # validate-desktop is skipped for a CLI-only release; only its failure blocks the build.
-    if: ${{ !cancelled() && needs.signing-preflight.result == 'success' && needs.validate-desktop.result != 'failure' }}
+    if: ${{ !cancelled() && inputs.mode != 'publish' && needs.signing-preflight.result == 'success' && needs.validate-desktop.result != 'failure' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
       contents: read
       id-token: write # assume the CI-artifacts role for the S3 handoff
     outputs:
-      version: ${{ steps.pkg.outputs.version }}
+      version: ${{ steps.pkg.outputs.version || steps.prepared.outputs.version }}
+      package_sha256: ${{ steps.prepared.outputs.sha256 }}
     steps:
       # The S3 handoff below is a LOCAL composite action, so the repo must be
       # on disk before it can be resolved.
@@ -389,8 +444,28 @@ jobs:
           # behaviours are the same parse pass on 1.3.5 and cannot be separated.
           bun-version: '1.3.14'
 
+      - name: Unpack the package the monorepo prepared (not yet on npm)
+        id: prepared
+        if: ${{ inputs.mode == 'prepare' }}
+        env:
+          BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          VERSION_INPUT: ${{ inputs.version }}
+          SET_KEY: ${{ needs.signing-preflight.outputs.set_key }}
+        run: |
+          set -euo pipefail
+          aws s3 cp "s3://${BUCKET}/connect-sets/${SET_KEY}/npm/anyray-connect-${VERSION_INPUT}.tgz" . --only-show-errors
+          tar xzf "anyray-connect-${VERSION_INPUT}.tgz"
+          VERSION="$(node -p "require('./package/package.json').version")"
+          test "$VERSION" = "$VERSION_INPUT"
+          test -f package/dist/index.js
+          {
+            echo "version=${VERSION}"
+            echo "sha256=$(sha256sum "anyray-connect-${VERSION_INPUT}.tgz" | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Fetch the published package
         id: pkg
+        if: ${{ inputs.mode != 'prepare' }}
         env:
           # Via env (not inline) so the dispatch input can't be shell-injected.
           VERSION_INPUT: ${{ github.event.inputs.version }}
@@ -1080,8 +1155,8 @@ jobs:
   # the host when the window closes. Runs on the Linux runner with the same OIDC
   # lifecycle role.
   teardown-mac:
-    needs: sign-macos
-    if: ${{ always() }}
+    needs: [provision-mac, sign-macos]
+    if: ${{ always() && needs.provision-mac.result != 'skipped' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -1581,8 +1656,180 @@ jobs:
           path: pkgs/
           if-no-files-found: error
 
+  # prepare: the CLI set must be complete or nothing is stored; each desktop OS that did not finish
+  # verified is named in MISSING. SHA256SUMS goes up last, so a set without it is not a set.
+  store-set:
+    needs: [signing-preflight, build, sign-macos, sign-windows, package-linux, desktop]
+    if: ${{ always() && inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
+    env:
+      BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
+      SET_KEY: ${{ needs.signing-preflight.outputs.set_key }}
+      PACKAGE_SHA256: ${{ needs.build.outputs.package_sha256 }}
+      VERSION: ${{ inputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      MACOS_OK: ${{ needs.desktop.outputs.macos }}
+      WINDOWS_OK: ${{ needs.desktop.outputs.windows }}
+      LINUX_OK: ${{ needs.desktop.outputs.linux }}
+    steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - name: Store the signed set
+        run: |
+          set -euo pipefail
+          run_prefix="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          set_prefix="s3://${BUCKET}/connect-sets/${SET_KEY}"
+          mkdir set
+          fetch() {
+            aws s3 cp "${run_prefix}/$1/" "set/$1/" --recursive --only-show-errors
+            test -n "$(ls "set/$1")" || { echo "::error::artifact $1 is empty"; exit 1; }
+          }
+          for name in binaries-unsigned binaries-darwin binaries-macos-pkg binaries-windows linux-packages; do
+            fetch "$name"
+          done
+          missing=''
+          if [ "$MACOS_OK" = true ]; then fetch connect-desktop-macos-signed; else missing="${missing}macos\n"; fi
+          if [ "$WINDOWS_OK" = true ]; then
+            fetch connect-desktop-windows-inner-signed
+            fetch connect-desktop-windows-installer-signed
+          else
+            missing="${missing}windows\n"
+          fi
+          if [ "$LINUX_OK" = true ]; then fetch connect-desktop-linux-signed; else missing="${missing}linux\n"; fi
+          printf '%b' "$missing" > set/MISSING
+          # The sha256 of the .tgz this run compiled; the monorepo record must match what it uploaded.
+          printf '%s\n' "$PACKAGE_SHA256" > set/PACKAGE_SHA256
+          # Publish refuses a set whose label is not the version and commit it was asked to ship.
+          printf '%s\n' "$VERSION" > set/VERSION
+          printf '%s\n' "$SOURCE_SHA" > set/SOURCE_SHA
+          ( cd set && find . -type f | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum -- ) > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" set/SHA256SUMS
+          cat set/SHA256SUMS
+          for dir in set/*/; do
+            name="$(basename "$dir")"
+            aws s3 sync "$dir" "${set_prefix}/${name}/" --delete --only-show-errors
+          done
+          aws s3 cp set/MISSING "${set_prefix}/MISSING" --only-show-errors
+          aws s3 cp set/PACKAGE_SHA256 "${set_prefix}/PACKAGE_SHA256" --only-show-errors
+          aws s3 cp set/VERSION "${set_prefix}/VERSION" --only-show-errors
+          aws s3 cp set/SOURCE_SHA "${set_prefix}/SOURCE_SHA" --only-show-errors
+          aws s3 cp set/SHA256SUMS "${set_prefix}/SHA256SUMS" --only-show-errors
+          sums="$(sha256sum set/SHA256SUMS | cut -d' ' -f1)"
+          echo "set ${SET_KEY} stored; missing desktop OSes: [$(tr '\n' ' ' < set/MISSING)]; SHA256SUMS sha256 ${sums}"
+          # shellcheck disable=SC2016 # backticks are literal markdown
+          printf 'set `%s` stored at `%s`, SHA256SUMS sha256 `%s`\n' "$SET_KEY" "$set_prefix" "$sums" >> "$GITHUB_STEP_SUMMARY"
+
+  # publish: refuse a tampered set, then stage its files as this run's own artifacts so the release
+  # and desktop publish jobs below run exactly as they do after a build.
+  load-set:
+    needs: signing-preflight
+    if: ${{ inputs.mode == 'publish' }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
+    outputs:
+      cli_published: ${{ steps.check.outputs.cli_published }}
+      present: ${{ steps.verify.outputs.present }}
+    env:
+      BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
+      SET_KEY: ${{ needs.signing-preflight.outputs.set_key }}
+      SET_SUMS_SHA256: ${{ inputs.set_sums_sha256 }}
+      VERSION: ${{ inputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/install-gh
+      - name: Download the set and verify every file
+        id: verify
+        run: |
+          set -euo pipefail
+          src="s3://${BUCKET}/connect-sets/${SET_KEY}"
+          mkdir set
+          aws s3 cp "${src}/SHA256SUMS" set/SHA256SUMS --only-show-errors
+          got="$(sha256sum set/SHA256SUMS | cut -d' ' -f1)"
+          if [ "$got" != "$SET_SUMS_SHA256" ]; then
+            echo "::error::set ${SET_KEY} SHA256SUMS is ${got}, not the recorded ${SET_SUMS_SHA256}; refusing to publish it"
+            exit 1
+          fi
+          # Only the listed files are fetched, so nothing else under the prefix can reach a release.
+          mapfile -t files < <(sed 's/^[0-9a-f]*  //' set/SHA256SUMS)
+          for file in "${files[@]}"; do
+            case "$file" in
+              *..*|/*|*[!A-Za-z0-9._/-]*) echo "::error::unsafe path in the set: $file"; exit 1 ;;
+            esac
+            mkdir -p "set/$(dirname "$file")"
+            aws s3 cp "${src}/${file}" "set/${file}" --only-show-errors
+          done
+          ( cd set && sha256sum --check --strict SHA256SUMS )
+          for label in "VERSION:$VERSION" "SOURCE_SHA:$SOURCE_SHA"; do
+            if [ "$(cat "set/${label%%:*}")" != "${label#*:}" ]; then
+              echo "::error::set ${SET_KEY} was prepared for ${label%%:*} $(cat "set/${label%%:*}"), not ${label#*:}; refusing to relabel it"
+              exit 1
+            fi
+          done
+          for name in binaries-unsigned binaries-darwin binaries-macos-pkg binaries-windows linux-packages; do
+            test -n "$(ls "set/${name}" 2>/dev/null)" || { echo "::error::the set has no ${name}"; exit 1; }
+          done
+          has() { test -n "$(ls "set/$1" 2>/dev/null)"; }
+          present=''
+          if has connect-desktop-macos-signed; then present="$present macos"; fi
+          if has connect-desktop-windows-inner-signed && has connect-desktop-windows-installer-signed; then present="$present windows"; fi
+          if has connect-desktop-linux-signed; then present="$present linux"; fi
+          echo "present=${present# }" >> "$GITHUB_OUTPUT"
+          run_prefix="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          for dir in set/*/; do
+            name="$(basename "$dir")"
+            aws s3 cp "$dir" "${run_prefix}/${name}/" --recursive --only-show-errors
+          done
+      - name: Skip the CLI only when its release is complete, refuse an older version
+        id: check
+        run: |
+          set -euo pipefail
+          if gh release view "connect-v${VERSION}" --repo "$REPO" >/dev/null 2>&1; then
+            # A run that died mid-upload leaves a release with some assets missing; that one is rebuilt.
+            have="$(gh release view "connect-v${VERSION}" --repo "$REPO" --json assets --jq '.assets[] | select(.state == "uploaded") | .name')"
+            missing=''
+            for want in SHA256SUMS SHA256SUMS.asc $(for f in set/binaries-*/* set/linux-packages/*; do basename "$f"; done); do
+              grep -qxF "$want" <<< "$have" || missing="$missing $want"
+            done
+            if [ -z "$missing" ]; then
+              echo "connect ${VERSION} is already published and complete; only the desktop app is (re)published"
+              echo 'cli_published=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::warning::connect-v${VERSION} exists but lacks:${missing}; the CLI release is rebuilt"
+          fi
+          echo 'cli_published=false' >> "$GITHUB_OUTPUT"
+          latest_tag="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+          if [[ ! "$latest_tag" =~ ^connect-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::cannot safely compare current latest tag: $latest_tag"
+            exit 1
+          fi
+          highest="$(printf '%s\n%s\n' "${BASH_REMATCH[1]}" "$VERSION" | sort -V | tail -n 1)"
+          if [ "$highest" != "$VERSION" ]; then
+            echo "::error::${VERSION} is older than the published ${BASH_REMATCH[1]}; a publish never moves latest backwards"
+            exit 1
+          fi
+
   release:
-    needs: [build, sign-macos, sign-windows, package-linux]
+    needs: [build, sign-macos, sign-windows, package-linux, load-set]
+    if: ${{ !cancelled() && (inputs.mode == 'release' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' || inputs.mode == 'publish' && needs.load-set.result == 'success' && needs.load-set.outputs.cli_published != 'true') }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -1718,7 +1965,7 @@ jobs:
         # ship a manifest pointing at bytes that are not there.
         if: ${{ !inputs.dry_run && !inputs.staging }}
         env:
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version || inputs.version }}
         run: |
           set -euo pipefail
           scripts/gen-winget-manifests.sh --version "$VERSION" --sha256sums assets/SHA256SUMS
@@ -1820,7 +2067,7 @@ jobs:
         env:
           # Via env (not inline) so the dispatch input can't be shell-injected.
           MIN_VERSION: ${{ github.event.inputs.min_version }}
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version || inputs.version }}
         run: |
           set -euo pipefail
           if [[ ! "$MIN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -1842,7 +2089,7 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version || inputs.version }}
           REPO: ${{ github.repository }}
           STAGING: ${{ inputs.staging }}
         run: |
@@ -2064,7 +2311,7 @@ jobs:
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version || inputs.version }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -2102,17 +2349,19 @@ jobs:
   # the engines `build` uploaded through the usual S3 artifact keys. It needs teardown-mac because
   # it provisions its own Mac under the same runner name.
   desktop:
-    needs: [signing-preflight, build, release, teardown-mac]
-    if: ${{ !cancelled() && inputs.source_sha != '' && !inputs.staging && needs.release.result == 'success' }}
+    needs: [signing-preflight, build, sign-macos, sign-windows, package-linux, load-set, release, teardown-mac]
+    if: ${{ !cancelled() && inputs.source_sha != '' && !inputs.staging && ((inputs.mode == 'release' && needs.release.result == 'success') || (inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success') || (inputs.mode == 'publish' && needs.load-set.result == 'success' && (needs.release.result == 'success' || needs.load-set.outputs.cli_published == 'true'))) }}
     permissions:
       contents: write # the versioned desktop release
       id-token: write # the S3 handoff and the Mac fleet role
     uses: ./.github/workflows/release-connect-desktop.yml
     secrets: inherit
     with:
-      version: ${{ needs.build.outputs.version }}
+      version: ${{ needs.build.outputs.version || inputs.version }}
       source_sha: ${{ inputs.source_sha }}
       min_version: ${{ inputs.min_version }}
       channel: stable
       dry_run: ${{ inputs.dry_run }}
       reuse_engines: true
+      mode: ${{ inputs.mode }}
+      present: ${{ needs.load-set.outputs.present }}

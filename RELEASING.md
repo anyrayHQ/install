@@ -51,6 +51,30 @@ CLI release.
 - `dry_run` builds, signs and verifies everything, publishes nothing, and keeps the
   consolidated checksums and signed manifest as a workflow artifact.
 
+### Prepare now, publish later (`mode`)
+
+`mode` splits one release into a build half and a publish half. Both need
+`version` as plain `x.y.z` and a `source_sha`, and neither takes `staging`. The
+`desktop` job passes the mode to `release-connect-desktop.yml`.
+
+| `mode` | What runs |
+| --- | --- |
+| `release` (default) | Build, sign and publish in one run, as above. |
+| `prepare` | Compiles the CLI from `connect-sets/<set_key>/npm/anyray-connect-<version>.tgz` in the CI artifacts bucket (not npm), signs and verifies the CLI and every desktop OS, publishes nothing, and stores the signed set under `connect-sets/<set_key>/` (`set_key` defaults to the version). The CLI set must be complete or nothing is stored. `MISSING` is always written, empty when every desktop OS verified, otherwise one OS name per line. `PACKAGE_SHA256` is the hash of the `.tgz` that was compiled: the caller must match it to the one it uploaded. |
+| `publish` | Builds nothing. Refuses the set unless the hash of its `SHA256SUMS` equals `set_sums_sha256`, and fetches only the files that file lists, each checked against it. The set records the `VERSION` and `SOURCE_SHA` it was prepared for; a different `version` or `source_sha` is refused. Publishes the CLI release (a no-op when `connect-v<version>` already exists with every set file uploaded, rebuilt when assets are missing, refused when older than the published one), then calls the desktop workflow to publish each OS present and reconcile the feed. |
+
+A partial publication from a `publish` run can be completed by dispatching `mode=publish`
+again with the same `version` and `set_sums_sha256`: it loads the same stored set, so
+files already on the release carry identical bytes and are skipped, and only the missing
+ones upload. (A `release` run cannot be completed this way, because rebuilding re-signs.)
+
+The signed set sits in the CI artifacts bucket, which any job in this repo or the
+monorepo can write, so the only trust anchor is `set_sums_sha256` coming from a
+record only `main` can write. Build provenance is attested at `publish`, not
+`prepare`: it is a public, permanent record and a prepared set may never ship.
+`publish` runs in its own concurrency group (it needs no Mac), so a queued build
+cannot replace it.
+
 ## Signing (RFC 0010 §6)
 
 Signing is **mandatory on every platform**, and the `signing-preflight` job
@@ -519,7 +543,8 @@ release, so a desktop failure cannot block an npm or CLI-binary release; run by
 hand it is the lane for staging builds and for retrying the app alone. It has no
 push, tag, `workflow_run`, or repository-dispatch trigger.
 
-The manual dispatch has exactly five inputs (a call adds `reuse_engines`):
+The manual dispatch has exactly five inputs (a call adds `reuse_engines`, `mode`
+and `present`):
 
 | Input | Contract |
 | --- | --- |

@@ -66,7 +66,7 @@ CLI release.
 | --- | --- |
 | `release` (default) | Build, sign and publish in one run, as above. |
 | `prepare` | Compiles the CLI from `connect-sets/<set_key>/npm/anyray-connect-<version>.tgz` in the CI artifacts bucket (not npm), signs and verifies the CLI and every desktop OS, publishes nothing, and stores the signed set under `connect-sets/<set_key>/` (`set_key` defaults to the version). The CLI set must be complete or nothing is stored. `MISSING` is always written, empty when every desktop OS verified, otherwise one OS name per line. `PACKAGE_SHA256` is the hash of the `.tgz` that was compiled: the caller must match it to the one it uploaded. |
-| `publish` | Builds nothing. Refuses the set unless the hash of its `SHA256SUMS` equals `set_sums_sha256`, and fetches only the files that file lists, each checked against it. Publishes the CLI release (a no-op when `connect-v<version>` already exists, refused when older than the published one), then calls the desktop workflow to publish each OS present and reconcile the feed. |
+| `publish` | Builds nothing. Refuses the set unless the hash of its `SHA256SUMS` equals `set_sums_sha256`, and fetches only the files that file lists, each checked against it. The set records the `VERSION` and `SOURCE_SHA` it was prepared for; a different `version` or `source_sha` is refused. Publishes the CLI release (a no-op when `connect-v<version>` already exists with every set file uploaded, rebuilt when assets are missing, refused when older than the published one), then calls the desktop workflow to publish each OS present and reconcile the feed. |
 
 The signed set sits in the CI artifacts bucket, which any job in this repo or the
 monorepo can write, so the only trust anchor is `set_sums_sha256` coming from a
@@ -885,7 +885,7 @@ Native runner requirements are:
 | Platform/job | Runner |
 | --- | --- |
 | macOS build, signing, signed smoke | Existing on-demand `codebuild-anyray-install-runner-mac-…` MAC_ARM fleet. Signing is artifact-only, with no private source checkout. Rust comes from the image, with a pinned `rustup-init` fallback. |
-| Windows build/bundle/native verify | Existing `codebuild-anyray-install-runner-win-…` Windows x64 project. The image is not documented to ship Rust or MSVC, so both compile jobs install a pinned VS 2022 Build Tools (VCTools workload) and a pinned `rustup-init.exe`, each checksum-verified, skipping whatever is already present. |
+| Windows build/bundle/native verify | Existing `codebuild-anyray-install-runner-win-…` Windows x64 project. The image is not documented to ship Rust or MSVC, so the build job installs a pinned VS 2022 Build Tools (VCTools workload) and both compile jobs a pinned `rustup-init.exe` (the bundle job links nothing, so it needs no MSVC), each checksum-verified, skipping whatever is already present. |
 | Linux build/native smoke | `codebuild-anyray-install-runner-ubuntu-…` (Ubuntu 22.04 `standard:7.0`), for webkit2gtk 4.1, Xvfb/DBus, and native deb/rpm tooling. 22.04 on purpose: the build host's glibc (2.35) is the floor for every machine that runs the shipped binary; 24.04 would drop Ubuntu 22.04 and Debian 12 users. Rust from a pinned `rustup-init`. |
 | Azure/GPG/assembly/publish | Existing `codebuild-anyray-install-runner-…` Linux project. |
 

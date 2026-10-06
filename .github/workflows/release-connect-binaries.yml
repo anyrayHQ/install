@@ -1540,6 +1540,8 @@ jobs:
       BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
       SET_KEY: ${{ needs.signing-preflight.outputs.set_key }}
       PACKAGE_SHA256: ${{ needs.build.outputs.package_sha256 }}
+      VERSION: ${{ inputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
       MACOS_OK: ${{ needs.desktop.outputs.macos }}
       WINDOWS_OK: ${{ needs.desktop.outputs.windows }}
       LINUX_OK: ${{ needs.desktop.outputs.linux }}
@@ -1574,6 +1576,9 @@ jobs:
           printf '%b' "$missing" > set/MISSING
           # The sha256 of the .tgz this run compiled; the monorepo record must match what it uploaded.
           printf '%s\n' "$PACKAGE_SHA256" > set/PACKAGE_SHA256
+          # Publish refuses a set whose label is not the version and commit it was asked to ship.
+          printf '%s\n' "$VERSION" > set/VERSION
+          printf '%s\n' "$SOURCE_SHA" > set/SOURCE_SHA
           ( cd set && find . -type f | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum -- ) > "$RUNNER_TEMP/SHA256SUMS"
           mv "$RUNNER_TEMP/SHA256SUMS" set/SHA256SUMS
           cat set/SHA256SUMS
@@ -1607,6 +1612,7 @@ jobs:
       SET_KEY: ${{ needs.signing-preflight.outputs.set_key }}
       SET_SUMS_SHA256: ${{ inputs.set_sums_sha256 }}
       VERSION: ${{ inputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
     steps:
@@ -1617,26 +1623,6 @@ jobs:
           role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
           aws-region: eu-central-1
       - uses: ./.github/actions/install-gh
-      - name: Skip the CLI when it is already out, refuse an older version
-        id: check
-        run: |
-          set -euo pipefail
-          if gh release view "connect-v${VERSION}" --repo "$REPO" >/dev/null 2>&1; then
-            echo "connect ${VERSION} is already published; only the desktop app is (re)published"
-            echo 'cli_published=true' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo 'cli_published=false' >> "$GITHUB_OUTPUT"
-          latest_tag="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
-          if [[ ! "$latest_tag" =~ ^connect-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "::error::cannot safely compare current latest tag: $latest_tag"
-            exit 1
-          fi
-          highest="$(printf '%s\n%s\n' "${BASH_REMATCH[1]}" "$VERSION" | sort -V | tail -n 1)"
-          if [ "$highest" != "$VERSION" ]; then
-            echo "::error::${VERSION} is older than the published ${BASH_REMATCH[1]}; a publish never moves latest backwards"
-            exit 1
-          fi
       - name: Download the set and verify every file
         id: verify
         run: |
@@ -1659,6 +1645,12 @@ jobs:
             aws s3 cp "${src}/${file}" "set/${file}" --only-show-errors
           done
           ( cd set && sha256sum --check --strict SHA256SUMS )
+          for label in "VERSION:$VERSION" "SOURCE_SHA:$SOURCE_SHA"; do
+            if [ "$(cat "set/${label%%:*}")" != "${label#*:}" ]; then
+              echo "::error::set ${SET_KEY} was prepared for ${label%%:*} $(cat "set/${label%%:*}"), not ${label#*:}; refusing to relabel it"
+              exit 1
+            fi
+          done
           for name in binaries-unsigned binaries-darwin binaries-macos-pkg binaries-windows linux-packages; do
             test -n "$(ls "set/${name}" 2>/dev/null)" || { echo "::error::the set has no ${name}"; exit 1; }
           done
@@ -1673,6 +1665,35 @@ jobs:
             name="$(basename "$dir")"
             aws s3 cp "$dir" "${run_prefix}/${name}/" --recursive --only-show-errors
           done
+      - name: Skip the CLI only when its release is complete, refuse an older version
+        id: check
+        run: |
+          set -euo pipefail
+          if gh release view "connect-v${VERSION}" --repo "$REPO" >/dev/null 2>&1; then
+            # A run that died mid-upload leaves a release with some assets missing; that one is rebuilt.
+            have="$(gh release view "connect-v${VERSION}" --repo "$REPO" --json assets --jq '.assets[] | select(.state == "uploaded") | .name')"
+            missing=''
+            for want in SHA256SUMS SHA256SUMS.asc $(for f in set/binaries-*/* set/linux-packages/*; do basename "$f"; done); do
+              grep -qxF "$want" <<< "$have" || missing="$missing $want"
+            done
+            if [ -z "$missing" ]; then
+              echo "connect ${VERSION} is already published and complete; only the desktop app is (re)published"
+              echo 'cli_published=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::warning::connect-v${VERSION} exists but lacks:${missing}; the CLI release is rebuilt"
+          fi
+          echo 'cli_published=false' >> "$GITHUB_OUTPUT"
+          latest_tag="$(gh api "repos/${REPO}/releases/latest" --jq .tag_name)"
+          if [[ ! "$latest_tag" =~ ^connect-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::cannot safely compare current latest tag: $latest_tag"
+            exit 1
+          fi
+          highest="$(printf '%s\n%s\n' "${BASH_REMATCH[1]}" "$VERSION" | sort -V | tail -n 1)"
+          if [ "$highest" != "$VERSION" ]; then
+            echo "::error::${VERSION} is older than the published ${BASH_REMATCH[1]}; a publish never moves latest backwards"
+            exit 1
+          fi
 
   release:
     needs: [build, sign-macos, sign-windows, package-linux, load-set]

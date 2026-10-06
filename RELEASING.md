@@ -886,7 +886,7 @@ Native runner requirements are:
 | Platform/job | Runner |
 | --- | --- |
 | macOS build, signing, signed smoke | Existing on-demand `codebuild-anyray-install-runner-mac-…` MAC_ARM fleet. Signing is artifact-only, with no private source checkout. Rust comes from the image, with a pinned `rustup-init` fallback. |
-| Windows build/bundle/native verify | Existing `codebuild-anyray-install-runner-win-…` Windows x64 project. The image is not documented to ship Rust or MSVC, so both compile jobs install a pinned VS 2022 Build Tools (VCTools workload) and a pinned `rustup-init.exe`, each checksum-verified, skipping whatever is already present. |
+| Windows build/bundle/native verify | Existing `codebuild-anyray-install-runner-win-…` Windows x64 project. The image is not documented to ship Rust or MSVC, so the build job installs a pinned VS 2022 Build Tools (VCTools workload) and both compile jobs a pinned `rustup-init.exe` (the bundle job links nothing, so it needs no MSVC), each checksum-verified, skipping whatever is already present. |
 | Linux build/native smoke | `codebuild-anyray-install-runner-ubuntu-…` (Ubuntu 22.04 `standard:7.0`), for webkit2gtk 4.1, Xvfb/DBus, and native deb/rpm tooling. 22.04 on purpose: the build host's glibc (2.35) is the floor for every machine that runs the shipped binary; 24.04 would drop Ubuntu 22.04 and Debian 12 users. Rust from a pinned `rustup-init`. |
 | Azure/GPG/assembly/publish | Existing `codebuild-anyray-install-runner-…` Linux project. |
 

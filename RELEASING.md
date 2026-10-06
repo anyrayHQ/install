@@ -130,17 +130,16 @@ Three invariants the workflow encodes — keep them if you touch it:
 
 ## Secrets to provision (repo → Settings → Secrets and variables → Actions)
 
-### Monorepo read app (tray lane only)
+### Monorepo read app (desktop app)
 
 | Secret | What it is | Where to get it |
 | --- | --- | --- |
 | `MONOREPO_READ_APP_ID` | App ID of the **anyray-monorepo-read** GitHub App (4791950) | Org → Settings → Developer settings → GitHub Apps |
 | `MONOREPO_READ_APP_PRIVATE_KEY` | The app's PEM private key | Same page → "Generate a private key"; upload with `gh secret set … < key.pem`, then delete the local file |
 
-The `tray-linux` lane (opt-in `build_tray` input) builds the RFC 0010 desktop
-tray, whose Rust source lives in the **private monorepo** — the npm package
-carries only the CLI. The job mints a one-hour installation token from these
-secrets (`contents: read`, installation scoped to `anyrayHQ/monorepo` alone) and
+`release-connect-desktop.yml` builds the desktop app, whose Rust source lives in
+the **private monorepo** — the npm package carries only the CLI. Each job that
+reads the source mints a one-hour installation token from these secrets (`contents: read`, installation scoped to `anyrayHQ/monorepo` alone) and
 clones with it. Blast radius of a leaked token is a read-only clone for at most
 an hour; rotating the key is "Generate a private key" plus re-uploading the
 secret. Provisioned 2026-09-01.
@@ -467,7 +466,7 @@ blocks GitHub-hosted runners). One persistent Linux runner project plus an
 | --- | --- | --- |
 | build, provision-mac, sign-windows, package-linux, release, teardown-mac | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`) | `anyray-install-runner` |
 | sign-macos | **on-demand** macOS (MAC_ARM, `mac2-m2.metal`) | `anyray-install-runner-mac` (ephemeral) |
-| tray-linux (opt-in `build_tray`) | Ubuntu 22.04 (`aws/codebuild/standard:7.0`) | `anyray-install-runner-ubuntu` |
+| desktop Linux build and smoke jobs | Ubuntu 22.04 (`aws/codebuild/standard:7.0`) | `anyray-install-runner-ubuntu` |
 
 **`sign-windows` no longer needs Windows.** jsign is a pure-Java Authenticode
 implementation, so signing moved to the Linux runner — no Windows SDK download,
@@ -491,7 +490,7 @@ one release's teardown from deleting another release's runner. GitHub retains
 one running and one pending run per group; a new dispatch replaces an older
 pending run. Dispatch releases deliberately and do not overlap multiple requests.
 
-**`anyray-install-runner-ubuntu`** exists for the tray lane alone: Tauri links
+**`anyray-install-runner-ubuntu`** exists for the desktop Linux jobs alone: Tauri links
 against `webkit2gtk-4.1`, which Amazon Linux 2 does not package, and the AL2
 runners have no Docker daemon to containerize around it. Ubuntu **22.04, not
 24.04**, on purpose — the build host's glibc (2.35) is the floor for every

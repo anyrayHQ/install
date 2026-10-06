@@ -286,7 +286,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           VERSION: ${{ needs.preflight.outputs.version }}
-          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
           MIN_VERSION: ${{ needs.preflight.outputs.min_version }}
           CHANNEL: ${{ needs.preflight.outputs.channel }}
           DRY_RUN: ${{ inputs.dry_run }}

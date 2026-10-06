@@ -764,7 +764,9 @@ test('all Mac fleet owners serialize the full workflow, including cleanup', () =
   for (const file of ['release-connect-desktop.yml', 'release-connect-binaries.yml', 'release-fleetd-installer.yml']) {
     const text = readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), 'utf8');
     // A called desktop run holds its caller's group already, so it takes its own and avoids waiting on itself.
-    const group = file === 'release-connect-desktop.yml'
+    const group = file === 'release-connect-binaries.yml'
+      ? "\\$\\{\\{ inputs\\.mode == 'publish' && 'anyray-install-connect-publish' \\|\\| 'anyray-install-mac-release' \\}\\}"
+      : file === 'release-connect-desktop.yml'
       ? "\\$\\{\\{ inputs\\.reuse_engines && format\\('connect-desktop-called-\\{0\\}', github\\.run_id\\) \\|\\| 'anyray-install-mac-release' \\}\\}"
       : 'anyray-install-mac-release';
     assert.match(text, new RegExp(`^concurrency:\\n(?:  #[^\\n]*\\n)*  group: ${group}\\n  cancel-in-progress: false`, 'm'));

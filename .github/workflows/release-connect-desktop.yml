@@ -51,11 +51,31 @@ on:
         required: false
         type: boolean
         default: true
+      mode:
+        description: 'release builds and publishes. prepare builds and verifies only (the caller stores the signed set). publish builds nothing and publishes the OSes in `present`, whose signed files the caller staged as this run artifacts.'
+        required: false
+        type: string
+        default: release
+      present:
+        description: 'publish mode: space-separated OSes (macos windows linux) whose signed files are staged.'
+        required: false
+        type: string
+        default: ''
       reuse_engines:
         description: 'Use the engines the calling workflow compiled (same run, S3 artifacts) instead of compiling them from the private source.'
         required: false
         type: boolean
         default: false
+    outputs:
+      macos:
+        description: 'true when the macOS chain verified'
+        value: ${{ jobs.outcome.outputs.macos }}
+      windows:
+        description: 'true when the Windows chain verified'
+        value: ${{ jobs.outcome.outputs.windows }}
+      linux:
+        description: 'true when the Linux chain verified'
+        value: ${{ jobs.outcome.outputs.linux }}
   workflow_dispatch:
     inputs:
       version:
@@ -221,6 +241,7 @@ jobs:
   # Read and validate source on Linux before allocating the paid Mac host.
   validate-source:
     needs: preflight
+    if: ${{ inputs.mode != 'publish' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 15
     steps:
@@ -2753,7 +2774,7 @@ jobs:
   # blocks the others; reconcile-feed names it. dry_run publishes nothing.
   publish-macos:
     needs: [preflight, verify-macos-signed]
-    if: ${{ !inputs.dry_run && needs.verify-macos-signed.result == 'success' }}
+    if: ${{ always() && needs.preflight.result == 'success' && !inputs.dry_run && inputs.mode != 'prepare' && (needs.verify-macos-signed.result == 'success' || contains(inputs.present, 'macos')) }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -2791,7 +2812,7 @@ jobs:
 
   publish-windows:
     needs: [preflight, verify-windows-signatures, publish-macos]
-    if: ${{ always() && !inputs.dry_run && needs.verify-windows-signatures.result == 'success' }}
+    if: ${{ always() && needs.preflight.result == 'success' && !inputs.dry_run && inputs.mode != 'prepare' && (needs.verify-windows-signatures.result == 'success' || contains(inputs.present, 'windows')) }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -2834,7 +2855,7 @@ jobs:
 
   publish-linux:
     needs: [preflight, smoke-linux-installers, sign-linux-artifacts, publish-windows]
-    if: ${{ always() && !inputs.dry_run && needs.smoke-linux-installers.result == 'success' && needs.sign-linux-artifacts.result == 'success' }}
+    if: ${{ always() && needs.preflight.result == 'success' && !inputs.dry_run && inputs.mode != 'prepare' && ((needs.smoke-linux-installers.result == 'success' && needs.sign-linux-artifacts.result == 'success') || contains(inputs.present, 'linux')) }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -2874,7 +2895,7 @@ jobs:
   # made it, so a green run means all three shipped.
   reconcile-feed:
     needs: [preflight, publish-macos, publish-windows, publish-linux]
-    if: ${{ always() && !inputs.dry_run && needs.preflight.result == 'success' }}
+    if: ${{ always() && needs.preflight.result == 'success' && !inputs.dry_run && inputs.mode != 'prepare' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -2904,3 +2925,23 @@ jobs:
         with:
           node-version: 24
       - run: ./scripts/publish-desktop-release.sh --require-all
+
+  # What the caller reads to name the OSes a prepared set is missing.
+  outcome:
+    needs: [verify-macos-signed, verify-windows-signatures, smoke-linux-installers, sign-linux-artifacts]
+    if: ${{ always() }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 10
+    permissions: {}
+    outputs:
+      macos: ${{ steps.result.outputs.macos }}
+      windows: ${{ steps.result.outputs.windows }}
+      linux: ${{ steps.result.outputs.linux }}
+    steps:
+      - id: result
+        run: |
+          {
+            echo "macos=${{ needs.verify-macos-signed.result == 'success' }}"
+            echo "windows=${{ needs.verify-windows-signatures.result == 'success' }}"
+            echo "linux=${{ needs.smoke-linux-installers.result == 'success' && needs.sign-linux-artifacts.result == 'success' }}"
+          } >> "$GITHUB_OUTPUT"

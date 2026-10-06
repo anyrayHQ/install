@@ -49,6 +49,25 @@ CLI release.
   have published on staging first. `channel: staging` still works for manual runs.
 - `dry_run` builds, signs and verifies everything and publishes nothing.
 
+### Prepare now, publish later (`mode`)
+
+`mode` splits one release into a build half and a publish half. Both need
+`version` as plain `x.y.z` and a `source_sha`, and neither takes `staging`. The
+`desktop` job passes the mode to `release-connect-desktop.yml`.
+
+| `mode` | What runs |
+| --- | --- |
+| `release` (default) | Build, sign and publish in one run, as above. |
+| `prepare` | Compiles the CLI from `connect-sets/<set_key>/npm/anyray-connect-<version>.tgz` in the CI artifacts bucket (not npm), signs and verifies the CLI and every desktop OS, publishes nothing, and stores the signed set under `connect-sets/<set_key>/` (`set_key` defaults to the version). The CLI set must be complete or nothing is stored. `MISSING` is always written, empty when every desktop OS verified, otherwise one OS name per line. `PACKAGE_SHA256` is the hash of the `.tgz` that was compiled: the caller must match it to the one it uploaded. |
+| `publish` | Builds nothing. Refuses the set unless the hash of its `SHA256SUMS` equals `set_sums_sha256`, and fetches only the files that file lists, each checked against it. Publishes the CLI release (a no-op when `connect-v<version>` already exists, refused when older than the published one), then calls the desktop workflow to publish each OS present and reconcile the feed. |
+
+The signed set sits in the CI artifacts bucket, which any job in this repo or the
+monorepo can write, so the only trust anchor is `set_sums_sha256` coming from a
+record only `main` can write. Build provenance is attested at `publish`, not
+`prepare`: it is a public, permanent record and a prepared set may never ship.
+`publish` runs in its own concurrency group (it needs no Mac), so a queued build
+cannot replace it.
+
 ## Signing (RFC 0010 §6)
 
 Signing is **mandatory on every platform**, and the `signing-preflight` job

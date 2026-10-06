@@ -83,7 +83,7 @@ if [ "$dry_run" != true ]; then
           echo "${name} is already published with these bytes; skipping"
           return 0
         fi
-        echo "::error::${name} is already published on ${TAG} with different bytes; published assets are never replaced. Cut a new version instead."
+        echo "::error::${name} is already published on ${TAG} with different bytes; published assets are never replaced. Cut a new version instead (a mode=publish re-dispatch of the same stored set never hits this)."
         exit 1
       fi
       gh api -X DELETE "repos/${REPO}/releases/assets/${id}"
@@ -197,6 +197,6 @@ else
 fi
 
 if [ "$require_all" -eq 1 ] && [ "${#missing[@]}" -gt 0 ]; then
-  echo "::error::desktop release ${VERSION} is missing: ${missing[*]}. The CLI and the other OSes are published; dispatch again with the same version and source_sha (published assets are skipped) or cut a new version."
+  echo "::error::desktop release ${VERSION} is missing: ${missing[*]}. The CLI and the other OSes are published; a rebuild re-signs to new bytes, so release a new version, or re-dispatch mode=publish with the same version and set_sums_sha256 to add the missing files from the stored set."
   exit 1
 fi

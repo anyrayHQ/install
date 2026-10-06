@@ -1718,6 +1718,8 @@ jobs:
           done
           aws s3 cp set/MISSING "${set_prefix}/MISSING" --only-show-errors
           aws s3 cp set/PACKAGE_SHA256 "${set_prefix}/PACKAGE_SHA256" --only-show-errors
+          aws s3 cp set/VERSION "${set_prefix}/VERSION" --only-show-errors
+          aws s3 cp set/SOURCE_SHA "${set_prefix}/SOURCE_SHA" --only-show-errors
           aws s3 cp set/SHA256SUMS "${set_prefix}/SHA256SUMS" --only-show-errors
           sums="$(sha256sum set/SHA256SUMS | cut -d' ' -f1)"
           echo "set ${SET_KEY} stored; missing desktop OSes: [$(tr '\n' ' ' < set/MISSING)]; SHA256SUMS sha256 ${sums}"

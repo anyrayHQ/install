@@ -158,6 +158,18 @@ describe('publish refuses mislabeled or incomplete sets', () => {
     assert.ok(load.indexOf('sha256sum --check --strict SHA256SUMS') < load.indexOf('refusing to relabel it'));
   });
 
+  test('every top-level file the set writes is uploaded before SHA256SUMS', () => {
+    const store = job(caller, 'store-set');
+    const written = [...store.matchAll(/> set\/([A-Z0-9_]+)\b/g)].map((m) => m[1]).filter((n) => n !== 'SHA256SUMS');
+    assert.ok(written.includes('VERSION') && written.includes('SOURCE_SHA'));
+    const sums = store.indexOf('aws s3 cp set/SHA256SUMS');
+    for (const name of new Set(written)) {
+      const upload = store.indexOf(`aws s3 cp set/${name} `);
+      assert.ok(upload !== -1, `${name} is listed in SHA256SUMS but never uploaded`);
+      assert.ok(upload < sums, `${name} must upload before SHA256SUMS`);
+    }
+  });
+
   // Runs the real "already published?" step against a fake gh and a fake set.
   const runCheck = (t, { have, latest = 'connect-v0.0.1', version = '1.2.3' }) => {
     const load = job(caller, 'load-set');

@@ -272,6 +272,7 @@ describe('the stored set is attested by an annotation only this run can write', 
     const upload = store.indexOf('aws s3 cp set/SHA256SUMS "${set_prefix}/SHA256SUMS"');
     const notice = store.indexOf('echo "::notice title=connect-set::sha256=${sums}"');
     assert.ok(upload > 0 && notice > upload, 'the notice follows the SHA256SUMS upload');
-    assert.ok(store.indexOf('sums="$(sha256sum set/SHA256SUMS | cut -d\' \' -f1)"') < notice);
+    const calculation = store.indexOf('sums="$(sha256sum set/SHA256SUMS | cut -d\' \' -f1)"');
+    assert.ok(calculation >= 0 && calculation < notice, 'the notice hashes the SHA256SUMS it uploaded');
   });
 });

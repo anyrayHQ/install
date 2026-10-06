@@ -654,7 +654,11 @@ builds use toolchain 1.98.0 and the checked-in Cargo lockfile. The Tauri launche
 resolves Cargo through rustup, prepends that toolchain directory to the child
 PATH, and checks Cargo/rustc versions before building or bundling; changing the
 rustup default alone does not override a runner-installed standalone Cargo.
-Source and Cargo build output are not cached or uploaded in this public repository. Intermediate
+Source and Cargo build output never enter this public repository's caches or artifacts
+(no `actions/cache` for them). The one compile cache is sccache in the private CI
+artifacts bucket under `sccache/connect-tray/<os>/`, written only by these
+`main`-only release runs and fail-open: if it cannot start, the build runs uncached,
+and each compile step ends with `sccache --show-stats`. Intermediate
 artifacts last seven days to allow delayed jobs and retries; the final rehearsal
 artifact lasts 14 days.
 Artifact uploads skip redundant compression of installers and binary archives.

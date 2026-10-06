@@ -1725,6 +1725,9 @@ jobs:
           echo "set ${SET_KEY} stored; missing desktop OSes: [$(tr '\n' ' ' < set/MISSING)]; SHA256SUMS sha256 ${sums}"
           # shellcheck disable=SC2016 # backticks are literal markdown
           printf 'set `%s` stored at `%s`, SHA256SUMS sha256 `%s`\n' "$SET_KEY" "$set_prefix" "$sums" >> "$GITHUB_STEP_SUMMARY"
+          # Only this run can write this annotation; the bucket is writable by any job, so the monorepo
+          # compares the bucket's SHA256SUMS with it.
+          echo "::notice title=connect-set::sha256=${sums}"
 
   # publish: refuse a tampered set, then stage its files as this run's own artifacts so the release
   # and desktop publish jobs below run exactly as they do after a build.

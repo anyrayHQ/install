@@ -68,6 +68,11 @@ CLI release.
 | `prepare` | Compiles the CLI from `connect-sets/<set_key>/npm/anyray-connect-<version>.tgz` in the CI artifacts bucket (not npm), signs and verifies the CLI and every desktop OS, publishes nothing, and stores the signed set under `connect-sets/<set_key>/` (`set_key` defaults to the version). The CLI set must be complete or nothing is stored. `MISSING` is always written, empty when every desktop OS verified, otherwise one OS name per line. `PACKAGE_SHA256` is the hash of the `.tgz` that was compiled: the caller must match it to the one it uploaded. |
 | `publish` | Builds nothing. Refuses the set unless the hash of its `SHA256SUMS` equals `set_sums_sha256`, and fetches only the files that file lists, each checked against it. The set records the `VERSION` and `SOURCE_SHA` it was prepared for; a different `version` or `source_sha` is refused. Publishes the CLI release (a no-op when `connect-v<version>` already exists with every set file uploaded, rebuilt when assets are missing, refused when older than the published one), then calls the desktop workflow to publish each OS present and reconcile the feed. |
 
+A partial publication from a `publish` run can be completed by dispatching `mode=publish`
+again with the same `version` and `set_sums_sha256`: it loads the same stored set, so
+files already on the release carry identical bytes and are skipped, and only the missing
+ones upload. (A `release` run cannot be completed this way, because rebuilding re-signs.)
+
 The signed set sits in the CI artifacts bucket, which any job in this repo or the
 monorepo can write, so the only trust anchor is `set_sums_sha256` coming from a
 record only `main` can write. Build provenance is attested at `publish`, not
@@ -589,18 +594,19 @@ Published versioned assets are never replaced. `scripts/publish-desktop-release.
 uploads a file only when the release lacks it, skips it when the release already
 holds the same sha256, and fails naming it when the bytes differ, because clients
 hold the earlier checksums. An asset an interrupted attempt left half-uploaded is
-deleted and sent again. So a retry of the same version and source only adds what is
-missing; a rebuild with different bytes needs a new version or source. The derived
-`SHA256SUMS`, signed manifest and public key are rewritten from whatever is on the
-release each time. Artifact keys include the run attempt, so "re-run failed jobs"
-cannot recover a desktop publish: the re-run consumer finds no artifacts from the
-earlier attempt. Recover by dispatching again with the same `version` and
-`source_sha`: published assets are never replaced, a retry only adds what is missing,
-and the feed is rebuilt from the release's own assets. Or run
+deleted and sent again. Signing a rebuild produces new bytes (timestamped GPG
+signatures, notarized pkg, Authenticode), so a build run cannot be completed by
+dispatching the same version again: it stops at the first file already published.
+The derived `SHA256SUMS`, signed manifest and public key are rewritten from whatever
+is on the release each time.
+
+Recovery for a `release` run: if only the feed switch failed, run
 `node scripts/publish-desktop-feed.mjs` with `REPO`, `VERSION`, `SOURCE_SHA`,
 `CHANNEL` and `GH_TOKEN` set, from a directory containing `assets/` with the
-manifest, signature and (stable) installers downloaded from that release. Do not
-regenerate them.
+manifest, signature and (stable) installers downloaded from that release; do not
+regenerate them. If an installer is missing, release a new version. "Re-run failed
+jobs" cannot help either way: artifact keys include the run attempt, so the re-run
+consumer finds no artifacts from the earlier attempt.
 
 Feed publication aborts on lookup errors, malformed versions, and backward
 version changes. Both replacement assets upload as `.pending` before any live

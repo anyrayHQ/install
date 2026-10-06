@@ -23,6 +23,18 @@ inputs:
     description: 'true when the engines come from the published npm package: its gitHead must equal source_sha, or the app would embed an engine built from other source.'
     required: false
     default: 'false'
+  min_version:
+    description: Optional update floor, checked for attainability.
+    required: false
+    default: ''
+  channel:
+    description: Desktop channel whose feed and release must be publishable.
+    required: false
+    default: stable
+  dry_run:
+    description: 'true skips the remote publication checks.'
+    required: false
+    default: 'false'
   path:
     description: Directory to check the source out into.
     required: false
@@ -67,8 +79,20 @@ runs:
         EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
       run: |
         set -euo pipefail
-        head="$(npm view "anyray-connect@${PACKAGE_VERSION}" gitHead)"
+        # Not visible yet is retried (same budget as the CLI's package fetch); a version that is
+        # visible with another gitHead fails at once.
+        head="$(./scripts/retry-npm.sh npm view --prefer-online "anyray-connect@${PACKAGE_VERSION}" gitHead)"
         test "$head" = "$EXPECTED_SOURCE_SHA" || {
           echo "::error::anyray-connect@${PACKAGE_VERSION} on npm was built from '${head}', not source_sha ${EXPECTED_SOURCE_SHA}"
           exit 1
         }
+    - name: Check publication eligibility
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        VERSION: ${{ inputs.version }}
+        MIN_VERSION: ${{ inputs.min_version }}
+        CHANNEL: ${{ inputs.channel }}
+        DRY_RUN: ${{ inputs.dry_run }}
+      run: node scripts/verify-connect-desktop-publication.mjs

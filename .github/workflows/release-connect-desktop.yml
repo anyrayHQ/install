@@ -1726,31 +1726,15 @@ jobs:
           ./scripts/verify-authenticode-windows.ps1 `
             -Path "private-source/connect-tray/src-tauri/binaries/anyray-connect-$env:TARGET_TRIPLE.exe"
 
-      # windows-base:2022-1.0 is not documented to ship Rust or MSVC. Install
-      # both from pinned, checksum-verified downloads when absent; a no-op when
-      # the image already has them. Exit 3010 is "installed, reboot pending".
-      - name: Rust toolchain and MSVC build tools (pinned)
+      # `tauri bundle` only packages the exes the build job linked and needs cargo for
+      # metadata, so MSVC (the slow install) is left to the build job. rustup-init is
+      # pinned and checksum-verified; a no-op when the image already has it.
+      - name: Rust toolchain (pinned)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
           $PSNativeCommandUseErrorActionPreference = $true
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vc = $null
-          if (Test-Path $vswhere) {
-            $vc = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          }
-          if (-not $vc) {
-            $bootstrapper = Join-Path $env:RUNNER_TEMP 'vs_BuildTools.exe'
-            Invoke-WebRequest -Uri $env:VS_BUILDTOOLS_URL -OutFile $bootstrapper
-            $got = (Get-FileHash $bootstrapper -Algorithm SHA256).Hash.ToLower()
-            if ($got -ne $env:VS_BUILDTOOLS_SHA256) { throw "vs_BuildTools.exe checksum mismatch: got $got" }
-            $install = Start-Process -FilePath $bootstrapper -Wait -PassThru -ArgumentList @(
-              '--quiet', '--wait', '--norestart', '--nocache',
-              '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended'
-            )
-            if ($install.ExitCode -notin 0, 3010) { throw "VS Build Tools install failed with exit $($install.ExitCode)" }
-          }
           if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
             $rustupInit = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
             Invoke-WebRequest -Uri "https://static.rust-lang.org/rustup/archive/$env:RUSTUP_VERSION/x86_64-pc-windows-msvc/rustup-init.exe" -OutFile $rustupInit

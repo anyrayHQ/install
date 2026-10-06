@@ -48,6 +48,11 @@ CLI release.
 - **No staging-first gate.** Stable no longer requires the same version and commit to
   have published on staging first. `channel: staging` still works for manual runs.
 - `dry_run` builds, signs and verifies everything and publishes nothing.
+- **Windows installs MSVC once.** Signing sits between the two Windows jobs on
+  purpose (the Azure token must never share a job with the private source's
+  `build.rs`), so the build and the MSI bundle stay separate jobs. Only the
+  build job installs the VS Build Tools; the bundle job runs `tauri bundle`,
+  which links nothing, with just rustup.
 
 ### Prepare now, publish later (`mode`)
 

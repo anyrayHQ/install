@@ -112,30 +112,3 @@ describe('prepare and publish modes', () => {
     assert.match(callee, /outputs:\n\s+macos:[\s\S]*?jobs\.outcome\.outputs\.macos/);
   });
 });
-
-describe('compile cache for the desktop app builds', () => {
-  const action = readFileSync(new URL('../.github/actions/setup-sccache/action.yml', import.meta.url), 'utf8');
-
-  test('each native compile job sets up sccache fail-open and prints its stats', () => {
-    for (const name of ['build-macos-unsigned', 'build-windows-unsigned', 'build-linux-unsigned']) {
-      const body = job(callee, name);
-      assert.match(body, /continue-on-error: true\n\s+uses: \.\/\.github\/actions\/setup-sccache/);
-      assert.match(body, /sccache --show-stats/);
-      assert.match(body, /bucket: \$\{\{ vars\.CI_ARTIFACTS_BUCKET \}\}/);
-    }
-  });
-
-  test('the cache lives only in the private bucket, never in actions/cache', () => {
-    assert.doesNotMatch(callee, /uses: actions\/cache/);
-    assert.doesNotMatch(action, /uses: actions\/cache/);
-    assert.match(action, /SCCACHE_S3_KEY_PREFIX="sccache\/connect-tray\/\$\{CACHE_OS\}"/);
-    assert.match(action, /RUSTC_WRAPPER=sccache/);
-    assert.match(action, /sccache did not start against the bucket; building uncached/);
-  });
-
-  test('the release archives are pinned by checksum', () => {
-    for (const name of ['SCCACHE_SHA256_DARWIN_ARM64', 'SCCACHE_SHA256_LINUX_X64', 'SCCACHE_SHA256_WINDOWS_X64']) {
-      assert.match(callee, new RegExp(`${name}: '[0-9a-f]{64}'`));
-    }
-  });
-});

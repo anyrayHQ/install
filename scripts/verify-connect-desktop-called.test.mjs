@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, test } from 'node:test';
 
 const read = (name) => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8');
@@ -142,5 +145,58 @@ describe('validation gates what ships', () => {
     }
     // publish mode builds nothing, so load-set (the caller's gate for the call) stands in for validate-source.
     assert.match(job(caller, 'desktop'), /needs\.load-set\.result == 'success'/);
+  });
+});
+
+describe('publish refuses mislabeled or incomplete sets', () => {
+  test('the set records its version and commit, and load-set refuses a different label', () => {
+    const store = job(caller, 'store-set');
+    assert.match(store, /printf '%s\\n' "\$VERSION" > set\/VERSION/);
+    assert.match(store, /printf '%s\\n' "\$SOURCE_SHA" > set\/SOURCE_SHA/);
+    const load = job(caller, 'load-set');
+    assert.match(load, /refusing to relabel it/);
+    assert.ok(load.indexOf('sha256sum --check --strict SHA256SUMS') < load.indexOf('refusing to relabel it'));
+  });
+
+  // Runs the real "already published?" step against a fake gh and a fake set.
+  const runCheck = (t, { have, latest = 'connect-v0.0.1', version = '1.2.3' }) => {
+    const load = job(caller, 'load-set');
+    const start = load.indexOf('        id: check\n        run: |\n') + '        id: check\n        run: |\n'.length;
+    const script = load.slice(start).split('\n').map((line) => line.slice(10)).join('\n');
+    const root = mkdtempSync(join(tmpdir(), 'check-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, 'bin'));
+    for (const dir of ['binaries-unsigned', 'binaries-darwin', 'linux-packages']) mkdirSync(join(root, 'set', dir), { recursive: true });
+    writeFileSync(join(root, 'set/binaries-unsigned/anyray-connect-linux-x64'), 'x');
+    writeFileSync(join(root, 'set/binaries-darwin/anyray-connect-darwin-arm64'), 'x');
+    writeFileSync(join(root, 'set/linux-packages/anyray-connect.deb'), 'x');
+    writeFileSync(join(root, 'bin/gh'), `#!/usr/bin/env bash
+case "$*" in
+  *"--json assets"*) printf '%s\\n' ${have.map((n) => `'${n}'`).join(' ')} ;;
+  "release view"*) ${have === null ? 'exit 1' : 'exit 0'} ;;
+  *releases/latest*) echo ${latest} ;;
+esac
+`, { mode: 0o755 });
+    const out = join(root, 'out');
+    writeFileSync(out, '');
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: root, encoding: 'utf8',
+      env: { PATH: `${join(root, 'bin')}:${process.env.PATH}`, VERSION: version, REPO: 'x/y', GITHUB_OUTPUT: out },
+    });
+    return { result, output: readFileSync(out, 'utf8') };
+  };
+  const all = ['SHA256SUMS', 'SHA256SUMS.asc', 'anyray-connect-linux-x64', 'anyray-connect-darwin-arm64', 'anyray-connect.deb'];
+
+  test('a complete existing release is skipped', (t) => {
+    const { result, output } = runCheck(t, { have: all });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(output, /cli_published=true/);
+  });
+
+  test('an existing release missing an asset is rebuilt, not skipped', (t) => {
+    const { result, output } = runCheck(t, { have: all.filter((n) => n !== 'anyray-connect.deb') });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(output, /cli_published=false/);
+    assert.match(result.stdout + result.stderr, /lacks: anyray-connect\.deb/);
   });
 });

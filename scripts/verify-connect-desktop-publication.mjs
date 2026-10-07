@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { compareVersions } from './publish-desktop-feed.mjs';
 import { channelConfig, feedFiles } from './desktop-channel.mjs';
 
-export async function verifyPublication({ repo, version, sourceSha, minVersion, channel, dryRun, token }, request = fetch) {
+export async function verifyPublication({ repo, version, minVersion, channel, dryRun, token }, request = fetch) {
   compareVersions(version, version);
   const { feed } = channelConfig(channel);
   const components = version.split('.').map(Number);
@@ -65,6 +65,6 @@ export async function verifyPublication({ repo, version, sourceSha, minVersion, 
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   await verifyPublication({ repo: process.env.REPO, version: process.env.VERSION,
-    sourceSha: process.env.SOURCE_SHA, minVersion: process.env.MIN_VERSION, channel: process.env.CHANNEL,
+    minVersion: process.env.MIN_VERSION, channel: process.env.CHANNEL,
     dryRun: process.env.DRY_RUN === 'true', token: process.env.GH_TOKEN });
 }

@@ -8,12 +8,10 @@ name: Release anyray-connect binaries
 #
 # Source of truth is the PUBLIC npm package (anyray-connect), so the CLI lanes
 # never need access to the private monorepo. Run it after publishing a new
-# anyray-connect version to npm. ONE exception, opt-in and off by default: the
-# `build_tray` input adds a lane that clones the private monorepo (the RFC 0010
-# desktop tray's Rust source lives there, unpublished) using a short-lived
-# GitHub App installation token — contents:read, scoped to that one repo,
-# expires in an hour. See the tray-linux job and RELEASING.md ("Monorepo read
-# app").
+# anyray-connect version to npm. The one exception is the desktop app, built by
+# release-connect-desktop.yml (see below), whose Rust source is in the private
+# monorepo and is read with a short-lived GitHub App token (RELEASING.md,
+# "Monorepo read app").
 #
 # With `source_sha` set (stable releases only) the `desktop` job then calls
 # release-connect-desktop.yml in this same run: it reuses the engines `build`
@@ -61,11 +59,6 @@ on:
         default: ''
       dry_run:
         description: 'Test run: build + sign + notarize + exercise the on-demand Mac fleet, but do NOT publish a GitHub release (no customer-facing change). Signed assets are uploaded as a workflow artifact for inspection.'
-        required: false
-        type: boolean
-        default: false
-      build_tray:
-        description: 'Also build the RFC 0010 desktop tray (Linux) from the private monorepo. SCAFFOLD lane: artifact-only, never a release asset — the tray sign/notarize/staple lane (RFC 0010 §6) does not exist yet, and unsigned does not ship.'
         required: false
         type: boolean
         default: false
@@ -249,135 +242,6 @@ jobs:
             echo "::error::desktop release prerequisites are incomplete. Missing:$missing (see RELEASING.md)"
             exit 1
           fi
-
-  # ---------------------------------------------------------------------------
-  # RFC 0010 desktop tray — Linux scaffold lane (opt-in via the build_tray
-  # input, default off; a normal CLI release never runs it).
-  #
-  # Deliberately NOT in signing-preflight's mandatory list and deliberately not
-  # a release asset: the tray's sign/notarize/staple lane (§6) does not exist
-  # yet, and unsigned does not ship — this uploads a short-retention workflow
-  # artifact only. When the signing lane lands, THAT change adds its secrets to
-  # signing-preflight and promotes the artifact to the release job.
-  #
-  # The tray's Rust source lives in the PRIVATE monorepo (unpublished — the npm
-  # package carries only the CLI), so this job clones it with a GitHub App
-  # installation token: app anyray-monorepo-read, contents:read, installation
-  # scoped to anyrayHQ/monorepo alone, token expires in one hour. Blast radius
-  # of a leak is a read-only clone for <=1h. This repository is public — the
-  # clone stays on the runner and nothing from it is echoed to logs.
-  #
-  # Runner: anyray-install-runner-ubuntu (aws/codebuild/standard:7.0), created
-  # for exactly this job — Tauri needs webkit2gtk-4.1, which Amazon Linux 2
-  # lacks, and the AL2 runners cannot containerize around it (no Docker daemon).
-  # The image ships NO Rust (its stale /root/.rustup/settings.toml just looks
-  # like it does), so rustup-init is fetched to a file from the versioned
-  # archive and verified against a pinned digest — never piped into a shell.
-  # Ubuntu 22.04 on purpose: the build host's glibc (2.35) is the floor for
-  # every machine that runs the binary; 24.04's 2.39 would drop Ubuntu 22.04
-  # and Debian 12 users.
-  tray-linux:
-    if: ${{ inputs.build_tray }}
-    runs-on: codebuild-anyray-install-runner-ubuntu-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 60
-    permissions:
-      id-token: write # assume the CI-artifacts role for the S3 handoff
-      contents: read
-    env:
-      RUST_TOOLCHAIN: '1.98.0'
-      RUSTUP_VERSION: '1.29.0'
-      RUSTUP_INIT_SHA256: '4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10'
-    steps:
-      - name: Authenticate for the S3 artifact handoff
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
-        with:
-          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
-          aws-region: eu-central-1
-      - name: Mint a monorepo read token (1h, contents:read, one repo)
-        id: monorepo-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.MONOREPO_READ_APP_ID }}
-          private-key: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
-          owner: anyrayHQ
-          repositories: monorepo
-
-      - name: Check out the monorepo (tray source)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          repository: anyrayHQ/monorepo
-          token: ${{ steps.monorepo-token.outputs.token }}
-          # The token dies in an hour anyway, but there is no reason for it to
-          # outlive the checkout step at all.
-          persist-credentials: false
-
-      # This job's primary checkout above is the MONOREPO, not this repo, so
-      # ./.github/actions/fetch-pinned is not on disk unless fetched
-      # separately (into its own path — a checkout at the default path would
-      # be wiped by the one above).
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-          path: install-repo-actions
-
-      - name: Install Linux webview and tray dependencies
-        run: |
-          set -euo pipefail
-          SUDO=""
-          [ "$(id -u)" -ne 0 ] && SUDO=sudo
-          $SUDO apt-get update
-          $SUDO apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev build-essential libssl-dev libxdo-dev \
-            libayatana-appindicator3-dev librsvg2-dev
-
-      - name: Check for an existing Rust toolchain
-        id: rustup-check
-        run: |
-          set -euo pipefail
-          if command -v rustup >/dev/null 2>&1; then
-            echo 'present=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'present=false' >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Fetch pinned rustup-init (checksum-verified)
-        if: steps.rustup-check.outputs.present != 'true'
-        uses: ./install-repo-actions/.github/actions/fetch-pinned
-        with:
-          url: https://static.rust-lang.org/rustup/archive/${{ env.RUSTUP_VERSION }}/x86_64-unknown-linux-gnu/rustup-init
-          sha256: ${{ env.RUSTUP_INIT_SHA256 }}
-          dest: rustup-init
-          mode: '0755'
-
-      - name: Rust toolchain (pinned rustup-init, checksum-verified)
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.rustup-check.outputs.present }}" != 'true' ]; then
-            ./rustup-init -y --no-modify-path --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
-            rm -f rustup-init
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
-          fi
-          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --no-self-update
-          rustup default "${RUST_TOOLCHAIN}"
-          rustup run "${RUST_TOOLCHAIN}" rustc --version
-
-      - name: Build the tray (unsigned, no bundling)
-        working-directory: connect-tray/src-tauri
-        run: |
-          set -euo pipefail
-          rustup run "${RUST_TOOLCHAIN}" cargo build --release --locked
-          # Record what was built without echoing anything from the source tree.
-          printf 'monorepo_sha=%s\n' "$(git rev-parse HEAD)" > target/release/BUILD_INFO
-
-      - name: Upload tray artifact (workflow artifact ONLY — see job comment)
-        uses: ./.github/actions/s3-artifact-upload
-        with:
-          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
-          name: connect-tray-linux-unsigned
-          path: connect-tray/src-tauri/target/release/connect-tray connect-tray/src-tauri/target/release/BUILD_INFO
-          if-no-files-found: error
 
   # The desktop commit is proven releasable before the CLI is built, let alone published.
   validate-desktop:

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,7 +26,7 @@ function sandbox(t) {
   script(join(repo, 'scripts/sign-gpg-artifacts.sh'), `
 out="$1"; shift; mkdir -p "$out"; printf key > "$out/anyray-endpoint-signing-key.asc"
 for a in "$@"; do printf sig > "$a.asc"; done`);
-  writeFileSync(join(repo, 'scripts/publish-desktop-feed.mjs'), 'process.exit(0);\n');
+  writeFileSync(join(repo, 'scripts/publish-desktop-feed.mjs'), `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(join(store, 'feed.log'))}, 'feed\\n');\n`);
   script(join(bin, 'gpg'), 'exit 0');
   script(join(bin, 'curl'), 'printf \'{"version":"1.2.3"}\'');
   // Release assets are files in store/<tag>; store/<tag>/.state/<name> marks a non-uploaded asset and
@@ -45,8 +45,11 @@ case "$1 $2" in
       printf '%s\t%s\t%s\t%s\n' "$n" "$n" "$state" "$digest"
     done ;;
   "api -X") tag="$(ls "$S" | head -1)"; rm -f "$S/$tag/${'$'}{4##*/}" "$S/$tag/.state/${'$'}{4##*/}" ;;
-  "release view") [ -d "$S/$3" ] ;;
-  "release create") mkdir -p "$S/$3" ;;
+  "release view")
+    # GH_RACE: another leg creates the release right after this leg looked.
+    if [ -n "$GH_RACE" ] && [ ! -e "$S/.raced" ]; then : > "$S/.raced"; mkdir -p "$S/$3"; exit 1; fi
+    [ -d "$S/$3" ] ;;
+  "release create") [ ! -d "$S/$3" ] || { echo "release already exists" >&2; exit 1; }; mkdir -p "$S/$3" ;;
   "release upload")
     tag="$3"; shift 3; files=(); clobber=0
     while [ $# -gt 0 ]; do case "$1" in --repo) shift 2 ;; --clobber) clobber=1; shift ;; *) files+=("$1"); shift ;; esac; done
@@ -76,7 +79,8 @@ esac`);
   });
   const manifest = () => JSON.parse(readFileSync(join(repo, 'assets/connect-desktop.json'), 'utf8'));
   const uploads = () => { try { return readFileSync(join(store, 'uploads.log'), 'utf8').trim().split('\n'); } catch { return []; } };
-  return { run, signed, manifest, store, uploads, repo, tag: `connect-desktop-v${VERSION}-aaaaaaaaaaaa` };
+  const feedWrites = () => { try { return readFileSync(join(store, 'feed.log'), 'utf8').trim().split('\n').length; } catch { return 0; } };
+  return { run, signed, manifest, store, uploads, feedWrites, repo, tag: `connect-desktop-v${VERSION}-aaaaaaaaaaaa` };
 }
 
 describe('desktop per-OS publication', { skip: !tools && 'needs bash, jq and sha256sum' }, () => {
@@ -157,6 +161,35 @@ describe('desktop per-OS publication', { skip: !tools && 'needs bash, jq and sha
     writeFileSync(join(s.store, s.tag, pkg), 'partial');
     assert.equal(s.run([dir]).status, 0);
     assert.equal(readFileSync(join(s.store, s.tag, pkg), 'utf8'), pkg);
+  });
+
+  test('--upload-only publishes the installers and leaves the manifest and feed to the reconcile', (t) => {
+    const s = sandbox(t);
+    const result = s.run(['--upload-only', s.signed('macos')]);
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    const onRelease = readdirSync(join(s.store, s.tag));
+    for (const name of names.macos) assert.ok(onRelease.includes(name));
+    assert.ok(!onRelease.includes('connect-desktop.json'));
+    assert.ok(!onRelease.includes('SHA256SUMS'));
+    assert.equal(s.feedWrites(), 0);
+  });
+
+  test('parallel upload-only legs then one reconcile ship every OS with minVersion and one feed write', (t) => {
+    const s = sandbox(t);
+    for (const os of ['macos', 'windows', 'linux']) assert.equal(s.run(['--upload-only', s.signed(os)]).status, 0);
+    const result = s.run(['--require-all']);
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    assert.equal(s.manifest().minVersion, '1.0.0');
+    assert.equal(s.manifest().artifacts.length, 6);
+    assert.equal(s.feedWrites(), 1);
+  });
+
+  test('a leg that loses the race to create the release uploads into the one the other leg made', (t) => {
+    const s = sandbox(t);
+    const result = s.run(['--upload-only', s.signed('linux')], { GH_RACE: '1' });
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    assert.ok(existsSync(join(s.store, '.raced')), 'the race path ran');
+    for (const name of names.linux) assert.ok(readdirSync(join(s.store, s.tag)).includes(name));
   });
 
   test('a dry run builds the consolidated checksums and signed manifest without touching GitHub', (t) => {

@@ -2,10 +2,10 @@
 
 # Publish signed desktop assets for a channel (stable by default), then rebuild the signed
 # manifest and the channel feed from EVERY asset the versioned release holds.
-# Each OS publishes through here as its chain finishes, so a failed OS leaves the
-# others live and the final reconcile (--require-all) names what is missing.
+# The per-OS legs run in parallel with --upload-only, so a failed OS leaves the others on the
+# release, and the final reconcile (--require-all) writes the feed once and names what is missing.
 #
-# usage: publish-desktop-release.sh [--require-all] [signed-dir...]
+# usage: publish-desktop-release.sh [--upload-only | --require-all] [signed-dir...]
 # env:   REPO VERSION SOURCE_SHA TAG FEED ARTIFACT GH_TOKEN MIN_VERSION(optional) CHANNEL(optional)
 #        DRY_RUN=true builds the consolidated assets/ (checksums, signed manifest) from the given
 #        dirs and makes no GitHub release or feed call.
@@ -15,10 +15,11 @@
 set -euo pipefail
 
 require_all=0
-if [ "${1:-}" = "--require-all" ]; then
-  require_all=1
-  shift
-fi
+upload_only=0
+case "${1:-}" in
+  --require-all) require_all=1; shift ;;
+  --upload-only) upload_only=1; shift ;;
+esac
 for name in REPO VERSION SOURCE_SHA TAG FEED ARTIFACT GH_TOKEN; do
   [ -n "${!name:-}" ] || { echo "::error::$name is required"; exit 2; }
 done
@@ -51,10 +52,12 @@ if [ "$dry_run" != true ]; then
       exit 1
     fi
     # --latest=false: releases/latest belongs to the CLI (connect.sh and the self-updater read it).
+    # A parallel leg may create it first; losing that race is fine once the release exists.
     gh release create "$TAG" --repo "$REPO" \
       --title "Anyray Connect desktop ${VERSION}" \
       --notes "Signed desktop installers and update manifest built from private monorepo commit ${SOURCE_SHA}. Download from the connect-desktop release for a stable link per OS." \
-      --latest=false ${channel_flags[@]+"${channel_flags[@]}"}
+      --latest=false ${channel_flags[@]+"${channel_flags[@]}"} \
+      || gh release view "$TAG" --repo "$REPO" >/dev/null
   fi
 
   # Published assets are immutable: clients already hold their checksums. A file is uploaded only when
@@ -96,6 +99,10 @@ if [ "$dry_run" != true ]; then
       retry publish_asset "$file"
     done
   done
+  if [ "$upload_only" -eq 1 ]; then
+    echo "uploaded to ${TAG}; the reconcile writes the manifest and feed"
+    exit 0
+  fi
 fi
 
 rm -rf assets keycheck

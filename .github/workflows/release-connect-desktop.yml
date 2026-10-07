@@ -130,27 +130,9 @@ env:
   JSIGN_SHA256: 602a51c3545a6dc4fb99bd2ea7152b26d1345916d0c93ddfbd5936cb735af91c
 
 jobs:
-  # Refuse before any job receives repository secrets or private source. A
-  # manual dispatch from a feature branch is useful for ordinary CI and is not
-  # an acceptable identity for a distribution signing lane.
-  dispatch-main-only:
-    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
-    timeout-minutes: 40
-    permissions: {}
-    env:
-      DISPATCH_REF: ${{ github.ref }}
-    steps:
-      - name: Distribution workflows run only from install main
-        run: |
-          set -euo pipefail
-          if [ "$DISPATCH_REF" != 'refs/heads/main' ]; then
-            echo "::error::desktop distribution must be dispatched from refs/heads/main, got '$DISPATCH_REF'"
-            exit 1
-          fi
-          echo 'dispatch ref is refs/heads/main'
-
+  # The main-only refusal is this job's first step and the secrets are mapped only into the step after
+  # it, so a dispatch from a feature branch fails before any secret or private source is read.
   preflight:
-    needs: dispatch-main-only
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     outputs:
@@ -163,30 +145,40 @@ jobs:
       feed: ${{ steps.inputs.outputs.feed }}
       artifact: ${{ steps.inputs.outputs.artifact }}
       tag: ${{ steps.inputs.outputs.tag }}
-    env:
-      CHANNEL_INPUT: ${{ inputs.channel }}
-      VERSION_INPUT: ${{ inputs.version }}
-      SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
-      MIN_VERSION_INPUT: ${{ inputs.min_version }}
-      MONOREPO_READ_APP_ID: ${{ secrets.MONOREPO_READ_APP_ID }}
-      MONOREPO_READ_APP_PRIVATE_KEY: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
-      AWS_MAC_FLEET_ROLE_ARN: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
-      APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
-      APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
-      APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
-      APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
-      APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
-      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-      AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
-      AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
-      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-      AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
-      LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
-      LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
     steps:
+      - name: Distribution workflows run only from install main
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_REF" != 'refs/heads/main' ]; then
+            echo "::error::desktop distribution must be dispatched from refs/heads/main, got '$DISPATCH_REF'"
+            exit 1
+          fi
+          echo 'dispatch ref is refs/heads/main'
       - name: Validate immutable inputs and every release prerequisite
         id: inputs
+        env:
+          CHANNEL_INPUT: ${{ inputs.channel }}
+          VERSION_INPUT: ${{ inputs.version }}
+          SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          MIN_VERSION_INPUT: ${{ inputs.min_version }}
+          MONOREPO_READ_APP_ID: ${{ secrets.MONOREPO_READ_APP_ID }}
+          MONOREPO_READ_APP_PRIVATE_KEY: ${{ secrets.MONOREPO_READ_APP_PRIVATE_KEY }}
+          AWS_MAC_FLEET_ROLE_ARN: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
+          APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
+          APPLE_SIGNING_CERT_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
+          APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+          APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+          AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT_PROFILE: ${{ vars.AZURE_SIGNING_ACCOUNT_PROFILE }}
+          LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
+          LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
           if [[ ! "$VERSION_INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

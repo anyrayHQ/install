@@ -265,3 +265,14 @@ echo abc123
     assert.match(result.stderr, /still failing after/);
   });
 });
+
+describe('the stored set is attested by an annotation only this run can write', () => {
+  test('store-set emits the SHA256SUMS hash as a notice after uploading SHA256SUMS', () => {
+    const store = job(caller, 'store-set');
+    const upload = store.indexOf('aws s3 cp set/SHA256SUMS "${set_prefix}/SHA256SUMS"');
+    const notice = store.indexOf('echo "::notice title=connect-set::sha256=${sums}"');
+    assert.ok(upload > 0 && notice > upload, 'the notice follows the SHA256SUMS upload');
+    const calculation = store.indexOf('sums="$(sha256sum set/SHA256SUMS | cut -d\' \' -f1)"');
+    assert.ok(calculation >= 0 && calculation < notice, 'the notice hashes the SHA256SUMS it uploaded');
+  });
+});

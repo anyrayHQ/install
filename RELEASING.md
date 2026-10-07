@@ -35,15 +35,14 @@ CLI release.
   desktop workflow still compiles its own engines.
 - **Its own Mac.** The called workflow provisions and tears down a Mac of its own;
   `mac-fleet.sh up` reuses a live fleet.
-- **Per-OS publication.** One `publish` job runs a leg per OS, strictly one at a time,
-  each uploading its signed files to the versioned
+- **Per-OS publication.** One `publish` job runs a leg per OS in parallel, each only
+  uploading its signed files to the versioned
   `connect-desktop[-staging]-v<version>-<sha12>` release (created if missing; an asset
-  already published is never replaced, see "Releasing a build") and rewriting the signed
-  manifest and the channel feed from every asset on that release
-  (`scripts/publish-desktop-release.sh`). An OS whose chain failed is skipped and its
-  clients stay on their version. Nothing publishes unless source validation succeeded.
-  `reconcile-feed`, gated the same way, rewrites the feed once more and fails naming any
-  OS still missing. `minVersion` is written only when all three OSes are on the release,
+  already published is never replaced, see "Releasing a build";
+  `scripts/publish-desktop-release.sh --upload-only`). An OS whose chain failed is skipped
+  and its clients stay on their version. Nothing publishes unless source validation succeeded.
+  `reconcile-feed`, gated the same way, then writes the signed manifest and the channel feed
+  once from every asset on that release and fails naming any OS still missing. `minVersion` is written only when all three OSes are on the release,
   because a floor in a feed that lacks an OS would strand it. This applies to manual
   desktop runs too, staging included.
 - **No staging-first gate.** Stable no longer requires the same version and commit to

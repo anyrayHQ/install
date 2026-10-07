@@ -646,9 +646,11 @@ describe('desktop release workflow safety contract', () => {
     }
   });
 
-  test('publishes through one sequential matrix job, never on a dry run, never after a failed validation', () => {
+  test('publishes through one parallel upload-only matrix job, never on a dry run, never after a failed validation', () => {
     const publish = job('publish');
-    assert.match(publish, /max-parallel: 1\n\s+fail-fast: false/);
+    assert.doesNotMatch(publish, /max-parallel/);
+    assert.match(publish, /fail-fast: false/);
+    assert.match(publish, /publish-desktop-release\.sh --upload-only platform\/\*/);
     assert.match(publish, /!inputs\.dry_run/);
     assert.match(publish, /needs\.validate-source\.result == 'success'/);
     assert.match(publish, /CHANNEL: \$\{\{ needs\.preflight\.outputs\.channel \}\}/);

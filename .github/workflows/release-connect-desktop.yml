@@ -2758,14 +2758,13 @@ jobs:
           test ! -e "$rpm_main"
           assert_existing_state_untouched
 
-  # One leg per OS, strictly one at a time (one release and one feed to rewrite). A failed or
-  # unfinished OS is skipped without stopping the next; reconcile-feed names it. Nothing publishes
-  # unless the source and publication checks passed, and never on a dry run.
+  # One leg per OS, in parallel: each only uploads its own files, and reconcile-feed writes the
+  # manifest and feed once. A failed or unfinished OS does not stop the others; reconcile-feed names
+  # it. Nothing publishes unless the source and publication checks passed, and never on a dry run.
   publish:
     needs: [preflight, validate-source, verify-macos-signed, verify-windows-signatures, smoke-linux-installers, sign-linux-artifacts]
     if: ${{ always() && needs.preflight.result == 'success' && (needs.validate-source.result == 'success' || inputs.mode == 'publish') && !inputs.dry_run && inputs.mode != 'prepare' }}
     strategy:
-      max-parallel: 1
       fail-fast: false
       matrix:
         include:
@@ -2825,7 +2824,7 @@ jobs:
           path: platform/${{ matrix.artifact2 }}
       - name: Publish ${{ matrix.os }}
         if: ${{ format('{0}', matrix.ready) == 'true' }}
-        run: ./scripts/publish-desktop-release.sh platform/*
+        run: ./scripts/publish-desktop-release.sh --upload-only platform/*
 
   # Rewrites the feed once more from what is on the release, then fails naming any OS that never
   # made it, so a green run means all three shipped. Also gated on validation: a rejected dispatch

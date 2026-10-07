@@ -62,17 +62,21 @@ describe('desktop release workflow safety contract', () => {
     assert.match(job('build-linux-unsigned'), /needs: \[preflight, validate-source\]/);
   });
 
-  test('rejects non-main dispatches before preflight, secrets, or source', () => {
-    const guard = job('dispatch-main-only');
-    assert.match(guard, /DISPATCH_REF: \$\{\{ github\.ref \}\}/);
-    assert.match(guard, /!= 'refs\/heads\/main'/);
-    assert.match(guard, /permissions: \{\}/);
-    assert.doesNotMatch(guard, /secrets\.|private-source|MONOREPO_READ_APP/);
-    assert.match(job('preflight'), /^    needs: dispatch-main-only$/m);
-    assert.ok(
-      workflow.indexOf('  dispatch-main-only:\n') <
-        workflow.indexOf('  preflight:\n')
-    );
+  test('rejects non-main dispatches as the first step of preflight, before any secret is mapped', () => {
+    const preflight = job('preflight');
+    assert.doesNotMatch(workflow, /\n  dispatch-main-only:\n/);
+    assert.doesNotMatch(preflight, /^    needs:/m);
+    const steps = preflight.slice(preflight.indexOf('    steps:\n'));
+    const header = preflight.slice(0, preflight.indexOf('    steps:\n'));
+    assert.doesNotMatch(header, /secrets\./, 'no secret in the job-level env');
+    const body = steps.slice(steps.indexOf('      - '));
+    const first = body.slice(0, body.indexOf('\n      - '));
+    assert.match(first, /name: Distribution workflows run only from install main/);
+    assert.match(first, /DISPATCH_REF: \$\{\{ github\.ref \}\}/);
+    assert.match(first, /!= 'refs\/heads\/main'/);
+    assert.doesNotMatch(first, /secrets\.|private-source|MONOREPO_READ_APP/);
+    assert.ok(steps.indexOf('secrets.') > steps.indexOf('name: Validate immutable inputs'));
+    assert.ok(workflow.indexOf('  preflight:\n') < workflow.indexOf('  validate-source:\n'));
   });
 
   test('uses isolated read-only private checkouts and never uploads source', () => {

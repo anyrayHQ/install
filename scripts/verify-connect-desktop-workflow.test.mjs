@@ -972,3 +972,23 @@ test('the Windows autostart poll reads the Run value without Get-ItemPropertyVal
   assert.doesNotMatch(verify, /Get-ItemPropertyValue/);
   assert.match(verify, /\$runValue = \(Get-ItemProperty -LiteralPath \$runKey -Name \$runName `\n\s+-ErrorAction SilentlyContinue\)\.\$runName/);
 });
+
+test('the Windows tray startup is observed: logs captured, 90s poll, slow-start warning, diagnostics on failure', () => {
+  const verify = job('verify-windows-signatures');
+  assert.match(verify, /Start-Process -FilePath \$installedMain\.FullName -PassThru `\n\s+-RedirectStandardOutput \$trayStdout -RedirectStandardError \$trayStderr/);
+  assert.match(verify, /foreach \(\$attempt in 1\.\.90\)/);
+  assert.doesNotMatch(verify, /foreach \(\$attempt in 1\.\.30\)/);
+  assert.match(verify, /\$startupSeconds -gt 30\)[\s\S]*::warning::installed Windows tray took/);
+  assert.match(verify, /if \(\$null -eq \$runValue -or -not \$profileReady\)/);
+  assert.match(verify, /HKCU Run key present=\$keyPresent, Run value present=/);
+  assert.doesNotMatch(verify, /HKCU Run present=/);
+  // Any failure after the tray starts prints elapsed time, both log files and the profile's registration fields.
+  assert.match(verify, /catch \{\n\s+\$smokeFailure = \$_\n\s+if \(\$null -ne \$startupTimer\) \{ Write-TrayStartupDiagnostics \}\n\s+throw/);
+  const diagnostics = verify.slice(verify.indexOf('function Write-TrayStartupDiagnostics'), verify.indexOf('$startupTimer = [Diagnostics.Stopwatch]'));
+  assert.match(diagnostics, /elapsed=/);
+  assert.match(diagnostics, /tray \$\(\$pair\[0\]\)/);
+  for (const field of ['loginRegistration', 'loginRegistrationState', 'appHandoverState', 'engineOwner', 'persistenceOwner']) {
+    assert.match(diagnostics, new RegExp(`'${field}'`));
+  }
+});
+

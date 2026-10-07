@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -70,17 +70,25 @@ esac`);
     for (const name of names[os]) writeFileSync(join(dir, name), name);
     return dir;
   };
-  const run = (args, env = {}) => spawnSync('bash', ['scripts/publish-desktop-release.sh', ...args], {
+  const options = (env) => ({
     cwd: repo,
     encoding: 'utf8',
     env: { PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: root, REPO: 'x/y', VERSION, SOURCE_SHA: 'a'.repeat(40),
       TAG: `connect-desktop-v${VERSION}-aaaaaaaaaaaa`, FEED: 'connect-desktop', ARTIFACT: 'anyray-connect-desktop',
       GH_TOKEN: 'synthetic', MIN_VERSION: '1.0.0', ...env },
   });
+  const run = (args, env = {}) => spawnSync('bash', ['scripts/publish-desktop-release.sh', ...args], options(env));
+  const runAsync = (args, env = {}) => new Promise((resolve) => {
+    const child = spawn('bash', ['scripts/publish-desktop-release.sh', ...args], options(env));
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { out += d; });
+    child.on('close', (status) => resolve({ status, out }));
+  });
   const manifest = () => JSON.parse(readFileSync(join(repo, 'assets/connect-desktop.json'), 'utf8'));
   const uploads = () => { try { return readFileSync(join(store, 'uploads.log'), 'utf8').trim().split('\n'); } catch { return []; } };
   const feedWrites = () => { try { return readFileSync(join(store, 'feed.log'), 'utf8').trim().split('\n').length; } catch { return 0; } };
-  return { run, signed, manifest, store, uploads, feedWrites, repo, tag: `connect-desktop-v${VERSION}-aaaaaaaaaaaa` };
+  return { run, runAsync, signed, manifest, store, uploads, feedWrites, repo, tag: `connect-desktop-v${VERSION}-aaaaaaaaaaaa` };
 }
 
 describe('desktop per-OS publication', { skip: !tools && 'needs bash, jq and sha256sum' }, () => {
@@ -174,9 +182,10 @@ describe('desktop per-OS publication', { skip: !tools && 'needs bash, jq and sha
     assert.equal(s.feedWrites(), 0);
   });
 
-  test('parallel upload-only legs then one reconcile ship every OS with minVersion and one feed write', (t) => {
+  test('parallel upload-only legs then one reconcile ship every OS with minVersion and one feed write', async (t) => {
     const s = sandbox(t);
-    for (const os of ['macos', 'windows', 'linux']) assert.equal(s.run(['--upload-only', s.signed(os)]).status, 0);
+    const legs = await Promise.all(['macos', 'windows', 'linux'].map((os) => s.runAsync(['--upload-only', s.signed(os)])));
+    for (const leg of legs) assert.equal(leg.status, 0, leg.out);
     const result = s.run(['--require-all']);
     assert.equal(result.status, 0, result.stderr + result.stdout);
     assert.equal(s.manifest().minVersion, '1.0.0');

@@ -2039,10 +2039,40 @@ jobs:
               throw "installed engine version mismatch: $installedVersion"
             }
 
-            $appProcess = Start-Process -FilePath $installedMain.FullName -PassThru
+            # The tray's own class-only startup lines go to files so a slow or failed autostart explains itself.
+            $trayStdout = Join-Path $logDir.FullName 'connect-desktop-tray-stdout.log'
+            $trayStderr = Join-Path $logDir.FullName 'connect-desktop-tray-stderr.log'
+            function Read-SharedText([string]$Path) {
+              $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+              try { (New-Object System.IO.StreamReader($stream)).ReadToEnd() } finally { $stream.Dispose() }
+            }
+            function Write-TrayStartupDiagnostics {
+              $running = $null -ne $appProcess -and -not $appProcess.HasExited
+              Write-Host "Windows tray startup diagnostics: elapsed=$([int]$startupTimer.Elapsed.TotalSeconds)s, tray still running=$running"
+              foreach ($pair in @(@('stdout', $trayStdout), @('stderr', $trayStderr))) {
+                Write-Host "--- tray $($pair[0]) ---"
+                try { Write-Host (Read-SharedText $pair[1]) } catch { Write-Host "(unreadable: $($_.Exception.GetType().Name))" }
+              }
+              # Flags and timestamps only: the profile's login-registration and app-ownership fields.
+              $diagnosticFields = 'loginRegistration', 'loginRegistrationState', 'loginRegistrationAttemptedAt',
+                'loginRegistrationObservedAt', 'appHandoverState', 'appHandoverMaintenanceAt', 'engineOwner',
+                'engineOwnerObservedAt', 'engineOwnerPath', 'persistenceOwner', 'trayAppPath', 'legacyTrayRetirementState'
+              try {
+                $diagnosticProfile = Get-Content -Raw -LiteralPath $state | ConvertFrom-Json
+                foreach ($field in $diagnosticFields) {
+                  if ($diagnosticProfile.PSObject.Properties.Name -contains $field) {
+                    Write-Host "profile.$field = $($diagnosticProfile.$field | ConvertTo-Json -Compress -Depth 5)"
+                  }
+                }
+              } catch { Write-Host '(profile state unreadable)' }
+            }
+            $startupTimer = [Diagnostics.Stopwatch]::StartNew()
+            $appProcess = Start-Process -FilePath $installedMain.FullName -PassThru `
+              -RedirectStandardOutput $trayStdout -RedirectStandardError $trayStderr
             Write-Host "Windows tray process: pid=$($appProcess.Id), session=$($appProcess.SessionId)"
             $runValue = $null
-            foreach ($attempt in 1..30) {
+            $profileReady = $false
+            foreach ($attempt in 1..90) {
               if ($appProcess.HasExited) {
                 throw 'installed Windows tray exited before creating autostart state'
               }
@@ -2060,11 +2090,15 @@ jobs:
               Start-Sleep -Seconds 1
               $appProcess.Refresh()
             }
-            if ($null -eq $runValue) {
+            $startupSeconds = [int]$startupTimer.Elapsed.TotalSeconds
+            if ($null -eq $runValue -or -not $profileReady) {
               $appProcess.Refresh()
               $keyPresent = Test-Path -LiteralPath $runKey
-              Write-Host "Windows startup timeout: exited=$($appProcess.HasExited), HKCU Run present=$keyPresent"
-              throw 'installed Windows tray did not create its HKCU Run value within 30 seconds'
+              Write-Host "Windows startup timeout after ${startupSeconds}s: exited=$($appProcess.HasExited), HKCU Run key present=$keyPresent, Run value present=$($null -ne $runValue), profile enabled=$profileReady"
+              throw 'installed Windows tray did not create its HKCU Run value and enabled profile state within 90 seconds'
+            }
+            if ($startupSeconds -gt 30) {
+              Write-Host "::warning::installed Windows tray took ${startupSeconds}s to register autostart (the old limit was 30s); a slow runner or a slow startup step"
             }
             if ($runValue.IndexOf($installedMain.FullName, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
               throw "desktop autostart value does not contain installed main path: $runValue"
@@ -2082,6 +2116,7 @@ jobs:
           }
           catch {
             $smokeFailure = $_
+            if ($null -ne $startupTimer) { Write-TrayStartupDiagnostics }
             throw
           }
           finally {

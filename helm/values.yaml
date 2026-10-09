@@ -319,13 +319,20 @@ gateway:
     nodePort: null
     # Set for LoadBalancer installs to keep the gateway private to your org/VPN.
     loadBalancerSourceRanges: []
+  # The gateway holds every in-flight request body, so its memory grows with
+  # concurrent long-context sessions. Under a 1 Gi cap, eight concurrent
+  # Claude Code sessions sending 300k-960k-token prompts took a gateway from
+  # 300 MB to the cap within minutes, and it was OOM-killed four times in 40
+  # minutes (Anyray prod, 2026-10-09). The 2 Gi limit matches the AWS
+  # quicklaunch task. The request stays at 512Mi so a default install still
+  # fits the nodes in the sizing guide.
   resources:
     requests:
       cpu: "250m"
       memory: "512Mi"
     limits:
       cpu: "1000m"
-      memory: "1Gi"
+      memory: "2Gi"
   # Content privacy: encrypted | off. Never set to plaintext in production.
   #
   # NOTE the gateway no longer reads this. Its content mode is set in the console

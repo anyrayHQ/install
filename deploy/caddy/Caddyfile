@@ -32,8 +32,8 @@
 	reverse_proxy gateway:8787 {
 		# Overwrite (not append) X-Forwarded-For with the real peer so a client
 		# can't spoof its IP to dodge the gateway's per-IP rate limit and
-		# brute-force throttle. The gateway reads the first XFF value when
-		# ANYRAY_TRUST_PROXY=true; with this it is always the true client.
+		# brute-force throttle. With ANYRAY_TRUST_PROXY=true the gateway reads
+		# the rightmost public XFF value; with this it is always the true client.
 		header_up X-Forwarded-For {remote_host}
 	}
 }

@@ -371,11 +371,13 @@ gateway:
   # Left off, every user collapses to one IP, so a handful of failed auths (e.g.
   # one stale client key) trips the always-on auth-failure guard and locks the
   # WHOLE cluster with "too many failed authentication attempts". The gateway
-  # reads the leftmost XFF hop, which a standard ingress-nginx
-  # (use-forwarded-headers=false, the default) sets to the real client and does
-  # not let callers spoof. Set "false" ONLY if you expose the gateway Service
-  # directly (NodePort / LoadBalancer with no proxy in front), where a client
-  # could forge X-Forwarded-For.
+  # reads XFF from the right and skips private-network hops, so it keys on the
+  # address the outermost proxy saw: the real client behind a standard
+  # ingress-nginx (use-forwarded-headers=false, the default, overwrites XFF)
+  # and behind an ingress that appends to it (an ALB, Envoy), which a caller
+  # cannot spoof. Set "false" ONLY if you expose the gateway Service directly
+  # (NodePort / LoadBalancer with no proxy in front), where a client could
+  # forge X-Forwarded-For.
   trustProxy: "true"
   rateLimitRpm: ""
   rateLimitIpRpm: ""

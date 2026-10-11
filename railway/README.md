@@ -104,7 +104,6 @@ drain or the kill lands in the middle of one:
 |---|---|---|
 | `gateway` | `120` | The gateway finishes in-flight requests for `ANYRAY_SHUTDOWN_DRAIN_MS` (default 90s) on SIGTERM. A streaming completion routinely runs minutes; cut it and the developer's tool reports "Connection closed mid-response" against the gateway, not against the redeploy that caused it. |
 | `optimizer` | `30` | Its own drain is 15s. Optimize calls are short and the gateway fails open on them, so this is a small budget by design. |
-| `endpoint-control` | `45` | Bounds a single request at 30s and force-exits its drain at 35s. |
 | `proxy` | `60` | nginx drains workers on SIGQUIT while still proxying console responses. |
 
 `Postgres` is deliberately not in that table: it is Railway's own managed

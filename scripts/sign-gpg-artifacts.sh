@@ -46,7 +46,7 @@ mkdir -p "$output_dir"
 # problem: it prints "error running '/usr/bin/gpg-agent': exit status 2" then
 # "No agent running", which reads like a missing binary, and the import fails
 # with the secret key already parsed ("secret keys read: 1"). It cost the first
-# fleetd signing run.
+# signing run on that runner.
 #
 # So: a FIXED short subdirectory, not mktemp. Concurrency is handled by the
 # per-process suffix rather than mktemp's randomness, which keeps the name

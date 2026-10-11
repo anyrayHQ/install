@@ -280,7 +280,7 @@ each is overridable per component:
 | Value | Default | What it does |
 | --- | --- | --- |
 | `preStopDrainSeconds` | `5` | Keeps a pod serving after termination starts but before SIGTERM, so requests stop arriving before the process stops listening. On the `Recreate` path this also lengthens the gap, since nothing starts until the old pod is gone — set `0` to trade in-flight requests for a shorter window. |
-| `terminationGracePeriodSeconds` | `120` | Budget from "terminating" to SIGKILL. Must exceed `preStopDrainSeconds` plus **that component's own** drain of in-flight requests, and the chart charges each one separately: gateway 90000ms and optimizer 15000ms (both `ANYRAY_SHUTDOWN_DRAIN_MS`, different defaults), endpoint-control a hardcoded 35000ms. Too low and streams are cut mid-response, which the developer's tool reports as "Connection closed mid-response". A ceiling, not a delay; the chart refuses to render if the sum no longer fits. |
+| `terminationGracePeriodSeconds` | `120` | Budget from "terminating" to SIGKILL. Must exceed `preStopDrainSeconds` plus **that component's own** drain of in-flight requests, and the chart charges each one separately: gateway 90000ms and optimizer 15000ms (both `ANYRAY_SHUTDOWN_DRAIN_MS`, different defaults). Too low and streams are cut mid-response, which the developer's tool reports as "Connection closed mid-response". A ceiling, not a delay; the chart refuses to render if the sum no longer fits. |
 | `minReadySeconds` | `10` | How long a new pod must stay Ready before the rollout counts it available, so a pod that passes one probe and then crashes cannot retire the previous version. |
 | `progressDeadlineSeconds` | `300` | How long a rollout may make no progress before it is marked failed. Unset, Kubernetes waits 600s, so a rollout whose pods never pass their probes stalls silently for ten minutes. Since `maxUnavailable` is 0 the outgoing pods serve throughout, so a shorter deadline costs no traffic — it is what makes `helm upgrade --atomic` roll back promptly. Must exceed `minReadySeconds`. |
 | `revisionHistoryLimit` | `3` | Retired ReplicaSets kept per Deployment for rollback (Kubernetes default 10). |
@@ -312,7 +312,7 @@ created for each Deployment that runs two or more pods, capping how many pods a
 node drain or autoscaler scale-down may remove at once. It is deliberately not
 created for a single-replica workload: such a budget could never allow its only
 pod to be evicted, and `kubectl drain` would block indefinitely on a node upgrade.
-At the defaults that covers all four workloads, each at two replicas.
+At the defaults that covers all three workloads, each at two replicas.
 
 `podDisruptionBudget.unhealthyPodEvictionPolicy` defaults to `AlwaysAllow`.
 Kubernetes' own default (`IfHealthyBudget`) refuses to evict pods that are running
@@ -415,32 +415,6 @@ ingress:
         gateway: /v1
         admin: /admin
 ```
-
-### The end-point agent plane
-
-The `endpoint-control` service (device evidence for employee laptops) is the one
-component whose clients live outside the cluster, so it needs a route of its own.
-On an Ingress or HTTPRoute install the chart adds three fixed prefixes —
-`/api/v1/osquery`, `/api/fleet/orbit`, `/api/v1/evidence` — on the same host the
-console and gateway already use. The agent protocol anchors those paths at the
-root, so they are not configurable; the gateway serves no `/api/*` route, so
-nothing collides, and no second hostname or certificate is involved. Everything
-else the service exposes (`/admin/*`, `/readyz`, `/livez`) stays in-cluster: the
-gateway reaches its admin plane over the cluster Service.
-
-Two consequences worth knowing before you install:
-
-- **`LoadBalancer` and `NodePort` installs route none of it.** Nothing external
-  reaches the agent plane, so the chart deliberately leaves
-  `ANYRAY_ENDPOINT_CONTROL_PUBLIC_URL` unset rather than guessing an origin from
-  `host` — a guessed origin would be baked into every installer and MDM profile
-  the service mints and fail only on the laptop. Expose the plane yourself and
-  set `endpoint-control.publicUrl` to the origin that reaches it.
-- **`endpoint-control.enabled: false`** drops the Deployment, the Service, the
-  ingress rules, and the gateway's pointer at it, leaving the end-point lane
-  dormant. Use it if a device-evidence plane hasn't cleared your security review,
-  or if you pin `image.tag` below `v1.10.246` — the first release that published
-  this image, so older pins have nothing to pull.
 
 ## Signing gateway → optimizer requests
 
@@ -654,8 +628,8 @@ environment variables not modeled directly. Billing variables cannot be
 overridden through `gateway.extraEnv`.
 
 To mount a file such as a database CA bundle, set `extraVolumes` and
-`extraVolumeMounts` on `gateway`, `optimizer` and `endpoint-control` (the three
-pods that open Postgres), then point the URL at it with
+`extraVolumeMounts` on `gateway` and `optimizer` (the two pods that open
+Postgres), then point the URL at it with
 `sslrootcert=/etc/anyray/db-ca/ca.pem`. RDS needs none of this: the images ship
 Amazon's RDS roots, so `sslmode=verify-full` works as is.
 
@@ -666,17 +640,14 @@ gateway:
 optimizer:
   extraVolumes: [{name: db-ca, secret: {secretName: db-ca}}]
   extraVolumeMounts: [{name: db-ca, mountPath: /etc/anyray/db-ca, readOnly: true}]
-endpoint-control:
-  extraVolumes: [{name: db-ca, secret: {secretName: db-ca}}]
-  extraVolumeMounts: [{name: db-ca, mountPath: /etc/anyray/db-ca, readOnly: true}]
 ```
 
 ## Scaling
 
-Since chart 0.8.0 the gateway, optimizer, proxy and endpoint-control each run two
-replicas, each with a PodDisruptionBudget, so a node drain never takes both pods
-of a pair. The bundled Postgres stays at one pod; for a database that fails over,
-use the external-Postgres values below.
+Since chart 0.8.0 the gateway, optimizer and proxy each run two replicas, each
+with a PodDisruptionBudget, so a node drain never takes both pods of a pair. The
+bundled Postgres stays at one pod; for a database that fails over, use the
+external-Postgres values below.
 
 The optimizer resolves to one replica instead of two when
 `optimizer.persistence.enabled` is true, or when the image is older than
@@ -703,10 +674,9 @@ gateway:
 ```
 
 `postgres.maxConnections` defaults to 300. From v1.10.431, each gateway pod
-opens up to 24 connections at peak, and each optimizer and endpoint-control pod
-up to 8, so the default two of each use up to 80. On older images, each gateway
-pod uses about 47 and each optimizer and endpoint-control pod about 20, or ~175
-for two of each. Raise the limit before raising replicas or enabling an HPA. For
+opens up to 24 connections at peak, and each optimizer pod up to 8, so the
+default two of each use up to 64. On older images, each gateway pod uses about 47
+and each optimizer pod about 20, or ~135 for two of each. Raise the limit before raising replicas or enabling an HPA. For
 external Postgres, size its limit the same way.
 
 ## External Postgres

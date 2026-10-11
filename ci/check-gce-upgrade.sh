@@ -28,7 +28,9 @@ grep -qx 'ANYRAY_ADMIN_TOKEN=preserve-me' "$tmp/install/.env"
 grep -qx 'ANYRAY_IMAGE_TAG=v1.2.3' "$tmp/install/.env"
 grep -qx 'compose config -q' "$tmp/docker.log"
 grep -qx 'compose pull' "$tmp/docker.log"
-grep -qx 'compose up --pull never -d' "$tmp/docker.log"
+# --remove-orphans: a service dropped from the template (endpoint-control) must
+# not keep running as an orphan container after the reconcile.
+grep -qx 'compose up --pull never -d --remove-orphans' "$tmp/docker.log"
 
 sed -i.bak 's/v1.2.3/policy-stable/' "$tmp/install/docker-compose.yml"
 rm -f "$tmp/install/docker-compose.yml.bak"
@@ -36,13 +38,13 @@ rm -f "$tmp/install/docker-compose.yml.bak"
 PATH="$tmp/bin:$PATH" DOCKER_LOG="$tmp/docker.log" \
   "$tmp/install/gcp/gce/upgrade.sh" >/dev/null
 grep -qx 'ANYRAY_IMAGE_TAG=policy-stable' "$tmp/install/.env"
-grep -qx 'compose up --pull never -d' "$tmp/docker.log"
+grep -qx 'compose up --pull never -d --remove-orphans' "$tmp/docker.log"
 
 : > "$tmp/docker.log"
 PATH="$tmp/bin:$PATH" DOCKER_LOG="$tmp/docker.log" \
   "$tmp/install/gcp/gce/upgrade.sh" v2.0.0 >/dev/null
 grep -qx 'ANYRAY_IMAGE_TAG=v2.0.0' "$tmp/install/.env"
-grep -qx 'compose up --pull never -d' "$tmp/docker.log"
+grep -qx 'compose up --pull never -d --remove-orphans' "$tmp/docker.log"
 
 before="$(cat "$tmp/install/.env")"
 : > "$tmp/docker.log"

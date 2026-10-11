@@ -105,11 +105,10 @@ instead of deep inside jsign or `codesign`.
 > posture; if a lane is genuinely retired, remove it from the preflight list in
 > the same commit rather than leaving it listed and unset.
 
-Both `release-connect-binaries.yml` and the endpoint-package workflow
-`release-fleetd-installer.yml` fail closed unless the macOS application and
+`release-connect-binaries.yml` fails closed unless the macOS application and
 installer certificates, notarization credentials, Azure Artifact Signing
-configuration, and Linux GPG release key are all present. Neither workflow may
-publish a partly signed asset set.
+configuration, and Linux GPG release key are all present. It may not publish a
+partly signed asset set.
 
 **Build provenance is the exception**: `actions/attest-build-provenance` is
 *not* secret-gated. It signs through the workflow's own OIDC identity, so every
@@ -362,12 +361,6 @@ forget:
       Anyray, not the brand, and Azure bakes the validated entity name into every
       certificate the profile issues.
 
-`fleetd.msi` is signed by `release-fleetd-installer.yml` through the same Azure
-Artifact Signing profile. The workflow then verifies the final MSI with Windows'
-native `Get-AuthenticodeSignature` before a release can consume it. That matters
-because the gateway re-serves this artifact to enrolled machines: the exact MSI
-verified on Windows is the one uploaded as the release asset.
-
 ### Linux — GPG-signed `.deb`/`.rpm` **and `SHA256SUMS`**
 
 | Secret | What it is | Where to get it |
@@ -480,8 +473,8 @@ no `signtool`. This is also why the lane does **not** use Microsoft's own signin
 integration: that path is SignTool + .NET 8 + the Artifact Signing dlib, all
 Windows-only, and would drag the job back onto a Windows fleet to do the same
 work. **Keep the `anyray-install-runner-win` project**: this workflow no longer
-uses it, but `release-fleetd-installer.yml`'s `build-windows` still does
-(fleetctl shells out to WiX `heat`, which needs a real Windows host).
+uses it, but the desktop release's Windows jobs and `validate-artifacts.yml`
+still do.
 
 **Why macOS is on-demand.** Apple signing requires a Mac. EC2 Mac hosts have a
 24-hour minimum charge; leaving a fleet ACTIVE continues billing beyond it.
@@ -490,7 +483,7 @@ success or failure. `up` accepts a fleet still usable in PENDING_DELETION, so
 releases may reuse the remaining paid window. It fails if readiness takes more
 than 20 minutes. Cleanup must never be replaced with simply leaving the fleet active.
 
-The Connect CLI, desktop, and fleetd release workflows share the
+The Connect CLI and desktop release workflows share the
 `anyray-install-mac-release` concurrency group for their entire runs. This keeps
 one release's teardown from deleting another release's runner. GitHub retains
 one running and one pending run per group; a new dispatch replaces an older

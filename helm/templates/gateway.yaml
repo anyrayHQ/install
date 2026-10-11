@@ -3,15 +3,16 @@
 {{- fail (printf "gateway.extraEnv must not override %s: Billing metering is mandatory" .name) }}
 {{- end }}
 {{- end }}
-{{- /* Running WITHOUT the data volume is only lossless once the image keeps the
-       fleetd installers in Postgres (0057, appVersion v1.10.224). On an older
-       image they are files, so an emptyDir means every installer is discarded on
-       each pod restart, silently — the console keeps offering a download that
-       404s. Refuse to render rather than ship that: the two ways out are pinning
-       a current image or keeping the volume, and both are named here. */}}
+{{- /* Running WITHOUT the data volume is only lossless once the image keeps
+       every store it writes in Postgres (the last one moved in 0057, appVersion
+       v1.10.224, the same floor the optimizer's 0058 guard uses). On an older
+       image part of that state is still files on the volume, so an emptyDir
+       silently discards it on each pod restart. Refuse to render rather than
+       ship that: the two ways out are pinning a current image or keeping the
+       volume, and both are named here. */}}
 {{- if not .Values.gateway.persistence.enabled }}
 {{- if not (include "anyray.atLeastAppVersion" (dict "component" "gateway" "floor" (include "anyray.haFloor" .) "context" .)) }}
-{{- fail (printf "gateway.persistence.enabled=false needs a gateway image of %s or newer (this renders %s): older images keep the end-point lane's fleetd installers as files on that volume, so running without it discards them on every restart. Either upgrade the image, or set gateway.persistence.enabled=true (which also caps gateway.replicas at 1)." (include "anyray.haFloor" .) (include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .))) }}
+{{- fail (printf "gateway.persistence.enabled=false needs a gateway image of %s or newer (this renders %s): older images keep part of their state as files on that volume, so running without it discards it on every restart. Either upgrade the image, or set gateway.persistence.enabled=true (which also caps gateway.replicas at 1)." (include "anyray.haFloor" .) (include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .))) }}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1
@@ -72,18 +73,6 @@ spec:
             {{- include "anyray.observabilityDbEnv" . | nindent 12 }}
             - name: ANYRAY_OPTIMIZER_URL
               value: "http://optimizer:8088"
-            {{- if (index .Values "endpoint-control").enabled }}
-            # In-cluster address of the endpoint-control service (RFC 0014).
-            # Optional on the gateway: images that predate the end-point lane
-            # ignore it, so this is safe ahead of the gateway that reads it.
-            # Gated on the component being rendered: a set URL SELECTS the local
-            # lane and an unreachable local service degrades to reachable:false
-            # rather than falling back, so pointing at a Service that does not
-            # exist would report a permanently broken fleet instead of a dormant
-            # one.
-            - name: ANYRAY_ENDPOINT_CONTROL_URL
-              value: "http://endpoint-control:8090"
-            {{- end }}
             - name: ANYRAY_OPTIMIZER_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 16 }}

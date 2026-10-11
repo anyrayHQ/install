@@ -1964,10 +1964,10 @@ jobs:
           # A staging release is the SAME signed, notarized, checksummed asset
           # set — only where it lands differs. Separate tag, and never `latest`.
           #
-          # `--latest=false` IS THE WHOLE SAFETY PROPERTY, and it is the same
-          # hazard the fleetd lane documents: `connect.sh`, `connect.ps1` and
-          # the self-updater all fetch from `releases/latest/download`, and
-          # GitHub hands "latest" to whichever release published most recently.
+          # `--latest=false` IS THE WHOLE SAFETY PROPERTY: `connect.sh`,
+          # `connect.ps1` and the self-updater all fetch from
+          # `releases/latest/download`, and GitHub hands "latest" to whichever
+          # release published most recently.
           # Without it, publishing a staging build would silently become the
           # binary every developer and every fleet machine downloads — a
           # staging lane that ships to production is worse than no staging lane.

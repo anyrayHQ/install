@@ -486,8 +486,8 @@ the IMAGE to provide. One constant, because both features ship in the same
 release and splitting it would invite the two to drift:
 
   * `GET /livez`, the liveness probe target (below);
-  * the fleetd installer store moving to Postgres (0057), which is what makes
-    gateway.persistence.enabled=false lossless.
+  * the last file-backed stores moving to Postgres (gateway 0057, optimizer
+    0058), which is what makes persistence.enabled=false lossless for both.
 
 CHANGE-BOTH-TOGETHER: this must name the release that actually carries both. Set
 too low, the probes 404 and the deployment crashloops; set too high, the chart

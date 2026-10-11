@@ -267,9 +267,8 @@ Running the gateway on `emptyDir` is lossless as of appVersion v1.10.224, and th
 chart refuses to render an older image without the volume. Everything an operator
 sets now lives in the shared Postgres and is read identically by every replica:
 client keys, provider keys, per-user caps, model aliases, team policy, the audit
-trail, the runtime settings (content-capture mode, heartbeat tier), the default
-routing config, the end-point fleet config, and the fleetd installers. Spend and
-trace history were always there.
+trail, the runtime settings (content-capture mode, heartbeat tier), and the
+default routing config. Spend and trace history were always there.
 
 What still resets with the pod is the entitlement-lease cache, which is
 deliberately node-local and re-fetched.

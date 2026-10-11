@@ -52,41 +52,4 @@ Availability of this release:
   postgres   external
 {{- end }}
 
-{{- if and .Release.IsUpgrade (not .Values.gateway.persistence.enabled) }}
-
-  ────────────────────────────────────────────────────────────────────────────
-  CHECK THIS UPGRADE: the gateway is running WITHOUT its data volume.
-
-  Since chart 0.5.0 gateway.persistence.enabled defaults to false, which is what
-  allows more than one gateway pod and a rolling (no-downtime) upgrade. Nothing
-  authoritative lives on that volume any more; it all moved to the shared
-  Postgres, which every replica reads.
-
-  The one exception is the end-point lane's fleetd installers. They moved to the
-  database in appVersion v1.10.224, and the gateway copies any left on the volume
-  into the database on boot -- but it can only do that while the volume is still
-  mounted. If this upgrade both raised the image to v1.10.224 and dropped the
-  volume, that copy never ran.
-
-  Note that a pod reporting Ready is NOT proof the copy finished: the import is
-  best-effort so it can never hold up a boot, and readiness does not wait for it.
-  The check below is the real signal, because it reads the database.
-
-  If you use the end-point lane, confirm your installers are still listed:
-
-    kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "anyray.fullname" . }}-gateway -- \
-      wget -qO- --header "Authorization: Bearer $ANYRAY_ADMIN_TOKEN" \
-      localhost:8787/admin/endpoint-fleet/installers
-
-  If the list is empty, either re-upload them from the console, or roll back to
-  the volume for one release to let the copy run:
-
-    helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} \
-      --set gateway.persistence.enabled=true --set gateway.replicas=1
-
-  The old volume is retained ("helm.sh/resource-policy": keep), so nothing was
-  deleted in either case.
-  ────────────────────────────────────────────────────────────────────────────
-{{- end }}
-
 Docs: https://docs.anyray.ai

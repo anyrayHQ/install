@@ -42,8 +42,7 @@ const stepScript = (body, name) => {
   return script.join('\n');
 };
 
-const FAKE_AWS = `#!/usr/bin/env node
-const fs = require('node:fs');
+const FAKE_AWS = `const fs = require('node:fs');
 const path = require('node:path');
 const root = process.env.FAKE_S3;
 const args = process.argv.slice(2).filter((a) => a !== '--only-show-errors');
@@ -77,15 +76,18 @@ const tree = (dir) => (existsSync(dir)
     .sort()
   : []);
 
+// The fake is a shell function, not a file on PATH: a runner whose temp dir is mounted
+// noexec skips a PATH entry it cannot execute and runs the real aws with whatever
+// credentials the host has. A decoy `aws` first on PATH proves the function won, and with
+// no credentials or instance metadata the real CLI could not reach S3 regardless.
 const sandbox = (t) => {
   const root = mkdtempSync(join(tmpdir(), 'split-set-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  mkdirSync(join(root, 'bin'));
-  mkdirSync(join(root, 's3'));
-  mkdirSync(join(root, 'work'));
-  mkdirSync(join(root, 'tmp'));
-  writeFileSync(join(root, 'bin/aws'), FAKE_AWS, { mode: 0o755 });
+  for (const d of ['bin', 's3', 'work', 'tmp']) mkdirSync(join(root, d));
+  writeFileSync(join(root, 'fake-aws.cjs'), FAKE_AWS);
+  writeFileSync(join(root, 'bin/aws'), `#!/bin/sh\necho "$@" >> "${join(root, 'real-aws.log')}"\nexit 97\n`, { mode: 0o755 });
   writeFileSync(join(root, 'aws.log'), '');
+  writeFileSync(join(root, 'real-aws.log'), '');
   return root;
 };
 
@@ -96,11 +98,15 @@ const run = (root, script, env) => {
   writeFileSync(output, '');
   const cwd = join(root, 'work', String(++steps));
   mkdirSync(cwd, { recursive: true });
-  const result = spawnSync('bash', ['-c', script], {
+  const result = spawnSync('bash', ['-c', `aws() { node "$FAKE_AWS_JS" "$@"; }\n${script}`], {
     cwd,
     encoding: 'utf8',
     env: {
       PATH: `${join(root, 'bin')}:${process.env.PATH}`,
+      FAKE_AWS_JS: join(root, 'fake-aws.cjs'),
+      AWS_CONFIG_FILE: '/dev/null',
+      AWS_SHARED_CREDENTIALS_FILE: '/dev/null',
+      AWS_EC2_METADATA_DISABLED: 'true',
       FAKE_S3: join(root, 's3'),
       RUNNER_TEMP: join(root, 'tmp'),
       GITHUB_OUTPUT: output,
@@ -111,6 +117,7 @@ const run = (root, script, env) => {
       ...env,
     },
   });
+  assert.equal(readFileSync(join(root, 'real-aws.log'), 'utf8'), '', 'a step reached an aws other than the fake');
   return { ...result, output: readFileSync(output, 'utf8'), log: readFileSync(join(root, 'aws.log'), 'utf8') };
 };
 
@@ -296,6 +303,7 @@ describe('load-set publishes the desktop set only when the record attests it', (
     writeFileSync(join(setPrefix(root), 'desktop/connect-desktop-linux-signed/connect-desktop-linux-signed.bin'), 'tampered\n');
     const result = load(root, { SET_SUMS_SHA256: sums, DESKTOP_SUMS_SHA256: desktopSums });
     assert.notEqual(result.status, 0);
+    assert.match(result.stdout + result.stderr, /connect-desktop-linux-signed\.bin: FAILED/);
     assert.ok(!tree(runPrefix(root)).some((f) => f.startsWith('connect-desktop-')), 'nothing desktop is staged');
   });
 

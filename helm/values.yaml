@@ -396,6 +396,15 @@ gateway:
     seatExclude: ""
   # Extra env vars (provider-key fallbacks, rate limits, …)
   # in plain k8s env syntax: [{name: ANYRAY_RATE_LIMIT_RPM, value: "600"}]
+  #
+  # Outbound through a corporate forward proxy: set HTTPS_PROXY (and HTTP_PROXY
+  # if you need it) plus NO_PROXY for hosts that skip the proxy. In-cluster
+  # service names always connect directly.
+  #   extraEnv:
+  #     - name: HTTPS_PROXY
+  #       value: http://proxy.example.com:3128
+  #     - name: NO_PROXY
+  #       value: .corp.example.com
   extraEnv: []
   # Extra volumes for this pod, and where to mount them in its container, in
   # plain k8s syntax. The usual case is a database CA bundle for a URL that

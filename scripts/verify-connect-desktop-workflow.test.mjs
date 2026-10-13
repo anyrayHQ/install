@@ -174,9 +174,9 @@ describe('desktop release workflow safety contract', () => {
     const build = job('build-windows-unsigned');
     assert.match(build, /Rust toolchain and MSVC build tools \(pinned\)/);
     assert.match(build, /VS_BUILDTOOLS_SHA256/);
-    assert.match(build, /Microsoft\.VisualStudio\.Workload\.VCTools/);
+    assert.match(build, /Microsoft\.VisualStudio\.Component\.VC\.Tools\.x86\.x64/);
     const bundle = job('bundle-windows-unsigned');
-    assert.doesNotMatch(bundle, /VS_BUILDTOOLS|vswhere|VCTools/);
+    assert.doesNotMatch(bundle, /VS_BUILDTOOLS|vswhere|VC\.Tools|VCTools/);
     for (const body of [build, bundle]) assert.match(body, /RUSTUP_INIT_SHA256_WINDOWS_X64/);
     assert.match(workflow, /VS_BUILDTOOLS_URL: 'https:\/\/download\.visualstudio\.microsoft\.com\//);
     assert.doesNotMatch(workflow, /aka\.ms/);

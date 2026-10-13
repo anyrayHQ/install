@@ -484,10 +484,11 @@ services:
       WATCHTOWER_HTTP_API_UPDATE: "true"
       WATCHTOWER_HTTP_API_TOKEN: ${ANYRAY_UPDATER_TOKEN:-${ANYRAY_ADMIN_TOKEN}}
       WATCHTOWER_INCLUDE_RESTARTING: "true"
-      # Registry pulls use the same forward proxy as the gateway. Empty = direct.
+      # Registry checks use the same forward proxy as the gateway. Empty = direct.
+      # The Docker socket proxy is always reached directly.
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       HTTP_PROXY: ${HTTP_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-}
+      NO_PROXY: docker-socket-proxy${NO_PROXY:+,${NO_PROXY}}
 
 volumes:
   anyray_gateway_data:

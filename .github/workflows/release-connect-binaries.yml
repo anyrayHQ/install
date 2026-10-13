@@ -72,7 +72,7 @@ on:
         required: false
         default: ''
       mode:
-        description: 'release = build, sign and publish in one run. prepare = build and sign the CLI and desktop app from the .tgz the monorepo uploaded, publish nothing, store the signed set in S3. publish = publish a stored set (needs set_sums_sha256 and source_sha), build nothing.'
+        description: 'release = build, sign and publish in one run. prepare = build and sign the CLI and desktop app from the .tgz the monorepo uploaded, publish nothing, store the signed CLI set in S3 as soon as it is signed and the desktop set under its desktop/ prefix after. publish = publish a stored set (needs set_sums_sha256 and source_sha; desktop_sums_sha256 adds a split desktop set), build nothing.'
         required: false
         type: choice
         options: [release, prepare, publish]
@@ -83,6 +83,10 @@ on:
         default: ''
       set_sums_sha256:
         description: 'publish: sha256 of the set SHA256SUMS file, from the monorepo record. The set is refused unless it matches.'
+        required: false
+        default: ''
+      desktop_sums_sha256:
+        description: 'publish: sha256 of the desktop set SHA256SUMS (connect-sets/<set_key>/desktop/), from the monorepo desktop record. Empty = publish no desktop from a split set.'
         required: false
         default: ''
 
@@ -171,11 +175,16 @@ jobs:
           SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
           SET_KEY_INPUT: ${{ inputs.set_key }}
           SET_SUMS_INPUT: ${{ inputs.set_sums_sha256 }}
+          DESKTOP_SUMS_INPUT: ${{ inputs.desktop_sums_sha256 }}
           STAGING_INPUT: ${{ inputs.staging }}
         run: |
           set -euo pipefail
           set_key="${SET_KEY_INPUT:-$VERSION_INPUT}"
           echo "set_key=$set_key" >> "$GITHUB_OUTPUT"
+          if [ -n "$DESKTOP_SUMS_INPUT" ] && { [ "$MODE_INPUT" != publish ] || [[ ! "$DESKTOP_SUMS_INPUT" =~ ^[0-9a-f]{64}$ ]]; }; then
+            echo "::error::desktop_sums_sha256 is a publish input of 64 lowercase hex, the hash of the desktop set SHA256SUMS"
+            exit 1
+          fi
           if [ "$MODE_INPUT" = release ]; then
             exit 0
           fi
@@ -1522,9 +1531,71 @@ jobs:
 
   # prepare: the CLI set must be complete or nothing is stored; each desktop OS that did not finish
   # verified is named in MISSING. SHA256SUMS goes up last, so a set without it is not a set.
+  # prepare: the CLI set, stored as soon as the CLI is signed. The monorepo records it for the
+  # release gate while the desktop is still building; store-desktop adds the desktop after.
   store-set:
-    needs: [signing-preflight, build, sign-macos, sign-windows, package-linux, desktop]
-    if: ${{ always() && inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' }}
+    needs: [signing-preflight, build, sign-macos, sign-windows, package-linux]
+    if: ${{ !cancelled() && inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
+    env:
+      BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
+      SET_KEY: ${{ needs.signing-preflight.outputs.set_key }}
+      PACKAGE_SHA256: ${{ needs.build.outputs.package_sha256 }}
+      VERSION: ${{ inputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - name: Store the signed set
+        run: |
+          set -euo pipefail
+          run_prefix="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          set_prefix="s3://${BUCKET}/connect-sets/${SET_KEY}"
+          mkdir set
+          fetch() {
+            aws s3 cp "${run_prefix}/$1/" "set/$1/" --recursive --only-show-errors
+            test -n "$(ls "set/$1")" || { echo "::error::artifact $1 is empty"; exit 1; }
+          }
+          for name in binaries-unsigned binaries-darwin binaries-macos-pkg binaries-windows linux-packages; do
+            fetch "$name"
+          done
+          # The sha256 of the .tgz this run compiled; the monorepo record must match what it uploaded.
+          printf '%s\n' "$PACKAGE_SHA256" > set/PACKAGE_SHA256
+          # Publish refuses a set whose label is not the version and commit it was asked to ship.
+          printf '%s\n' "$VERSION" > set/VERSION
+          printf '%s\n' "$SOURCE_SHA" > set/SOURCE_SHA
+          ( cd set && find . -type f | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum -- ) > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" set/SHA256SUMS
+          cat set/SHA256SUMS
+          for dir in set/*/; do
+            name="$(basename "$dir")"
+            aws s3 sync "$dir" "${set_prefix}/${name}/" --delete --only-show-errors
+          done
+          aws s3 cp set/PACKAGE_SHA256 "${set_prefix}/PACKAGE_SHA256" --only-show-errors
+          aws s3 cp set/VERSION "${set_prefix}/VERSION" --only-show-errors
+          aws s3 cp set/SOURCE_SHA "${set_prefix}/SOURCE_SHA" --only-show-errors
+          aws s3 cp set/SHA256SUMS "${set_prefix}/SHA256SUMS" --only-show-errors
+          sums="$(sha256sum set/SHA256SUMS | cut -d' ' -f1)"
+          echo "set ${SET_KEY} stored; SHA256SUMS sha256 ${sums}"
+          # shellcheck disable=SC2016 # backticks are literal markdown
+          printf 'set `%s` stored at `%s`, SHA256SUMS sha256 `%s`\n' "$SET_KEY" "$set_prefix" "$sums" >> "$GITHUB_STEP_SUMMARY"
+          # Only this run can write this annotation; the bucket is writable by any job, so the monorepo
+          # compares the bucket's SHA256SUMS with it.
+          echo "::notice title=connect-set::sha256=${sums}"
+
+  # prepare: the desktop set, after the desktop call, under connect-sets/<set_key>/desktop/ with
+  # its own SHA256SUMS and annotation. The monorepo records it on its own, so a release can ship
+  # the CLI before this lands. An OS that did not verify is listed in MISSING.
+  store-desktop:
+    needs: [signing-preflight, build, store-set, desktop]
+    if: ${{ always() && inputs.mode == 'prepare' && needs.store-set.result == 'success' && needs.desktop.result != 'skipped' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -1545,53 +1616,47 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
           aws-region: eu-central-1
-      - name: Store the signed set
+      - name: Store the signed desktop set
         run: |
           set -euo pipefail
           run_prefix="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          set_prefix="s3://${BUCKET}/connect-sets/${SET_KEY}"
-          mkdir set
+          set_prefix="s3://${BUCKET}/connect-sets/${SET_KEY}/desktop"
+          mkdir desktop
           fetch() {
-            aws s3 cp "${run_prefix}/$1/" "set/$1/" --recursive --only-show-errors
-            test -n "$(ls "set/$1")" || { echo "::error::artifact $1 is empty"; exit 1; }
+            aws s3 cp "${run_prefix}/$1/" "desktop/$1/" --recursive --only-show-errors
+            test -n "$(ls "desktop/$1")" || { echo "::error::artifact $1 is empty"; exit 1; }
           }
-          for name in binaries-unsigned binaries-darwin binaries-macos-pkg binaries-windows linux-packages; do
-            fetch "$name"
-          done
-          missing=''
-          if [ "$MACOS_OK" = true ]; then fetch connect-desktop-macos-signed; else missing="${missing}macos\n"; fi
+          : > desktop/MISSING
+          if [ "$MACOS_OK" = true ]; then fetch connect-desktop-macos-signed; else echo macos >> desktop/MISSING; fi
           if [ "$WINDOWS_OK" = true ]; then
             fetch connect-desktop-windows-inner-signed
             fetch connect-desktop-windows-installer-signed
           else
-            missing="${missing}windows\n"
+            echo windows >> desktop/MISSING
           fi
-          if [ "$LINUX_OK" = true ]; then fetch connect-desktop-linux-signed; else missing="${missing}linux\n"; fi
-          printf '%b' "$missing" > set/MISSING
-          # The sha256 of the .tgz this run compiled; the monorepo record must match what it uploaded.
-          printf '%s\n' "$PACKAGE_SHA256" > set/PACKAGE_SHA256
-          # Publish refuses a set whose label is not the version and commit it was asked to ship.
-          printf '%s\n' "$VERSION" > set/VERSION
-          printf '%s\n' "$SOURCE_SHA" > set/SOURCE_SHA
-          ( cd set && find . -type f | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum -- ) > "$RUNNER_TEMP/SHA256SUMS"
-          mv "$RUNNER_TEMP/SHA256SUMS" set/SHA256SUMS
-          cat set/SHA256SUMS
-          for dir in set/*/; do
+          if [ "$LINUX_OK" = true ]; then fetch connect-desktop-linux-signed; else echo linux >> desktop/MISSING; fi
+          # The same build labels as the CLI set, so publish can refuse a desktop set from another prepare.
+          printf '%s\n' "$PACKAGE_SHA256" > desktop/PACKAGE_SHA256
+          printf '%s\n' "$VERSION" > desktop/VERSION
+          printf '%s\n' "$SOURCE_SHA" > desktop/SOURCE_SHA
+          ( cd desktop && find . -type f | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum -- ) > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" desktop/SHA256SUMS
+          cat desktop/SHA256SUMS
+          for dir in desktop/*/; do
+            [ -d "$dir" ] || continue
             name="$(basename "$dir")"
             aws s3 sync "$dir" "${set_prefix}/${name}/" --delete --only-show-errors
           done
-          aws s3 cp set/MISSING "${set_prefix}/MISSING" --only-show-errors
-          aws s3 cp set/PACKAGE_SHA256 "${set_prefix}/PACKAGE_SHA256" --only-show-errors
-          aws s3 cp set/VERSION "${set_prefix}/VERSION" --only-show-errors
-          aws s3 cp set/SOURCE_SHA "${set_prefix}/SOURCE_SHA" --only-show-errors
-          aws s3 cp set/SHA256SUMS "${set_prefix}/SHA256SUMS" --only-show-errors
-          sums="$(sha256sum set/SHA256SUMS | cut -d' ' -f1)"
-          echo "set ${SET_KEY} stored; missing desktop OSes: [$(tr '\n' ' ' < set/MISSING)]; SHA256SUMS sha256 ${sums}"
+          for file in MISSING PACKAGE_SHA256 VERSION SOURCE_SHA; do
+            aws s3 cp "desktop/${file}" "${set_prefix}/${file}" --only-show-errors
+          done
+          aws s3 cp desktop/SHA256SUMS "${set_prefix}/SHA256SUMS" --only-show-errors
+          sums="$(sha256sum desktop/SHA256SUMS | cut -d' ' -f1)"
+          echo "desktop set ${SET_KEY} stored; missing: [$(tr '\n' ' ' < desktop/MISSING)]; SHA256SUMS sha256 ${sums}"
           # shellcheck disable=SC2016 # backticks are literal markdown
-          printf 'set `%s` stored at `%s`, SHA256SUMS sha256 `%s`\n' "$SET_KEY" "$set_prefix" "$sums" >> "$GITHUB_STEP_SUMMARY"
-          # Only this run can write this annotation; the bucket is writable by any job, so the monorepo
-          # compares the bucket's SHA256SUMS with it.
-          echo "::notice title=connect-set::sha256=${sums}"
+          printf 'desktop set `%s` stored at `%s`, SHA256SUMS sha256 `%s`\n' "$SET_KEY" "$set_prefix" "$sums" >> "$GITHUB_STEP_SUMMARY"
+          # As for the CLI set: the monorepo checks the bucket's desktop SHA256SUMS against this annotation.
+          echo "::notice title=connect-set-desktop::sha256=${sums}"
 
   # publish: refuse a tampered set, then stage its files as this run's own artifacts so the release
   # and desktop publish jobs below run exactly as they do after a build.
@@ -1610,6 +1675,7 @@ jobs:
       BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
       SET_KEY: ${{ needs.signing-preflight.outputs.set_key }}
       SET_SUMS_SHA256: ${{ inputs.set_sums_sha256 }}
+      DESKTOP_SUMS_SHA256: ${{ inputs.desktop_sums_sha256 }}
       VERSION: ${{ inputs.version }}
       SOURCE_SHA: ${{ inputs.source_sha }}
       GH_TOKEN: ${{ github.token }}
@@ -1653,6 +1719,45 @@ jobs:
           for name in binaries-unsigned binaries-darwin binaries-macos-pkg binaries-windows linux-packages; do
             test -n "$(ls "set/${name}" 2>/dev/null)" || { echo "::error::the set has no ${name}"; exit 1; }
           done
+          # A split set keeps the desktop under desktop/ with its own SHA256SUMS, attested by the
+          # monorepo's desktop record. Same checks as above, then staged beside the CLI files.
+          if [ -n "$DESKTOP_SUMS_SHA256" ]; then
+            mkdir desktop
+            aws s3 cp "${src}/desktop/SHA256SUMS" desktop/SHA256SUMS --only-show-errors
+            got="$(sha256sum desktop/SHA256SUMS | cut -d' ' -f1)"
+            if [ "$got" != "$DESKTOP_SUMS_SHA256" ]; then
+              echo "::error::set ${SET_KEY} desktop SHA256SUMS is ${got}, not the recorded ${DESKTOP_SUMS_SHA256}; refusing to publish it"
+              exit 1
+            fi
+            mapfile -t files < <(sed 's/^[0-9a-f]*  //' desktop/SHA256SUMS)
+            for file in "${files[@]}"; do
+              case "$file" in
+                *..*|/*|*[!A-Za-z0-9._/-]*) echo "::error::unsafe path in the desktop set: $file"; exit 1 ;;
+                MISSING|PACKAGE_SHA256|VERSION|SOURCE_SHA|connect-desktop-*/*) ;;
+                *) echo "::error::the desktop set may only carry connect-desktop-* artifacts, not $file"; exit 1 ;;
+              esac
+            done
+            for file in "${files[@]}"; do
+              mkdir -p "desktop/$(dirname "$file")"
+              aws s3 cp "${src}/desktop/${file}" "desktop/${file}" --only-show-errors
+            done
+            ( cd desktop && sha256sum --check --strict SHA256SUMS )
+            for label in "VERSION:$VERSION" "SOURCE_SHA:$SOURCE_SHA"; do
+              if [ "$(cat "desktop/${label%%:*}")" != "${label#*:}" ]; then
+                echo "::error::desktop set ${SET_KEY} was prepared for ${label%%:*} $(cat "desktop/${label%%:*}"), not ${label#*:}; refusing to relabel it"
+                exit 1
+              fi
+            done
+            for dir in desktop/connect-desktop-*/; do
+              [ -d "$dir" ] || continue
+              name="$(basename "$dir")"
+              if [ -e "set/${name}" ]; then
+                echo "::error::set ${SET_KEY} carries ${name} in both the CLI and the desktop set"
+                exit 1
+              fi
+              cp -R "$dir" "set/${name}"
+            done
+          fi
           has() { test -n "$(ls "set/$1" 2>/dev/null)"; }
           present=''
           if has connect-desktop-macos-signed; then present="$present macos"; fi

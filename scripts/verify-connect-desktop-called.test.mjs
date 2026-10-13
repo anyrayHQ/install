@@ -90,12 +90,14 @@ describe('prepare and publish modes', () => {
     assert.match(build, /id: pkg\n\s+if: \$\{\{ inputs\.mode != 'prepare' \}\}/);
   });
 
-  test('prepare stores the set (MISSING always written, SHA256SUMS last) and publishes nothing', () => {
+  test('prepare stores the CLI set (SHA256SUMS last), then the desktop set with MISSING, and publishes nothing', () => {
     const store = job(caller, 'store-set');
     assert.match(store, /inputs\.mode == 'prepare'/);
-    assert.match(store, /MACOS_OK: \$\{\{ needs\.desktop\.outputs\.macos \}\}/);
-    assert.match(store, /printf '%b' "\$missing" > set\/MISSING/);
-    assert.ok(store.indexOf('set/SHA256SUMS "${set_prefix}/SHA256SUMS"') > store.indexOf('set/MISSING "${set_prefix}/MISSING"'));
+    assert.ok(store.indexOf('set/SHA256SUMS "${set_prefix}/SHA256SUMS"') > store.indexOf('set/SOURCE_SHA "${set_prefix}/SOURCE_SHA"'));
+    const desktop = job(caller, 'store-desktop');
+    assert.match(desktop, /MACOS_OK: \$\{\{ needs\.desktop\.outputs\.macos \}\}/);
+    assert.match(desktop, /: > desktop\/MISSING/);
+    assert.ok(desktop.indexOf('desktop/SHA256SUMS "${set_prefix}/SHA256SUMS"') > desktop.indexOf('for file in MISSING PACKAGE_SHA256 VERSION SOURCE_SHA'));
     assert.match(job(caller, 'release'), /inputs\.mode == 'release' && needs\.build\.result == 'success'/);
   });
 

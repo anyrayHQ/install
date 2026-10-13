@@ -150,10 +150,10 @@ describe('the CLI set is stored without waiting for the desktop', () => {
 });
 
 describe('store-desktop', () => {
-  test('runs in prepare after the desktop call and the CLI set, whatever the desktop outcome', () => {
+  test('runs in prepare after the desktop call and the CLI set, whatever the desktop outcome, unless cancelled', () => {
     const store = job('store-desktop');
     assert.match(store, /needs: \[signing-preflight, build, store-set, desktop\]/);
-    assert.match(store, /always\(\) && inputs\.mode == 'prepare' && needs\.store-set\.result == 'success' && needs\.desktop\.result != 'skipped'/);
+    assert.match(store, /!cancelled\(\) && inputs\.mode == 'prepare' && needs\.store-set\.result == 'success' && needs\.desktop\.result != 'skipped'/);
     for (const os of ['macos', 'windows', 'linux']) {
       assert.match(store, new RegExp(`${os.toUpperCase()}_OK: \\$\\{\\{ needs\\.desktop\\.outputs\\.${os} \\}\\}`));
     }

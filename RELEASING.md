@@ -670,13 +670,7 @@ builds use toolchain 1.98.0 and the checked-in Cargo lockfile. The Tauri launche
 resolves Cargo through rustup, prepends that toolchain directory to the child
 PATH, and checks Cargo/rustc versions before building or bundling; changing the
 rustup default alone does not override a runner-installed standalone Cargo.
-Compiled public crates are cached between runs with GitHub's own cache actions,
-keyed on the OS, target, toolchain and the registry entries of `Cargo.lock` (so the
-tray's version bump keeps the key), and written only by this workflow on `main`.
-The tray's own Cargo build output and its source are never cached or uploaded in
-this public repository: `scripts/desktop-rust-cache.mjs prune` removes the tray's
-output before every save and, if any is left, deletes `target/` and fails, so the
-save never runs. Intermediate
+Source and Cargo build output are not cached or uploaded in this public repository. Intermediate
 artifacts last seven days to allow delayed jobs and retries; the final rehearsal
 artifact lasts 14 days.
 Artifact uploads skip redundant compression of installers and binary archives.

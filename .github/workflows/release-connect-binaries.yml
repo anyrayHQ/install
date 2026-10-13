@@ -1595,7 +1595,7 @@ jobs:
   # the CLI before this lands. An OS that did not verify is listed in MISSING.
   store-desktop:
     needs: [signing-preflight, build, store-set, desktop]
-    if: ${{ always() && inputs.mode == 'prepare' && needs.store-set.result == 'success' && needs.desktop.result != 'skipped' }}
+    if: ${{ !cancelled() && inputs.mode == 'prepare' && needs.store-set.result == 'success' && needs.desktop.result != 'skipped' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:

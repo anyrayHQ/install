@@ -423,22 +423,6 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      # Compiled public crates from the last main run, keyed on the OS, target, toolchain and
-      # Cargo.lock's registry entries (scripts/desktop-rust-cache.mjs). Restored as build input,
-      # so it carries this workflow's trust: only this workflow writes it, from main, pruned.
-      - name: Key the Rust dependency cache
-        id: rust-cache-key
-        run: node scripts/desktop-rust-cache.mjs key private-source/connect-tray/src-tauri/Cargo.lock
-      - name: Restore the Rust dependency cache
-        id: rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            private-source/connect-tray/src-tauri/target
-          key: ${{ steps.rust-cache-key.outputs.key }}
-          restore-keys: ${{ steps.rust-cache-key.outputs.prefix }}
 
       - name: Build the unsigned universal Tauri app bundle
         env:
@@ -498,21 +482,6 @@ jobs:
           name: connect-desktop-macos-unsigned
           path: out/connect-desktop-unsigned.zip out/pkg-scripts/preinstall out/pkg-scripts/postinstall out/pkg-scripts/uninstall.sh out/pkg-scripts/uninstaller-postinstall out/pkg-scripts/uninstaller-distribution.xml out/pkg-scripts/uninstaller-welcome.html out/pkg-scripts/uninstaller-conclusion.html
           if-no-files-found: error
-
-      # This repo's Actions cache is public: the prune removes the private tray's own build
-      # output and fails (emptying target/) if any is left, so the save below never runs then.
-      - name: Keep the private tray build out of the dependency cache
-        if: ${{ always() }}
-        run: node scripts/desktop-rust-cache.mjs prune private-source/connect-tray/src-tauri/target
-      - name: Save the Rust dependency cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            private-source/connect-tray/src-tauri/target
-          key: ${{ steps.rust-cache-key.outputs.key }}
 
   sign-macos:
     needs: [preflight, build-macos-unsigned, provision-mac]
@@ -1555,22 +1524,6 @@ jobs:
           rustup default "$env:RUST_TOOLCHAIN"
           rustup target add $env:TARGET_TRIPLE
 
-      # Compiled public crates from the last main run, keyed on the OS, target, toolchain and
-      # Cargo.lock's registry entries (scripts/desktop-rust-cache.mjs). Restored as build input,
-      # so it carries this workflow's trust: only this workflow writes it, from main, pruned.
-      - name: Key the Rust dependency cache
-        id: rust-cache-key
-        run: node scripts/desktop-rust-cache.mjs key private-source/connect-tray/src-tauri/Cargo.lock
-      - name: Restore the Rust dependency cache
-        id: rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            private-source/connect-tray/src-tauri/target
-          key: ${{ steps.rust-cache-key.outputs.key }}
-          restore-keys: ${{ steps.rust-cache-key.outputs.prefix }}
 
       - name: Compile the unsigned Windows app executable
         shell: pwsh
@@ -1602,21 +1555,6 @@ jobs:
           name: connect-desktop-windows-inner-unsigned
           path: out/*.exe
           if-no-files-found: error
-
-      # This repo's Actions cache is public: the prune removes the private tray's own build
-      # output and fails (emptying target/) if any is left, so the save below never runs then.
-      - name: Keep the private tray build out of the dependency cache
-        if: ${{ always() }}
-        run: node scripts/desktop-rust-cache.mjs prune private-source/connect-tray/src-tauri/target
-      - name: Save the Rust dependency cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            private-source/connect-tray/src-tauri/target
-          key: ${{ steps.rust-cache-key.outputs.key }}
 
   sign-windows-inner:
     needs: [preflight, build-windows-unsigned]
@@ -2350,22 +2288,6 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
           rustup default "$RUST_TOOLCHAIN"
           rustup target add "$TARGET_TRIPLE"
-      # Compiled public crates from the last main run, keyed on the OS, target, toolchain and
-      # Cargo.lock's registry entries (scripts/desktop-rust-cache.mjs). Restored as build input,
-      # so it carries this workflow's trust: only this workflow writes it, from main, pruned.
-      - name: Key the Rust dependency cache
-        id: rust-cache-key
-        run: node scripts/desktop-rust-cache.mjs key private-source/connect-tray/src-tauri/Cargo.lock
-      - name: Restore the Rust dependency cache
-        id: rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            private-source/connect-tray/src-tauri/target
-          key: ${{ steps.rust-cache-key.outputs.key }}
-          restore-keys: ${{ steps.rust-cache-key.outputs.prefix }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         if: ${{ !inputs.reuse_engines }}
         with:
@@ -2458,21 +2380,6 @@ jobs:
           name: connect-desktop-linux-unsigned
           path: out/
           if-no-files-found: error
-
-      # This repo's Actions cache is public: the prune removes the private tray's own build
-      # output and fails (emptying target/) if any is left, so the save below never runs then.
-      - name: Keep the private tray build out of the dependency cache
-        if: ${{ always() }}
-        run: node scripts/desktop-rust-cache.mjs prune private-source/connect-tray/src-tauri/target
-      - name: Save the Rust dependency cache
-        if: ${{ github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            private-source/connect-tray/src-tauri/target
-          key: ${{ steps.rust-cache-key.outputs.key }}
 
   sign-linux-artifacts:
     needs: build-linux-unsigned

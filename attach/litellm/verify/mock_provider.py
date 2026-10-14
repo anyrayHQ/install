@@ -17,7 +17,7 @@ class Handler(BaseHTTPRequestHandler):
             "id": "chatcmpl-mock",
             "object": "chat.completion",
             "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop", "index": 0}],
-            "model": body.get("model", "gpt-4o"),
+            "model": body.get("model", "gpt-6.1-sol"),
             "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
         }).encode()
         self.send_response(200)

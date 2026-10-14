@@ -58,7 +58,7 @@ systemctl enable --now docker
 # ---- 3. Deployment settings from instance metadata --------------------------
 DEPLOYMENT_TOKEN="$(md instance/attributes/anyray-deployment-token)"
 IMAGE_TAG="$(md instance/attributes/anyray-image-tag policy-stable)"
-DEFAULT_MODEL="$(md instance/attributes/anyray-default-model anthropic/claude-sonnet-4-5)"
+DEFAULT_MODEL="$(md instance/attributes/anyray-default-model anthropic/claude-sonnet-5-5)"
 DEPLOY_GENERATION="$(md instance/attributes/anyray-deploy-generation legacy)"
 EXTERNAL_IP="$(md instance/network-interfaces/0/access-configs/0/external-ip)"
 if ! printf '%s' "$DEPLOYMENT_TOKEN" | grep -Eq '^adt_[A-Za-z0-9_-]+$'; then

@@ -58,7 +58,7 @@ export DEPLOYMENT_TOKEN="adt_..."        # from app.anyray.ai → Deployments
 | `NODE_COUNT` | no | `3` | Initial node pool size, and the cluster autoscaler floor. |
 | `NODE_MAX_COUNT` | no | `6` | Cluster autoscaler ceiling. |
 | `IMAGE_TAG` | no | template default | One-click accepts only the chart's coordinated release pin or `policy-stable`. |
-| `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-4-5` | Target for the `anyray-default` model alias. |
+| `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-5-5` | Target for the `anyray-default` model alias. |
 
 ## What you get
 

@@ -142,7 +142,7 @@ Parameters:
       change, and no service is replaced.
   DefaultModel:
     Type: String
-    Default: 'anthropic/claude-sonnet-4-5'
+    Default: 'anthropic/claude-sonnet-5-5'
     Description: >-
       Model the `anyray-default` routing sentinel resolves to. Set it to a model
       your configured provider serves (a bare model is read under `anthropic`).

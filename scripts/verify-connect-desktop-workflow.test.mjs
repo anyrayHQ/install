@@ -233,9 +233,18 @@ describe('desktop release workflow safety contract', () => {
     assert.match(verify, /= '\.\/Applications\/Anyray Connect\.app'/);
     assert.match(verify, /connect-desktop-readme\.html/);
     assert.match(verify, /PKG contains no Installer readme/);
-    assert.match(verify, /string\(\/installer-gui-script\/domains\/@enable_localSystem\)/);
-    assert.match(verify, /string\(\/installer-gui-script\/domains\/@enable_anywhere\)/);
-    assert.match(verify, /string\(\/installer-gui-script\/domains\/@enable_currentUserHome\)/);
+    assert.match(
+      verify,
+      /test "\$\(xmllint --xpath 'string\(\/installer-gui-script\/domains\/@enable_localSystem\)' "\$distribution"\)" = true\n/
+    );
+    assert.match(
+      verify,
+      /test "\$\(xmllint --xpath 'string\(\/installer-gui-script\/domains\/@enable_anywhere\)' "\$distribution"\)" = false\n/
+    );
+    assert.match(
+      verify,
+      /test "\$\(xmllint --xpath 'string\(\/installer-gui-script\/domains\/@enable_currentUserHome\)' "\$distribution"\)" = false\n/
+    );
     assert.match(
       verify,
       /If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent\./

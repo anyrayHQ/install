@@ -786,6 +786,7 @@ jobs:
               '  <title>Anyray Connect</title>' \
               '  <readme file="connect-desktop-readme.html" mime-type="text/html"/>' \
               '  <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>' \
+              '  <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>' \
               '  <choices-outline>' \
               '    <line choice="default">' \
               '      <line choice="ai.anyray.connect-tray"/>' \
@@ -934,6 +935,10 @@ jobs:
           test -f "$distribution"
           test "$(xmllint --xpath 'string(/installer-gui-script/readme/@file)' "$distribution")" \
             = 'connect-desktop-readme.html'
+          # One allowed domain makes Installer skip the Destination Select step.
+          test "$(xmllint --xpath 'string(/installer-gui-script/domains/@enable_localSystem)' "$distribution")" = true
+          test "$(xmllint --xpath 'string(/installer-gui-script/domains/@enable_anywhere)' "$distribution")" = false
+          test "$(xmllint --xpath 'string(/installer-gui-script/domains/@enable_currentUserHome)' "$distribution")" = false
           readme="$(find "$expanded_pkg" -type f -name connect-desktop-readme.html -print -quit)"
           [ -n "$readme" ] || { echo '::error::PKG contains no Installer readme'; exit 1; }
           grep -Fq \

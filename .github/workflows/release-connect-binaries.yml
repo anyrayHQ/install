@@ -502,8 +502,9 @@ jobs:
   # below still check the Apple secrets, but `signing-preflight` has already
   # failed the run if any is missing, so on a real release they cannot be false
   # and an unsigned binary cannot pass through.
-  # Allocate a macOS signing runner ON DEMAND: create the MAC_ARM CodeBuild
-  # fleet + ephemeral runner project, with teardown-mac removing the runner.
+  # Use the on-demand Mac fleet by default, or the persistent signing host with
+  # INSTALL_MAC_RUNNER=ec2 (RELEASING.md). The fleet path creates the MAC_ARM fleet
+  # + ephemeral runner project, with teardown-mac removing the runner.
   # Runs on the Linux runner and assumes a scoped GitHub-OIDC role to drive the
   # fleet lifecycle (scripts/mac-fleet.sh).
   #
@@ -519,13 +520,24 @@ jobs:
     permissions:
       contents: read
       id-token: write # assume the fleet-lifecycle role via OIDC
+    outputs:
+      # codebuild (the per-release fleet, the default) or ec2 (the persistent signing
+      # host). Chosen once per run; every Mac job and teardown-mac read it from here.
+      mac_runner: ${{ steps.mac-runner.outputs.mac_runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      - name: Choose the Mac runner (INSTALL_MAC_RUNNER, RELEASING.md)
+        id: mac-runner
+        env:
+          INSTALL_MAC_RUNNER: ${{ vars.INSTALL_MAC_RUNNER }}
+        run: ./scripts/mac-runner.sh select
+      - if: steps.mac-runner.outputs.mac_runner == 'codebuild'
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
           role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
           aws-region: eu-central-1
-      - run: ./scripts/mac-fleet.sh up
+      - if: steps.mac-runner.outputs.mac_runner == 'codebuild'
+        run: ./scripts/mac-fleet.sh up
 
   # Developer ID-signs + notarizes the two darwin binaries and the universal
   # macOS installer on the on-demand Mac
@@ -534,11 +546,14 @@ jobs:
   # produce a signature that verifies but won't launch; proven by E2E).
   sign-macos:
     needs: [build, provision-mac]
-    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
     timeout-minutes: 40
     permissions:
       contents: read
       id-token: write # assume the CI-artifacts role for the S3 handoff
+    outputs:
+      darwin_manifest: ${{ steps.digests.outputs.darwin_manifest }}
+      pkg_manifest: ${{ steps.digests.outputs.pkg_manifest }}
     env:
       VERSION: ${{ needs.build.outputs.version }}
       # GitHub Actions can't read `secrets.*` in a step `if:` — map the secrets
@@ -551,11 +566,23 @@ jobs:
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
       APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
     steps:
+      - name: Refuse unless the host's trust gate ran (persistent Mac only)
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
+        run: |
+          set -euo pipefail
+          [ "$MAC_RUNNER" = ec2 ] || exit 0
+          test -f "$RUNNER_TEMP/.trust-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" || {
+            echo '::error::the job-started trust gate did not run on this host (RELEASING.md, The persistent macOS signing host)'
+            exit 1
+          }
       # The S3 handoff below is a LOCAL composite action, so the repo must be
       # on disk before it can be resolved.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            scripts/artifact-digest.sh
           sparse-checkout-cone-mode: false
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
@@ -804,7 +831,7 @@ jobs:
           rm -rf "$apple_ca_dir"
           SYSTEM_ROOT_KEYCHAIN='/System/Library/Keychains/SystemRootCertificates.keychain'
           test -r "$SYSTEM_ROOT_KEYCHAIN"
-          printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/signing-cert.p12"
+          ( umask 077; printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/signing-cert.p12" )
           security import "$RUNNER_TEMP/signing-cert.p12" -k "$KEYCHAIN" -f pkcs12 \
             -P "$APPLE_SIGNING_CERT_PASSWORD" -A -T /usr/bin/codesign
           rm -f "$RUNNER_TEMP/signing-cert.p12"
@@ -846,8 +873,7 @@ jobs:
           PLIST
           # Artifact transfer strips file modes — S3 stores bytes, not the
           # executable bit, exactly as actions/upload-artifact v4 did before it.
-          # The post-sign smoke run below would otherwise die with "Permission
-          # denied". Harmless for the published assets: both consumers
+          # Restore the executable bit before signing. Both consumers
           # (connect.sh, selfUpdate.ts) chmod after download.
           chmod +x out/anyray-connect-darwin-*
           for bin in out/anyray-connect-darwin-*; do
@@ -855,12 +881,6 @@ jobs:
               --entitlements "$RUNNER_TEMP/entitlements.plist" \
               --identifier ai.anyray.connect --sign "$IDENTITY" "$bin"
             codesign --verify --strict --verbose=2 "$bin"
-            # The signed binary must still RUN — a signature that verifies but
-            # aborts at launch is exactly the failure the entitlement fixes.
-            # Only the arm64 slice can execute on the arm64 runner.
-            case "$bin" in
-              *darwin-arm64) "$bin" --help > /dev/null ;;
-            esac
           done
 
           root="$RUNNER_TEMP/anyray-connect-pkgroot"
@@ -869,8 +889,7 @@ jobs:
             --entitlements "$RUNNER_TEMP/entitlements.plist" \
             --identifier ai.anyray.connect --sign "$IDENTITY" "$universal_connect"
           codesign --verify --strict --verbose=2 "$universal_connect"
-          # The signed universal binary must still run on this arm64 runner.
-          "$universal_connect" --version > /dev/null
+          # The launch check runs in verify-macos-launch, so build output never executes in the job holding the Apple material.
 
       - name: Prepare the App Store Connect API key
         # Both notarization steps consume this file. Gate its creation on the
@@ -880,8 +899,7 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          printf '%s' "$APPLE_NOTARY_KEY" \
-            | base64 -d > "$RUNNER_TEMP/notary-key.p8"
+          ( umask 077; printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/notary-key.p8" )
           test -s "$RUNNER_TEMP/notary-key.p8"
 
       - name: Notarize the darwin binaries
@@ -935,8 +953,7 @@ jobs:
           # password only in a 0600 file between steps; never put it in output.
           test -f "$KEYCHAIN_PASSWORD_FILE"
           KEYCHAIN_PASSWORD="$(cat "$KEYCHAIN_PASSWORD_FILE")"
-          printf '%s' "$APPLE_INSTALLER_CERT_P12" \
-            | base64 -d > "$RUNNER_TEMP/installer-cert.p12"
+          ( umask 077; printf '%s' "$APPLE_INSTALLER_CERT_P12" | base64 -d > "$RUNNER_TEMP/installer-cert.p12" )
           security import "$RUNNER_TEMP/installer-cert.p12" \
             -k "$KEYCHAIN" -f pkcs12 \
             -P "$APPLE_INSTALLER_CERT_PASSWORD" -A -T /usr/bin/productsign
@@ -1003,6 +1020,12 @@ jobs:
             security delete-keychain "$RUNNER_TEMP/anyray-signing.keychain-db"
           fi
 
+      - name: Record the digests of the signed outputs
+        id: digests
+        run: |
+          ./scripts/artifact-digest.sh emit darwin_manifest out/anyray-connect-darwin-*
+          ./scripts/artifact-digest.sh emit pkg_manifest out/anyray-connect.pkg
+
       - uses: ./.github/actions/s3-artifact-upload
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
@@ -1021,6 +1044,72 @@ jobs:
           path: out/anyray-connect.pkg
           if-no-files-found: error
 
+  # Launches the signed darwin binaries. Separate from sign-macos so build output never
+  # executes in the job that holds the Apple signing material; on the persistent host it
+  # runs as the unprivileged build account (RELEASING.md, ANY-1405).
+  verify-macos-launch:
+    needs: [provision-mac, sign-macos]
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac-build"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # assume the CI-artifacts role for the S3 handoff
+    steps:
+      - name: Refuse unless the host's trust gate ran (persistent Mac only)
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
+        run: |
+          set -euo pipefail
+          [ "$MAC_RUNNER" = ec2 ] || exit 0
+          test -f "$RUNNER_TEMP/.trust-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" || {
+            echo '::error::the job-started trust gate did not run on this host (RELEASING.md, The persistent macOS signing host)'
+            exit 1
+          }
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: |
+            .github/actions
+            scripts/artifact-digest.sh
+          sparse-checkout-cone-mode: false
+      - name: Authenticate for the S3 artifact handoff
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ARTIFACTS_ROLE_ARN }}
+          aws-region: eu-central-1
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          name: binaries-darwin
+          path: signed
+      - uses: ./.github/actions/s3-artifact-download
+        with:
+          bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
+          name: binaries-macos-pkg
+          path: signed-pkg
+      # Launch exactly the bytes sign-macos signed: the bucket is writable, so a working
+      # binary could otherwise stand in for the check and be swapped back before release.
+      - name: Verify the signed macOS files against the signing job's digests
+        env:
+          DARWIN_MANIFEST: ${{ needs.sign-macos.outputs.darwin_manifest }}
+          PKG_MANIFEST: ${{ needs.sign-macos.outputs.pkg_manifest }}
+        run: |
+          set -euo pipefail
+          ./scripts/artifact-digest.sh verify binaries-darwin signed "$DARWIN_MANIFEST"
+          ./scripts/artifact-digest.sh verify binaries-macos-pkg signed-pkg "$PKG_MANIFEST"
+      - name: The signed binaries still launch
+        run: |
+          set -euo pipefail
+          # A signature that verifies but aborts at launch is exactly the failure the
+          # allow-jit entitlement fixes. Only the arm64 slice runs on this arm64 Mac.
+          chmod +x signed/anyray-connect-darwin-arm64
+          signed/anyray-connect-darwin-arm64 --help > /dev/null
+          expanded="$RUNNER_TEMP/anyray-connect-pkg-expanded"
+          pkgutil --expand-full signed-pkg/anyray-connect.pkg "$expanded"
+          universal="$(find "$expanded" -type f -path '*/usr/local/bin/anyray-connect' -print -quit)"
+          [ -n "$universal" ] || { echo '::error::the signed pkg carries no universal anyray-connect'; exit 1; }
+          chmod +x "$universal"
+          "$universal" --version > /dev/null
+
   # Always remove the RUNNER, even if signing failed — the webhook is the part a
   # fork actor could otherwise reach. The fleet is left in place on purpose: the
   # Mac's 24h minimum is already paid and is not refunded by deleting it, so
@@ -1028,8 +1117,9 @@ jobs:
   # the host when the window closes. Runs on the Linux runner with the same OIDC
   # lifecycle role.
   teardown-mac:
-    needs: [provision-mac, sign-macos]
-    if: ${{ always() && needs.provision-mac.result != 'skipped' }}
+    needs: [provision-mac, sign-macos, verify-macos-launch]
+    # Only explicit ec2 skips teardown; an empty choice still runs idempotent down so no fleet stays ACTIVE and billing.
+    if: ${{ always() && needs.provision-mac.result != 'skipped' && needs.provision-mac.outputs.mac_runner != 'ec2' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -1534,20 +1624,26 @@ jobs:
   # prepare: the CLI set, stored as soon as the CLI is signed. The monorepo records it for the
   # release gate while the desktop is still building; store-desktop adds the desktop after.
   store-set:
-    needs: [signing-preflight, build, sign-macos, sign-windows, package-linux]
-    if: ${{ !cancelled() && inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' }}
+    needs: [signing-preflight, build, sign-macos, verify-macos-launch, sign-windows, package-linux]
+    if: ${{ !cancelled() && inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.verify-macos-launch.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
       contents: read
       id-token: write # assume the CI-artifacts role for the S3 handoff
     env:
+      DARWIN_MANIFEST: ${{ needs.sign-macos.outputs.darwin_manifest }}
+      PKG_MANIFEST: ${{ needs.sign-macos.outputs.pkg_manifest }}
       BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
       SET_KEY: ${{ needs.signing-preflight.outputs.set_key }}
       PACKAGE_SHA256: ${{ needs.build.outputs.package_sha256 }}
       VERSION: ${{ inputs.version }}
       SOURCE_SHA: ${{ inputs.source_sha }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: scripts/artifact-digest.sh
+          sparse-checkout-cone-mode: false
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -1566,6 +1662,8 @@ jobs:
           for name in binaries-unsigned binaries-darwin binaries-macos-pkg binaries-windows linux-packages; do
             fetch "$name"
           done
+          ./scripts/artifact-digest.sh verify binaries-darwin set/binaries-darwin "$DARWIN_MANIFEST"
+          ./scripts/artifact-digest.sh verify binaries-macos-pkg set/binaries-macos-pkg "$PKG_MANIFEST"
           # The sha256 of the .tgz this run compiled; the monorepo record must match what it uploaded.
           printf '%s\n' "$PACKAGE_SHA256" > set/PACKAGE_SHA256
           # Publish refuses a set whose label is not the version and commit it was asked to ship.
@@ -1602,6 +1700,7 @@ jobs:
       contents: read
       id-token: write # assume the CI-artifacts role for the S3 handoff
     env:
+      MACOS_MANIFEST: ${{ needs.desktop.outputs.macos_manifest }}
       BUCKET: ${{ vars.CI_ARTIFACTS_BUCKET }}
       SET_KEY: ${{ needs.signing-preflight.outputs.set_key }}
       PACKAGE_SHA256: ${{ needs.build.outputs.package_sha256 }}
@@ -1611,6 +1710,10 @@ jobs:
       WINDOWS_OK: ${{ needs.desktop.outputs.windows }}
       LINUX_OK: ${{ needs.desktop.outputs.linux }}
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: scripts/artifact-digest.sh
+          sparse-checkout-cone-mode: false
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -1627,7 +1730,12 @@ jobs:
             test -n "$(ls "desktop/$1")" || { echo "::error::artifact $1 is empty"; exit 1; }
           }
           : > desktop/MISSING
-          if [ "$MACOS_OK" = true ]; then fetch connect-desktop-macos-signed; else echo macos >> desktop/MISSING; fi
+          if [ "$MACOS_OK" = true ]; then
+            fetch connect-desktop-macos-signed
+            ./scripts/artifact-digest.sh verify connect-desktop-macos-signed desktop/connect-desktop-macos-signed "$MACOS_MANIFEST"
+          else
+            echo macos >> desktop/MISSING
+          fi
           if [ "$WINDOWS_OK" = true ]; then
             fetch connect-desktop-windows-inner-signed
             fetch connect-desktop-windows-installer-signed
@@ -1669,6 +1777,9 @@ jobs:
       contents: read
       id-token: write # assume the CI-artifacts role for the S3 handoff
     outputs:
+      darwin_manifest: ${{ steps.verify.outputs.darwin_manifest }}
+      pkg_manifest: ${{ steps.verify.outputs.pkg_manifest }}
+      desktop_macos_manifest: ${{ steps.verify.outputs.desktop_macos_manifest }}
       cli_published: ${{ steps.check.outputs.cli_published }}
       present: ${{ steps.verify.outputs.present }}
     env:
@@ -1758,6 +1869,11 @@ jobs:
               cp -R "$dir" "set/${name}"
             done
           fi
+          ./scripts/artifact-digest.sh emit darwin_manifest set/binaries-darwin/*
+          ./scripts/artifact-digest.sh emit pkg_manifest set/binaries-macos-pkg/*
+          if [ -d set/connect-desktop-macos-signed ]; then
+            ./scripts/artifact-digest.sh emit desktop_macos_manifest set/connect-desktop-macos-signed/*
+          fi
           has() { test -n "$(ls "set/$1" 2>/dev/null)"; }
           present=''
           if has connect-desktop-macos-signed; then present="$present macos"; fi
@@ -1800,8 +1916,8 @@ jobs:
           fi
 
   release:
-    needs: [build, sign-macos, sign-windows, package-linux, load-set]
-    if: ${{ !cancelled() && (inputs.mode == 'release' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' || inputs.mode == 'publish' && needs.load-set.result == 'success' && needs.load-set.outputs.cli_published != 'true') }}
+    needs: [build, sign-macos, verify-macos-launch, sign-windows, package-linux, load-set]
+    if: ${{ !cancelled() && (inputs.mode == 'release' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.verify-macos-launch.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success' || inputs.mode == 'publish' && needs.load-set.result == 'success' && needs.load-set.outputs.cli_published != 'true') }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -1858,12 +1974,12 @@ jobs:
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-darwin
-          path: assets
+          path: signed-macos/binaries-darwin
       - uses: ./.github/actions/s3-artifact-download
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-macos-pkg
-          path: assets
+          path: signed-macos/binaries-macos-pkg
       - uses: ./.github/actions/s3-artifact-download
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
@@ -1874,6 +1990,17 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: linux-packages
           path: assets
+
+      - name: Verify the signed macOS files against the signing job's digests
+        env:
+          DARWIN_MANIFEST: ${{ inputs.mode == 'publish' && needs.load-set.outputs.darwin_manifest || inputs.mode != 'publish' && needs.sign-macos.outputs.darwin_manifest || '' }}
+          PKG_MANIFEST: ${{ inputs.mode == 'publish' && needs.load-set.outputs.pkg_manifest || inputs.mode != 'publish' && needs.sign-macos.outputs.pkg_manifest || '' }}
+        run: |
+          set -euo pipefail
+          ./scripts/artifact-digest.sh verify binaries-darwin signed-macos/binaries-darwin "$DARWIN_MANIFEST"
+          ./scripts/artifact-digest.sh verify binaries-macos-pkg signed-macos/binaries-macos-pkg "$PKG_MANIFEST"
+          cp signed-macos/binaries-darwin/* assets/
+          cp signed-macos/binaries-macos-pkg/* assets/
 
       - name: Check the complete release asset set
         run: |
@@ -2321,19 +2448,21 @@ jobs:
   # the engines `build` uploaded through the usual S3 artifact keys. It needs teardown-mac because
   # it provisions its own Mac under the same runner name.
   desktop:
-    needs: [signing-preflight, build, sign-macos, sign-windows, package-linux, load-set, release, teardown-mac]
-    if: ${{ !cancelled() && inputs.source_sha != '' && !inputs.staging && ((inputs.mode == 'release' && needs.release.result == 'success') || (inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success') || (inputs.mode == 'publish' && needs.load-set.result == 'success' && (needs.release.result == 'success' || needs.load-set.outputs.cli_published == 'true'))) }}
+    needs: [signing-preflight, provision-mac, build, sign-macos, verify-macos-launch, sign-windows, package-linux, load-set, release, teardown-mac]
+    if: ${{ !cancelled() && inputs.source_sha != '' && !inputs.staging && ((inputs.mode == 'release' && needs.release.result == 'success') || (inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.verify-macos-launch.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success') || (inputs.mode == 'publish' && needs.load-set.result == 'success' && (needs.release.result == 'success' || needs.load-set.outputs.cli_published == 'true'))) }}
     permissions:
       contents: write # the versioned desktop release
       id-token: write # the S3 handoff and the Mac fleet role
     uses: ./.github/workflows/release-connect-desktop.yml
     secrets: inherit
     with:
+      macos_signed_manifest: ${{ needs.load-set.outputs.desktop_macos_manifest }}
       version: ${{ needs.build.outputs.version || inputs.version }}
       source_sha: ${{ inputs.source_sha }}
       min_version: ${{ inputs.min_version }}
       channel: stable
       dry_run: ${{ inputs.dry_run }}
       reuse_engines: true
+      mac_runner: ${{ needs.provision-mac.outputs.mac_runner }}
       mode: ${{ inputs.mode }}
       present: ${{ needs.load-set.outputs.present }}

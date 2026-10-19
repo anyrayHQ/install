@@ -140,7 +140,14 @@ describe('desktop release workflow safety contract', () => {
   test('runs every job on CodeBuild, never on a GitHub-hosted runner', () => {
     const runners = workflow.match(/runs-on: .+/g) ?? [];
     assert.ok(runners.length > 0);
+    const macRunners = ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']
+      .map((name) => job(name).match(/runs-on: .+/)[0]);
+    for (const [i, runner] of macRunners.entries()) {
+      const label = i === 1 ? 'anyray-install-mac' : 'anyray-install-mac-build';
+      assert.equal(runner, `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
+    }
     for (const runner of runners) {
+      if (macRunners.includes(runner)) continue;
       assert.match(runner, /^runs-on: codebuild-anyray-install-runner(-mac|-win|-ubuntu)?-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/);
     }
     assert.doesNotMatch(workflow, /macos-15|ubuntu-24\.04|ubuntu-latest|windows-2025/);
@@ -160,14 +167,15 @@ describe('desktop release workflow safety contract', () => {
     assert.match(job('provision-mac'), /needs: \[preflight, validate-source\]/);
     assert.match(job('build-macos-unsigned'), /needs: \[preflight, provision-mac\]/);
     for (const name of ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']) {
-      assert.match(job(name), /runs-on: codebuild-anyray-install-runner-mac-/);
+      const label = name === 'sign-macos' ? 'anyray-install-mac' : 'anyray-install-mac-build';
+      assert.equal(job(name).match(/runs-on: .+/)[0], `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
     }
     assert.match(
       job('sign-macos'),
       /needs: \[preflight, build-macos-unsigned, provision-mac\]/
     );
     assert.match(job('teardown-mac'), /needs: \[provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed\]/);
-    assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) && needs\.provision-mac\.result != 'skipped' \}\}/);
+    assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) && needs\.provision-mac\.result != 'skipped' && needs\.provision-mac\.outputs\.mac_runner != 'ec2' \}\}/);
   });
 
   test('bootstraps pinned Rust on both Windows jobs and MSVC once, in the build job', () => {

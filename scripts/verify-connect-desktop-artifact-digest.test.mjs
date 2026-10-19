@@ -308,6 +308,42 @@ test('load-set emits digests after checksum verification and desktop staging, be
   assert.match(call, /      macos_manifest:\n        description: [^\n]+\n        value: \$\{\{ jobs.sign-macos.outputs.manifest \}\}/);
 });
 
+// The launch and install checks must test the bytes the signing job signed: the bucket is
+// writable, so a working binary could otherwise be swapped in for the check and the
+// original restored before publish.
+for (const [label, getJobs, id, checks] of [
+  ['binaries', binaries, 'verify-macos-launch', [
+    ['binaries-darwin', 'signed', 'DARWIN_MANIFEST', '${{ needs.sign-macos.outputs.darwin_manifest }}'],
+    ['binaries-macos-pkg', 'signed-pkg', 'PKG_MANIFEST', '${{ needs.sign-macos.outputs.pkg_manifest }}'],
+  ]],
+  ['desktop', desktop, 'verify-macos-signed', [
+    ['connect-desktop-macos-signed', 'signed', 'MACOS_MANIFEST', '${{ needs.sign-macos.outputs.manifest }}'],
+  ]],
+]) {
+  test(`${label} ${id} verifies the signed downloads before expanding or running them`, () => {
+    const body = getJobs()[id];
+    assert.match(field(body, 'needs'), /\bsign-macos\b/);
+    const all = steps(body);
+    const downloads = all.filter((s) => field(s, 'uses', 8) === './.github/actions/s3-artifact-download');
+    assert.deepEqual(downloads.map((s) => [field(s, 'name', 10), field(s, 'path', 10)]), checks.map(([name, dir]) => [name, dir]));
+    const verify = digestStep(body);
+    assert.equal(field(verify, 'name', 8), verifyName);
+    assert.equal(all.indexOf(verify), all.indexOf(downloads.at(-1)) + 1, 'verify must come right after the last download');
+    const run = stepRun(verify);
+    for (const [name, dir, env, expected] of checks) {
+      assert.ok(run.includes(`./scripts/artifact-digest.sh verify ${name} ${dir} "$${env}"`), `${name} is not verified`);
+      assert.equal(field(verify, env, 10), expected);
+    }
+    const consumes = /\b(?:pkgutil\s+--expand\S*|tar\s+-x\S*|ditto\s+-x|open|spctl|codesign\s+--verify|xcrun\s+stapler|chmod\s+\+x)\b|--version|--help/;
+    for (const step of all.slice(0, all.indexOf(verify))) {
+      assert.doesNotMatch(stepRun(step), consumes, 'nothing may expand or run a download before it is verified');
+    }
+    assert.ok(all.slice(all.indexOf(verify) + 1).some((s) => consumes.test(stepRun(s))), 'the verified files are used after the check');
+    const checkout = all.find((s) => (field(s, 'uses', 8) ?? '').startsWith('actions/checkout@'));
+    assert.match(checkout, /\n            scripts(?:\/artifact-digest\.sh)?\n/);
+  });
+}
+
 test('desktop publish and dry-run verify the downloaded macOS directory before publication', () => {
   for (const id of ['publish', 'assemble-dry-run']) {
     const body = desktop()[id];

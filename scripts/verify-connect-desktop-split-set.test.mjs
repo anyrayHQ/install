@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -97,7 +97,9 @@ const run = (root, script, env) => {
   const output = join(root, 'github_output');
   writeFileSync(output, '');
   const cwd = join(root, 'work', String(++steps));
-  mkdirSync(cwd, { recursive: true });
+  mkdirSync(join(cwd, 'scripts'), { recursive: true });
+  // Each job sparse-checks-out the digest script it runs; give every workspace the real one.
+  copyFileSync(new URL('./artifact-digest.sh', import.meta.url), join(cwd, 'scripts/artifact-digest.sh'));
   const result = spawnSync('bash', ['-c', `aws() { node "$FAKE_AWS_JS" "$@"; }\n${script}`], {
     cwd,
     encoding: 'utf8',
@@ -142,15 +144,24 @@ const stageDesktopArtifacts = (root, oses) => {
   }
 };
 
-const storeDesktop = (root, ok) => run(root, stepScript(job('store-desktop'), 'Store the signed desktop set'), {
+// What sign-macos reports as its `manifest` output for the files it uploaded: basename=sha256,
+// sorted, comma-joined (scripts/artifact-digest.sh manifest).
+const manifestOf = (dir) => (existsSync(dir)
+  ? readdirSync(dir).sort().map((name) => `${name}=${sha256(join(dir, name))}`).join(',')
+  : '');
+
+const storeDesktop = (root, ok, env = {}) => run(root, stepScript(job('store-desktop'), 'Store the signed desktop set'), {
   BUCKET, SET_KEY, VERSION, SOURCE_SHA, PACKAGE_SHA256,
   MACOS_OK: String(ok.macos), WINDOWS_OK: String(ok.windows), LINUX_OK: String(ok.linux),
+  MACOS_MANIFEST: manifestOf(join(runPrefix(root), 'connect-desktop-macos-signed')),
+  ...env,
 });
 
 describe('the CLI set is stored without waiting for the desktop', () => {
   test('store-set needs only the CLI jobs and stores no desktop file', () => {
     const store = job('store-set').split('\n').filter((line) => !line.startsWith('  #')).join('\n');
-    assert.match(store, /needs: \[signing-preflight, build, sign-macos, sign-windows, package-linux\]/);
+    // verify-macos-launch is the CLI's own launch check of the signed darwin binaries (ANY-1405).
+    assert.match(store, /needs: \[signing-preflight, build, sign-macos, verify-macos-launch, sign-windows, package-linux\]/);
     assert.doesNotMatch(store, /needs\.desktop|connect-desktop-|MISSING/);
     assert.match(store, /inputs\.mode == 'prepare'/);
   });
@@ -203,6 +214,22 @@ describe('store-desktop', () => {
     const sums = writes.findIndex((l) => l.includes('/desktop/SHA256SUMS'));
     assert.equal(sums, writes.length - 1, `SHA256SUMS must be the last upload:\n${writes.join('\n')}`);
     assert.equal(readFileSync(join(setPrefix(root), 'desktop/MISSING'), 'utf8'), '');
+  });
+
+  test('refuses a macOS artifact that is not what sign-macos signed, and stores nothing', (t) => {
+    for (const kind of ['swapped', 'added', 'no digests']) {
+      const root = sandbox(t);
+      stageDesktopArtifacts(root, ['macos', 'linux']);
+      const signed = manifestOf(join(runPrefix(root), 'connect-desktop-macos-signed'));
+      const dir = join(runPrefix(root), 'connect-desktop-macos-signed');
+      if (kind === 'swapped') writeFileSync(join(dir, 'connect-desktop-macos-signed.bin'), 'swapped\n');
+      if (kind === 'added') writeFileSync(join(dir, 'extra.bin'), 'extra\n');
+      const result = storeDesktop(root, { macos: true, windows: false, linux: true },
+        { MACOS_MANIFEST: kind === 'no digests' ? '' : signed });
+      assert.notEqual(result.status, 0, `${kind}: store-desktop must refuse`);
+      assert.match(result.stdout + result.stderr, /::error::connect-desktop-macos-signed: /);
+      assert.equal(existsSync(join(setPrefix(root), 'desktop')), false, `${kind}: nothing may be stored`);
+    }
   });
 
   test('an OS that reported success with nothing staged fails the job instead of storing an empty dir', (t) => {
@@ -266,6 +293,12 @@ describe('load-set publishes the desktop set only when the record attests it', (
     assert.ok(staged.includes('connect-desktop-macos-signed/connect-desktop-macos-signed.bin'), staged.join('\n'));
     assert.ok(staged.includes('connect-desktop-linux-signed/connect-desktop-linux-signed.bin'), staged.join('\n'));
     assert.ok(staged.includes('binaries-unsigned/binaries-unsigned.bin'), staged.join('\n'));
+    // Publish verifies the staged signed macOS files against these, computed from the checked set.
+    const outputs = result.output.split('\n');
+    for (const [output, dir] of [['darwin_manifest', 'binaries-darwin'], ['pkg_manifest', 'binaries-macos-pkg'], ['desktop_macos_manifest', 'desktop/connect-desktop-macos-signed']]) {
+      const expected = `${output}=${manifestOf(join(setPrefix(root), dir))}`;
+      assert.ok(outputs.includes(expected), `${output} is not the checked set's digests:\n${result.output}`);
+    }
   });
 
   test('without the input a split set publishes the CLI and no desktop', (t) => {
@@ -276,6 +309,7 @@ describe('load-set publishes the desktop set only when the record attests it', (
     assert.equal(result.status, 0, result.stderr);
     assert.equal(present(result), '');
     assert.ok(!tree(runPrefix(root)).some((f) => f.startsWith('connect-desktop-')));
+    assert.doesNotMatch(result.output, /^desktop_macos_manifest=/m, 'no desktop digests without a desktop');
   });
 
   test('a combined set from before the split still publishes its desktop without the input', (t) => {
@@ -312,10 +346,7 @@ describe('load-set publishes the desktop set only when the record attests it', (
       const root = sandbox(t);
       const sums = seedCliSet(root);
       stageDesktopArtifacts(root, ['macos']);
-      const stored = run(root, stepScript(job('store-desktop'), 'Store the signed desktop set'), {
-        BUCKET, SET_KEY, VERSION, SOURCE_SHA, PACKAGE_SHA256, MACOS_OK: 'true', WINDOWS_OK: 'false', LINUX_OK: 'false',
-        [label]: value,
-      });
+      const stored = storeDesktop(root, { macos: true, windows: false, linux: false }, { [label]: value });
       assert.equal(stored.status, 0, stored.stderr);
       rmSync(runPrefix(root), { recursive: true, force: true });
       const desktopSums = sha256(join(setPrefix(root), 'desktop/SHA256SUMS'));

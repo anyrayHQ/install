@@ -1067,7 +1067,9 @@ jobs:
           }
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            scripts/artifact-digest.sh
           sparse-checkout-cone-mode: false
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
@@ -1084,6 +1086,16 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: binaries-macos-pkg
           path: signed-pkg
+      # Launch exactly the bytes sign-macos signed: the bucket is writable, so a working
+      # binary could otherwise stand in for the check and be swapped back before release.
+      - name: Verify the signed macOS files against the signing job's digests
+        env:
+          DARWIN_MANIFEST: ${{ needs.sign-macos.outputs.darwin_manifest }}
+          PKG_MANIFEST: ${{ needs.sign-macos.outputs.pkg_manifest }}
+        run: |
+          set -euo pipefail
+          ./scripts/artifact-digest.sh verify binaries-darwin signed "$DARWIN_MANIFEST"
+          ./scripts/artifact-digest.sh verify binaries-macos-pkg signed-pkg "$PKG_MANIFEST"
       - name: The signed binaries still launch
         run: |
           set -euo pipefail

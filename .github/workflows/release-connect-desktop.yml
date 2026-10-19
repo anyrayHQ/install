@@ -973,6 +973,12 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
           path: signed
+      # Check exactly the bytes sign-macos signed: the bucket is writable, so a working
+      # build could otherwise stand in for this check and be swapped back before publish.
+      - name: Verify the signed macOS files against the signing job's digests
+        env:
+          MACOS_MANIFEST: ${{ needs.sign-macos.outputs.manifest }}
+        run: ./scripts/artifact-digest.sh verify connect-desktop-macos-signed signed "$MACOS_MANIFEST"
       - name: Verify signed installation, sweep cases and uninstall
         env:
           MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}

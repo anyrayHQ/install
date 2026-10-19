@@ -9,8 +9,11 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-const SIGN_RUNS_ON = `\${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`;
-const BUILD_RUNS_ON = `\${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac-build"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`;
+// The workflow expression. The dollar sign is interpolated rather than backslash-escaped
+// (CodeQL js/useless-regexp-character-escape).
+const runsOn = (label) => `${'$'}{{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`;
+const SIGN_RUNS_ON = runsOn('anyray-install-mac');
+const BUILD_RUNS_ON = runsOn('anyray-install-mac-build');
 const WORKFLOWS = [
   'release-connect-desktop.yml',
   'release-connect-binaries.yml',

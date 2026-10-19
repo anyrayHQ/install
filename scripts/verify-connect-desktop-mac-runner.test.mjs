@@ -393,19 +393,83 @@ test('binaries teardown waits for the launch check', () => {
     ['provision-mac', 'sign-macos', 'verify-macos-launch']);
 });
 
-test('desktop ec2 verification launches the signed engine and exits before any root smoke', () => {
+test('desktop ec2 verification runs the engine then the root-smoke gate before any root smoke', () => {
   const verify = jobs(readWorkflow('release-connect-desktop.yml'))['verify-macos-signed'];
   const step = steps(verify).find((body) => field(body, 'name', 8) === 'Verify signed installation, sweep cases and uninstall');
   assert.equal(field(step, 'MAC_RUNNER', 10), '${{ needs.provision-mac.outputs.mac_runner }}');
+  assert.equal(field(step, 'CHANNEL', 10), '${{ needs.preflight.outputs.channel }}');
+  assert.equal(field(step, 'ROOT_SMOKE_ACCEPTED', 10), '${{ vars.INSTALL_MAC_ROOT_SMOKE_ACCEPTED }}');
   const run = stepRun(step);
   const block = run.match(/if \[ "\$MAC_RUNNER" = ec2 \]; then\n[\s\S]*?^fi$/m);
   assert.ok(block, 'ec2 verification block is absent');
   const throughEc2 = run.slice(0, block.index + block[0].length);
   assert.doesNotMatch(throughEc2, /\bsudo\b|trap cleanup EXIT/);
   assert.match(block[0], /test "\$\("\$updater_app\/Contents\/MacOS\/anyray-connect" --version \| head -1\)" = "anyray-connect \$VERSION"/);
-  assert.match(block[0], /::warning::root install, sweep and uninstall smoke skipped on the persistent Mac host/);
+  assert.doesNotMatch(block[0], /\bsudo\b/);
+  const launch = block[0].indexOf('"$updater_app/Contents/MacOS/anyray-connect" --version');
+  const gate = block[0].indexOf('./scripts/mac-root-smoke-gate.sh');
+  assert.ok(gate > launch && launch >= 0 && block[0].indexOf('exit 0') > gate);
   assert.match(block[0], /\n  exit 0\nfi$/);
   assert.ok(run.indexOf("installed_app='/Applications/Anyray Connect.app'") > throughEc2.length);
+});
+
+function smokeGate(channel, acceptance) {
+  const env = { PATH: process.env.PATH };
+  if (channel !== undefined) env.CHANNEL = channel;
+  if (acceptance !== undefined) env.ROOT_SMOKE_ACCEPTED = acceptance;
+  const result = spawnSync(existsSync('/bin/bash') ? '/bin/bash' : 'bash', [
+    fileURLToPath(new URL('./mac-root-smoke-gate.sh', import.meta.url)),
+  ], { encoding: 'utf8', timeout: 10_000, env });
+  return { ...result, log: result.stdout + result.stderr };
+}
+
+test('root-smoke gate allows staging with the staging warning', () => {
+  const result = smokeGate('staging');
+  assert.equal(result.status, 0, result.log);
+  assert.equal(result.stdout, '::warning::root install, sweep and uninstall smoke skipped on the persistent Mac host (staging)\n');
+  assert.equal(statSync(new URL('./mac-root-smoke-gate.sh', import.meta.url)).mode & 0o777, 0o755);
+});
+
+for (const acceptance of ['ANY-1405', 'https://github.com/anyrayHQ/install/issues/12#issuecomment-345', 'https://github.com/anyrayHQ/install/pull/12#issuecomment-345']) {
+  test(`root-smoke gate allows stable with recorded acceptance ${acceptance}`, () => {
+    const result = smokeGate('stable', acceptance);
+    assert.equal(result.status, 0, result.log);
+    assert.equal(result.stdout, `::warning::stable macOS ships without the root install smoke under the recorded acceptance ${acceptance}\n`);
+  });
+}
+
+for (const acceptance of [
+  undefined, '', 'yes', 'ANY-', 'any-1405', 'ANY-1405 ',
+  'https://github.com/evil/x/issues/1#issuecomment-2',
+  'https://github.com/anyrayHQ/install/issues/12', '::warning::x',
+]) {
+  test(`root-smoke gate refuses stable acceptance ${JSON.stringify(acceptance) ?? '<unset>'}`, () => {
+    const result = smokeGate('stable', acceptance);
+    assert.equal(result.status, 1, result.log);
+    assert.match(result.log, /::error::the stable lane needs the root install smoke/);
+    assert.match(result.log, /set INSTALL_MAC_ROOT_SMOKE_ACCEPTED to Dean's written acceptance \(RELEASING.md\) or run stable on the CodeBuild fleet/);
+    if (acceptance) assert.ok(!result.log.includes(acceptance), 'rejected acceptance was printed');
+  });
+}
+
+test('root-smoke gate refuses unknown, empty and unset channels', () => {
+  for (const channel of ['unknown', '', undefined]) {
+    const result = smokeGate(channel, 'ANY-1405');
+    assert.equal(result.status, 1, result.log);
+    assert.match(result.log, /::error::/);
+  }
+});
+
+test('the runbook states the stable root-smoke acceptance and the fleet fallback', () => {
+  const section = persistentRunbook();
+  assert.match(section, /root install, sweep and uninstall smoke does not run on this host/);
+  assert.match(section, /no CI code as root/);
+  assert.match(section, /staging proceeds with a warning/);
+  assert.match(section, /stable FAILS the macOS desktop leg on ec2 unless/);
+  assert.match(section, /INSTALL_MAC_ROOT_SMOKE_ACCEPTED[\s\S]*Jira key or the GitHub comment URL[\s\S]*Dean's written acceptance/);
+  assert.ok(section.includes('gh variable set INSTALL_MAC_ROOT_SMOKE_ACCEPTED -R anyrayHQ/install --body <ANY-key or comment URL>'));
+  assert.ok(section.includes('gh variable delete INSTALL_MAC_ROOT_SMOKE_ACCEPTED -R anyrayHQ/install'));
+  assert.match(section, /without it[\s\S]*stable macOS[\s\S]*CodeBuild fleet[\s\S]*unset `INSTALL_MAC_RUNNER` for that release/i);
 });
 
 test('rustup detection uses the build home and restores its PATH entry', (t) => {
@@ -537,6 +601,38 @@ test('the runbook requires both probe rounds before enabling ec2', () => {
   assert.match(releasing, /First round,[\s\S]*all workflows of this repo[\s\S]*proves the hook/);
   assert.ok(releasing.includes('::error::GITHUB_EVENT_NAME check failed'), 'probe must prove the real push event is checked');
   assert.match(releasing, /Second round,[\s\S]*restrict[\s\S]*proves the group[\s\S]*queued with no runner[\s\S]*cancel[\s\S]*delete the branch/);
+});
+
+test('the third probe replaces a listed workflow at a non-main ref before enabling ec2', () => {
+  const releasing = persistentRunbook();
+  const third = releasing.indexOf('Third round,');
+  const second = releasing.indexOf('Second round,');
+  const enable = releasing.indexOf('gh variable set INSTALL_MAC_RUNNER');
+  assert.ok(third > second && second >= 0 && enable > third, 'the third probe round must precede enabling ec2');
+  const round = releasing.slice(third, enable);
+  assert.match(round, /REPLACE the whole content of\s+`\.github\/workflows\/release-fleetd-installer.yml`/);
+  assert.match(round, /nothing else in that workflow runs/);
+  const block = round.match(/```yaml\n([\s\S]*?)\n```/);
+  assert.equal(block?.[1], `name: Probe the runner group's ref pinning (delete after use)
+on:
+  push:
+    branches: [probe/any-1405-ref]
+permissions:
+  contents: read
+jobs:
+  build-macos:
+    runs-on: [self-hosted, macOS, ARM64, anyray-install-mac]
+    timeout-minutes: 5
+    steps:
+      - run: /usr/bin/touch /tmp/hook-env-probe-ref`);
+  assert.match(round, /stays queued with no runner/);
+  assert.match(round, /cancel the run[\s\S]*ls -l \/tmp\/hook-env-probe-ref[\s\S]*prints nothing[\s\S]*delete the branch/);
+  assert.match(round, /fails at "job started hook"[\s\S]*non-main ref[\s\S]*stop, fix the entry[\s\S]*@refs\/heads\/main[\s\S]*@main[\s\S]*repeat rounds two and three/);
+  assert.match(releasing.slice(enable), /staging dry run[\s\S]*still admits main/);
+  // The gate sentence right before the switch names all three rounds, not an older count.
+  const gate = releasing.lastIndexOf('Only after', enable);
+  assert.ok(gate > third, 'the switch must be gated by a sentence after round three');
+  assert.equal(releasing.slice(gate, releasing.indexOf('\n', gate)), 'Only after all three rounds pass, set the repository variable:');
 });
 
 test('the runbook checks probe sentinels and proves invocation through the hook symlink', () => {
@@ -737,7 +833,7 @@ test('the runbook dry run proves the runner roles, notices and root-smoke skip',
   const section = persistentRunbook();
   assert.match(section, /build-macos-unsigned` and `verify-macos-signed` on\s+`anyray-install-mac-build`, and `sign-macos` on `anyray-install-mac`/);
   assert.ok(section.includes('trust gate passed (<role> job-started)'), 'dry run must prove the hook notices');
-  assert.ok(section.includes('root-smoke-skipped warning'), 'dry run must prove root smoke was skipped');
+  assert.ok(section.includes('root install, sweep and uninstall smoke skipped on the persistent Mac host (staging)'), 'dry run must prove the staging root-smoke warning');
   assert.match(section, /teardown-mac is skipped/);
 });
 

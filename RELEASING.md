@@ -571,6 +571,9 @@ PR Mac runner.
 
 **Security posture.**
 
+- Signed macOS outputs are pinned by digest from the signing job to every consumer, so the
+  build account cannot swap them after signing; the Windows and Linux signed outputs share the same bucket and are not pinned yet (follow-up).
+
 Two non-admin accounts share one host. Neither has sudo; the admin operator
 account is separate. One runner process per account runs one job at a time per
 role. The workflows also share the `anyray-install-mac-release` concurrency group;
@@ -605,10 +608,18 @@ Reset it weekly and after any dependency incident using the procedure below.
 The follow-up that removes this is an ephemeral build account and runner per job.
 
 The root install, sweep and uninstall smoke does not run on this host: it would
-give build output root on the box holding the signing account. Persistent-host
-verification keeps the signature, notarization staple, Gatekeeper assessment,
+give build output root on the box holding the signing account. The security choice
+stays: no CI code as root. Persistent-host verification keeps the signature,
+notarization staple, Gatekeeper assessment,
 pkg structure, payload and uninstaller structure checks, then launches the signed
-engine once as the build account. The CodeBuild fleet path still runs the full
+engine once as the build account. On ec2, staging proceeds with a warning;
+stable FAILS the macOS desktop leg on ec2 unless the repository variable
+`INSTALL_MAC_ROOT_SMOKE_ACCEPTED` holds the Jira key or the GitHub comment URL of
+Dean's written acceptance. To set it, use
+`gh variable set INSTALL_MAC_ROOT_SMOKE_ACCEPTED -R anyrayHQ/install --body <ANY-key or comment URL>`.
+Remove it with `gh variable delete INSTALL_MAC_ROOT_SMOKE_ACCEPTED -R anyrayHQ/install`.
+Without it, stable macOS keeps running on the CodeBuild fleet:
+unset `INSTALL_MAC_RUNNER` for that release. The CodeBuild fleet path still runs the full
 root smoke. A scheduled root-volume reset was rejected: root can copy the runner registration credentials,
 and a reset does not revoke them. The follow-up is a disposable macOS VM per smoke.
 
@@ -696,6 +707,8 @@ codesign --version
 productsign --help
 xmllint --version
 aws --version
+python3 --version                                   # safe-unzip.sh and fleetd's build use it
+test -x /usr/bin/zipinfo && test -x /usr/bin/sandbox-exec && test -x /usr/bin/ditto   # safe-unzip.sh
 sudo -iu ec2-user brew install jq
 touch /System/Volumes/Data/.fseventsd/no_log && killall fseventsd
 ```
@@ -933,18 +946,46 @@ Second round, restrict the group to the three release workflows at main again
 and push the probe branch again. This proves the group. Both jobs must stay
 queued with no runner; cancel the run, then delete the branch.
 
-Only after both rounds pass, set the repository variable:
+Third round, on a branch `probe/any-1405-ref`, REPLACE the whole content of
+`.github/workflows/release-fleetd-installer.yml` (a listed workflow path) with this
+single probe job, so nothing else in that workflow runs:
+
+```yaml
+name: Probe the runner group's ref pinning (delete after use)
+on:
+  push:
+    branches: [probe/any-1405-ref]
+permissions:
+  contents: read
+jobs:
+  build-macos:
+    runs-on: [self-hosted, macOS, ARM64, anyray-install-mac]
+    timeout-minutes: 5
+    steps:
+      - run: /usr/bin/touch /tmp/hook-env-probe-ref
+```
+
+Expected: the job stays queued with no runner (the group admits that file only at
+main); cancel the run, confirm `ls -l /tmp/hook-env-probe-ref` prints nothing on
+the host, then delete the branch. If the job instead fails at "job started hook",
+the group's workflow entry matched a non-main ref: stop, fix the entry
+(`@refs/heads/main` vs `@main`), and repeat rounds two and three.
+
+Only after all three rounds pass, set the repository variable:
 
 ```bash
 gh variable set INSTALL_MAC_RUNNER -R anyrayHQ/install --body ec2
 ```
 
+The staging dry run after the switch proves the entry still admits main.
 Dispatch a staging desktop dry run from main with an explicit version and
 monorepo SHA. It passes when provision-mac chooses `ec2`, with
 `build-macos-unsigned` and `verify-macos-signed` on
 `anyray-install-mac-build`, and `sign-macos` on `anyray-install-mac`. Each job log
 must show the hook's `trust gate passed (<role> job-started)` notice for its role.
-`verify-macos-signed` must show the root-smoke-skipped warning, and teardown-mac is skipped.
+`verify-macos-signed` must show the staging warning:
+`root install, sweep and uninstall smoke skipped on the persistent Mac host (staging)`.
+On that run, teardown-mac is skipped.
 After a week of releases, CloudTrail must show no `CreateFleet` for
 `anyray-install-mac-fleet`.
 

@@ -600,8 +600,9 @@ aws ec2 allocate-hosts --region us-east-2 --profile team6 \
   --tag-specifications 'ResourceType=dedicated-host,Tags=[{Key=Name,Value=anyray-install-mac-signing}]'
 ```
 
-`InsufficientHostCapacity` is common: try us-east-2b, then us-east-2c. The
-24-hour minimum starts at allocation. `--auto-placement off` allows only an
+`InsufficientHostCapacity` is common: try another zone, but only one where the
+`anyray-mac-runner` group's VPC has a public subnet (the subnet lookup below
+prints `None` otherwise). The 24-hour minimum starts at allocation. `--auto-placement off` allows only an
 instance launched onto that host id to land there. Set `HOST` from that output
 and `HOST_AZ` to the zone that succeeded, then launch:
 

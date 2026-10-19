@@ -502,8 +502,9 @@ jobs:
   # below still check the Apple secrets, but `signing-preflight` has already
   # failed the run if any is missing, so on a real release they cannot be false
   # and an unsigned binary cannot pass through.
-  # Allocate a macOS signing runner ON DEMAND: create the MAC_ARM CodeBuild
-  # fleet + ephemeral runner project, with teardown-mac removing the runner.
+  # Use the on-demand Mac fleet by default, or the persistent signing host with
+  # INSTALL_MAC_RUNNER=ec2 (RELEASING.md). The fleet path creates the MAC_ARM fleet
+  # + ephemeral runner project, with teardown-mac removing the runner.
   # Runs on the Linux runner and assumes a scoped GitHub-OIDC role to drive the
   # fleet lifecycle (scripts/mac-fleet.sh).
   #
@@ -519,13 +520,24 @@ jobs:
     permissions:
       contents: read
       id-token: write # assume the fleet-lifecycle role via OIDC
+    outputs:
+      # codebuild (the per-release fleet, the default) or ec2 (the persistent signing
+      # host). Chosen once per run; every Mac job and teardown-mac read it from here.
+      mac_runner: ${{ steps.mac-runner.outputs.mac_runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      - name: Choose the Mac runner (INSTALL_MAC_RUNNER, RELEASING.md)
+        id: mac-runner
+        env:
+          INSTALL_MAC_RUNNER: ${{ vars.INSTALL_MAC_RUNNER }}
+        run: ./scripts/mac-runner.sh select
+      - if: steps.mac-runner.outputs.mac_runner == 'codebuild'
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
           role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
           aws-region: eu-central-1
-      - run: ./scripts/mac-fleet.sh up
+      - if: steps.mac-runner.outputs.mac_runner == 'codebuild'
+        run: ./scripts/mac-fleet.sh up
 
   # Developer ID-signs + notarizes the two darwin binaries and the universal
   # macOS installer on the on-demand Mac
@@ -534,7 +546,7 @@ jobs:
   # produce a signature that verifies but won't launch; proven by E2E).
   sign-macos:
     needs: [build, provision-mac]
-    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
     timeout-minutes: 40
     permissions:
       contents: read
@@ -1029,7 +1041,8 @@ jobs:
   # lifecycle role.
   teardown-mac:
     needs: [provision-mac, sign-macos]
-    if: ${{ always() && needs.provision-mac.result != 'skipped' }}
+    # Only explicit ec2 skips teardown; an empty choice still runs idempotent down so no fleet stays ACTIVE and billing.
+    if: ${{ always() && needs.provision-mac.result != 'skipped' && needs.provision-mac.outputs.mac_runner != 'ec2' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:

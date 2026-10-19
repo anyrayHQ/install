@@ -34,7 +34,8 @@ CLI release.
   signed, so the desktop lane signs only `connect-tray.exe`. Run by hand, the
   desktop workflow still compiles its own engines.
 - **Its own Mac.** The called workflow provisions and tears down a Mac of its own;
-  `mac-fleet.sh up` reuses a live fleet.
+  `mac-fleet.sh up` reuses a live fleet. With `INSTALL_MAC_RUNNER=ec2`, both
+  workflows use the persistent host and nothing is provisioned.
 - **Per-OS publication.** One `publish` job runs a leg per OS in parallel, each only
   uploading its signed files to the versioned
   `connect-desktop[-staging]-v<version>-<sha12>` release (created if missing; an asset
@@ -466,12 +467,13 @@ mandatory* step.
 
 The release workflow runs on **self-hosted AWS CodeBuild runners** (org GitHub billing
 blocks GitHub-hosted runners). One persistent Linux runner project plus an
-**on-demand macOS fleet** created per release:
+**on-demand macOS fleet** created per release by default, or the persistent Mac host below:
 
 | Job | Runner | CodeBuild project (eu-central-1) |
 | --- | --- | --- |
 | build, provision-mac, sign-windows, package-linux, release, teardown-mac | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`) | `anyray-install-runner` |
 | sign-macos | **on-demand** macOS (MAC_ARM, `mac2-m2.metal`) | `anyray-install-runner-mac` (ephemeral) |
+| Mac jobs with `INSTALL_MAC_RUNNER=ec2` | self-hosted `anyray-install-mac` (EC2 `mac2.metal` Dedicated Host, us-east-2) | none |
 | desktop Linux build and smoke jobs | Ubuntu 22.04 (`aws/codebuild/standard:7.0`) | `anyray-install-runner-ubuntu` |
 
 **`sign-windows` no longer needs Windows.** jsign is a pure-Java Authenticode
@@ -489,6 +491,7 @@ uses it, but `release-fleetd-installer.yml`'s `build-windows` still does
 success or failure. `up` accepts a fleet still usable in PENDING_DELETION, so
 releases may reuse the remaining paid window. It fails if readiness takes more
 than 20 minutes. Cleanup must never be replaced with simply leaving the fleet active.
+This is the default; the persistent host below replaces it once proven.
 
 The Connect CLI, desktop, and fleetd release workflows share the
 `anyray-install-mac-release` concurrency group for their entire runs. This keeps
@@ -515,7 +518,7 @@ required because the repo is public, so a fork-PR actor can never start a runner
 anyone outside a project's filter leaves that project's jobs queued with no runner until the
 watchdog cancels them.
 
-To add a release maintainer (`gh api users/<login> --jq .id` gives the id), update both places:
+To add a release maintainer (`gh api users/<login> --jq .id` gives the id), update these project filters:
 
 1. **Ephemeral mac project:** append the id to `MAINTAINER_ACCOUNT_IDS` in `scripts/mac-fleet.sh`
    (today `0xtechdean` and `Dima-Othentic`). `mac-fleet.sh up` rewrites this webhook on every
@@ -530,12 +533,302 @@ To add a release maintainer (`gh api users/<login> --jq .id` gives the id), upda
      --query 'projects[].{name:name,filters:webhook.filterGroups}'
    ```
 
+Also update `MAINTAINER_ACCOUNT_IDS` in `scripts/mac-runner-hook.sh` to match
+`mac-fleet.sh`, and reinstall the persistent host's hooks as described below.
+
 Apple signing secrets (all required): `APPLE_SIGNING_CERT_P12` +
 `APPLE_SIGNING_CERT_PASSWORD` for the inner binaries,
 `APPLE_INSTALLER_CERT_P12` + `APPLE_INSTALLER_CERT_PASSWORD` for the outer
 package, and `APPLE_NOTARY_KEY` (base64 `.p8`) + `APPLE_NOTARY_KEY_ID` +
 `APPLE_NOTARY_ISSUER_ID` for notarization. (`APPLE_SIGNING_CERT_PEM` was set for
 the abandoned rcodesign path and is unused.)
+
+### The persistent macOS signing host (ANY-1405)
+
+**What and why.** The repository variable `INSTALL_MAC_RUNNER` selects the Mac
+runner in all three release workflows. `provision-mac` saves the choice once;
+every Mac job and teardown reads that output, so changing the variable during a
+run leaves that run's choice intact.
+
+| Value | Mac jobs run on | provision-mac / teardown-mac |
+| --- | --- | --- |
+| unset or empty (default) | `codebuild-anyray-install-runner-mac-<run_id>-<run_attempt>` | create and delete the fleet |
+| `codebuild` | same as unset | same as unset |
+| `ec2` | `[self-hosted, macOS, ARM64, anyray-install-mac]` | provision reports the choice; teardown is skipped |
+| anything else | nothing; provision fails loudly | teardown still runs idempotent `down` |
+
+Measured over 30 days: about 20 fleet allocations, each with a 24-hour minimum
+at $1.44/h, cost about $697 for roughly 9 minutes of Mac work per release. One
+always-on `mac2.metal` host costs $0.65/h, or $468 per 30 days on demand and about
+$393 on a 1-year no-upfront EC2 Instance Savings Plan. `mac2.metal` is not offered
+in eu-central-1; that region offers `mac2-m2.metal` at $1.052/h, about the fleet's
+cost. The signing host lives in us-east-2; the S3 handoff stays in eu-central-1.
+This host serves release signing only and is never shared with the monorepo's
+PR Mac runner.
+
+**Security posture.**
+
+- One runner process runs one job at a time. The workflows also share the
+  `anyray-install-mac-release` concurrency group; a called desktop workflow
+  already holds its caller's group.
+- Before any step runs, the job-started hook refuses anything except a
+  `workflow_dispatch` of `release-connect-binaries.yml`,
+  `release-connect-desktop.yml`, or `release-fleetd-installer.yml` at
+  `refs/heads/main` in `anyrayHQ/install` by a release maintainer. GitHub supplies
+  the job's `GITHUB_*` variables and a workflow cannot overwrite them. This repo
+  is public, so a fork pull request could otherwise name the label in its own
+  workflow. `provision-mac` also refuses `ec2` outside a main dispatch.
+- Signing material reaches the host only through job env, is decoded into
+  `$RUNNER_TEMP` and a throwaway keychain, and is deleted by the job. The runner
+  wipes `$RUNNER_TEMP` around every job, and both hooks reset the keychain search
+  list. Nothing is stored permanently on the host: no certificate in a login
+  keychain and no `notarytool store-credentials`.
+- The instance profile is SSM-only. The security group has no inbound rule,
+  there is no key pair, and operators connect through Session Manager.
+- Jobs run as `ec2-user`, which has passwordless sudo because the signed-install
+  smoke needs root. The host's trust boundary is code on install main plus the
+  monorepo commit being released. The fleet had the same residual risk inside
+  its 24-hour reuse window.
+
+**Allocate and launch.** Use region us-east-2 and profile `team6`. Discover ids
+from command output or resource names; do not put them in this public repository.
+
+```bash
+aws ec2 allocate-hosts --region us-east-2 --profile team6 \
+  --availability-zone us-east-2a --instance-type mac2.metal --quantity 1 \
+  --auto-placement off --host-recovery on \
+  --tag-specifications 'ResourceType=dedicated-host,Tags=[{Key=Name,Value=anyray-install-mac-signing}]'
+```
+
+`InsufficientHostCapacity` is common: try us-east-2b, then us-east-2c. The
+24-hour minimum starts at allocation. `--auto-placement off` allows only an
+instance launched onto that host id to land there. Set `HOST` from that output
+and `HOST_AZ` to the zone that succeeded, then launch:
+
+```bash
+HOST='<host id from allocate-hosts>'
+HOST_AZ='<the host availability zone>'
+AMI=$(aws ec2 describe-images --region us-east-2 --profile team6 --owners amazon \
+  --filters 'Name=name,Values=amzn-ec2-macos-15.*-arm64' \
+  --query 'reverse(sort_by(Images,&CreationDate))[0].ImageId' --output text)
+SG=$(aws ec2 describe-security-groups --region us-east-2 --profile team6 \
+  --filters Name=group-name,Values=anyray-mac-runner --query 'SecurityGroups[0].GroupId' --output text)
+SUBNET=$(aws ec2 describe-subnets --region us-east-2 --profile team6 \
+  --filters "Name=vpc-id,Values=$(aws ec2 describe-security-groups --region us-east-2 --profile team6 --group-ids "$SG" --query 'SecurityGroups[0].VpcId' --output text)" \
+            "Name=availability-zone,Values=$HOST_AZ" Name=map-public-ip-on-launch,Values=true \
+  --query 'Subnets[0].SubnetId' --output text)
+aws ec2 run-instances --region us-east-2 --profile team6 \
+  --instance-type mac2.metal --image-id "$AMI" \
+  --placement "Tenancy=host,HostId=$HOST" \
+  --subnet-id "$SUBNET" --security-group-ids "$SG" \
+  --iam-instance-profile Name=anyray-mac-runner-ssm \
+  --metadata-options HttpTokens=required,HttpPutResponseHopLimit=1,HttpEndpoint=enabled \
+  --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=200,VolumeType=gp3,Encrypted=true,DeleteOnTermination=true}' \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=anyray-install-mac-signing}]'
+```
+
+`anyray-mac-runner` is the existing egress-only group: ports 443 and 80 out,
+nothing in. `anyray-mac-runner-ssm` is the existing instance profile holding only
+`AmazonSSMManagedInstanceCore`; reusing these resources shares no host.
+The instance takes 10 to 20 minutes to reach SSM. Find it by name and shell in:
+
+```bash
+INSTANCE=$(aws ec2 describe-instances --region us-east-2 --profile team6 \
+  --filters Name=tag:Name,Values=anyray-install-mac-signing Name=instance-state-name,Values=running \
+  --query 'Reservations[0].Instances[0].InstanceId' --output text)
+aws ssm start-session --target "$INSTANCE" --region us-east-2 --profile team6
+```
+
+Grow APFS into the 200 GB volume with AWS's documented steps on the host:
+
+```bash
+PDISK=$(diskutil list physical external | head -n1 | cut -d" " -f1)
+APFSCONT=$(diskutil list physical external | grep "Apple_APFS" | tr -s " " | cut -d" " -f8)
+yes | sudo diskutil repairDisk "$PDISK"
+sudo diskutil apfs resizeContainer "$APFSCONT" 0
+```
+
+**Host setup.** As root over Session Manager, confirm passwordless sudo for
+`ec2-user` and the signing tools, and install jq as `ec2-user`:
+
+```bash
+sudo -iu ec2-user sudo -n true
+xcrun notarytool --version
+xcrun stapler --help
+codesign --version
+productsign --help
+xmllint --version
+aws --version
+sudo -iu ec2-user brew install jq
+touch /System/Volumes/Data/.fseventsd/no_log && killall fseventsd
+```
+
+Every install and workspace delete journals millions of FSEvents that this host
+never purges; they filled the monorepo's Mac host's disk, so repeat the `no_log`
+step whenever the host is rebuilt.
+
+**Runner.** As `ec2-user`, download the macOS arm64 runner into
+`~/actions-runner`. Take the version and its macOS arm64 SHA-256 from the
+[GitHub runner release page](https://github.com/actions/runner/releases), then
+verify before extracting:
+
+```bash
+mkdir -p ~/actions-runner/_diag
+cd ~/actions-runner
+runner_version='<version from the runner release page>'
+runner_sha256='<macOS arm64 SHA-256 from the same release>'
+runner_archive="actions-runner-osx-arm64-${runner_version}.tar.gz"
+curl -fsSL "https://github.com/actions/runner/releases/download/v${runner_version}/${runner_archive}" -o "$runner_archive"
+printf '%s  %s\n' "$runner_sha256" "$runner_archive" | shasum -a 256 -c
+tar -xzf "$runner_archive"
+```
+
+Mint a registration token on an operator machine; it is valid for one hour:
+
+```bash
+gh api -X POST repos/anyrayHQ/install/actions/runners/registration-token --jq .token
+```
+
+Back on the host as `ec2-user`, substitute that token:
+
+```bash
+./config.sh --unattended --url https://github.com/anyrayHQ/install --token <token> \
+  --name anyray-install-mac --labels anyray-install-mac --work _work
+```
+
+Run one runner process only; that is what makes it one job at a time. Install
+the hooks root-owned from a reviewed main commit and point the runner at them:
+
+```bash
+sha='<install main commit that carries scripts/mac-runner-hook.sh>'
+curl -fsSL "https://raw.githubusercontent.com/anyrayHQ/install/$sha/scripts/mac-runner-hook.sh" -o /tmp/mac-runner-hook.sh
+sudo install -d -o root -g wheel -m 0755 /usr/local/libexec/anyray-install-runner
+sudo install -o root -g wheel -m 0755 /tmp/mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/mac-runner-hook.sh
+sudo ln -sf mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/job-started.sh
+sudo ln -sf mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/job-completed.sh
+printf '%s\n' \
+  ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/libexec/anyray-install-runner/job-started.sh \
+  ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/libexec/anyray-install-runner/job-completed.sh \
+  >> ~/actions-runner/.env
+```
+
+Install the LaunchDaemon as root:wheel, mode 0644, and start it:
+
+```bash
+sudo tee /Library/LaunchDaemons/com.anyray.install-actions-runner.plist >/dev/null <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.anyray.install-actions-runner</string>
+  <key>UserName</key>
+  <string>ec2-user</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/ec2-user/actions-runner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ec2-user/actions-runner/run.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/ec2-user</string>
+    <key>PATH</key>
+    <string>/Users/ec2-user/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/ec2-user/actions-runner/_diag/launchd.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ec2-user/actions-runner/_diag/launchd.stderr.log</string>
+</dict>
+</plist>
+PLIST
+sudo chown root:wheel /Library/LaunchDaemons/com.anyray.install-actions-runner.plist
+sudo chmod 0644 /Library/LaunchDaemons/com.anyray.install-actions-runner.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.anyray.install-actions-runner.plist
+```
+
+The `.cargo/bin` entry lets the desktop build's existing Rust toolchain check
+find the rustup installed by the first release. Check that the runner is online
+from the operator machine:
+
+```bash
+gh api repos/anyrayHQ/install/actions/runners \
+  --jq '.runners[] | select(.name=="anyray-install-mac") | {status, busy}'
+```
+
+**GitHub settings.** A repo admin must require approval for every outside
+contributor's workflow runs; today only first-time contributors require it:
+
+```bash
+gh api -X PUT repos/anyrayHQ/install/actions/permissions/fork-pr-contributor-approval \
+  -f approval_policy=all_external_contributors
+```
+
+Optionally, an org owner can register the runner in an organization runner group
+limited to this repository and the three release workflows at `refs/heads/main`.
+That stronger boundary prevents GitHub from dispatching anything else to it.
+
+**Switch over and prove it.** Set the repository variable:
+
+```bash
+gh variable set INSTALL_MAC_RUNNER -R anyrayHQ/install --body ec2
+```
+
+Dispatch a staging desktop dry run from main with an explicit version and
+monorepo SHA. It passes when provision-mac's log says the Mac jobs use
+`anyray-install-mac`, all three Mac jobs ran on runner `anyray-install-mac`, and
+teardown-mac is skipped. After a week of releases, CloudTrail must show no
+`CreateFleet` for `anyray-install-mac-fleet`.
+
+**Rollback.** Delete the variable:
+
+```bash
+gh variable delete INSTALL_MAC_RUNNER -R anyrayHQ/install
+```
+
+The next run's provision-mac returns to the fleet and `mac-fleet.sh up` recreates
+it. Nothing else needs restoring. A run already past provision-mac keeps its choice.
+
+**Operating it.** If the host is down or the runner offline, Mac jobs queue.
+The monorepo's stuck-run watchdog cancels runs queued past 40 minutes; it never
+requeues a job waiting on a self-hosted label. Roll back the variable and fix
+the host. The started hook refuses under 20 GB free: check
+`~/.runner-trash/cleanup.log`, then the FSEvents journal. Both hooks set the
+workspace aside, keeping only `.git`, and delete the moved contents detached at
+background priority. The started hook also covers a cancelled job, runner crash,
+or reboot that prevented the completed hook from running.
+
+A verify job that died mid-smoke can leave test pkg receipts, `/opt/orbit`, or
+the `anyray-smoke` user. The next verify refuses; reset with the `cleanup()` steps
+of `verify-macos-signed` as root. To update the hooks, reinstall from the newer
+reviewed main commit using the Runner commands above. The runner reads them per
+job, so no restart is needed.
+
+To release the host, discover the instance and host by the instance's name,
+terminate the instance, wait for `terminated`, then release the host:
+
+```bash
+INSTANCE=$(aws ec2 describe-instances --region us-east-2 --profile team6 \
+  --filters Name=tag:Name,Values=anyray-install-mac-signing Name=instance-state-name,Values=running,stopped \
+  --query 'Reservations[0].Instances[0].InstanceId' --output text)
+HOST=$(aws ec2 describe-instances --region us-east-2 --profile team6 --instance-ids "$INSTANCE" \
+  --query 'Reservations[0].Instances[0].Placement.HostId' --output text)
+aws ec2 terminate-instances --region us-east-2 --profile team6 --instance-ids "$INSTANCE"
+aws ec2 wait instance-terminated --region us-east-2 --profile team6 --instance-ids "$INSTANCE"
+aws ec2 release-hosts --region us-east-2 --profile team6 --host-ids "$HOST"
+```
+
+A host released inside its first 24 hours is still billed for all 24.
+
+**Retiring the fleet.** In a later change, after the host has carried releases
+for a while, delete `scripts/mac-fleet.sh`, its test, provision-mac and
+teardown-mac, the `AWS_MAC_FLEET_ROLE_ARN` variable, and its role.
 
 ## Connect desktop installers: staging and stable lanes (ANY-250, ANY-337)
 

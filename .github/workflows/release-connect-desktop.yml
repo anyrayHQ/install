@@ -19,18 +19,23 @@ name: Release Anyray Connect desktop
 # short-lived, contents:read GitHub App token. Before source executes, the exact
 # requested commit must be reachable from the fetched origin/main and all CLI /
 # Cargo / Tauri versions must match the explicit input. Private source is never
-# uploaded as an artifact. Signing jobs only receive unsigned build artifacts,
-# never private source, so build.rs and other source-controlled code cannot read
-# the Apple, Azure, or Linux signing material.
+# uploaded as an artifact. Signing jobs receive only unsigned build artifacts,
+# never private source. On the persistent Mac host (INSTALL_MAC_RUNNER=ec2) build
+# and verify jobs run as a separate non-admin account from the signing jobs, no
+# signing job executes build output, and nothing runs as root, so build.rs and
+# other source-controlled code cannot reach the Apple material there. The CodeBuild
+# fleet reuses one host account for every Mac job of a release day (see
+# verify-macos-signed's cleanup), so on that path the boundary is the job, not the account.
 #
 # Jobs use the account's CodeBuild runners by default; nothing here depends on
 # GitHub-hosted runner billing. Linux compiles on the Ubuntu 22.04 project
 # (`anyray-install-runner-ubuntu`) on purpose: the build host's glibc is the
 # floor for every machine that runs the shipped binary, and 24.04's 2.39 would
 # drop the Ubuntu 22.04 and Debian 12 users that 2.35 still covers. macOS
-# compiles, signs, and smokes on the on-demand MAC_ARM fleet by default, or the
-# persistent signing host with INSTALL_MAC_RUNNER=ec2 (RELEASING.md). The fleet is
-# provisioned after source/publication validation and released after the signed smoke.
+# compiles, signs, and smokes on the on-demand MAC_ARM fleet by default. On the
+# persistent signing host with INSTALL_MAC_RUNNER=ec2 (RELEASING.md), verification
+# skips the root install smoke. The fleet is provisioned after source/publication
+# validation and released after the signed smoke.
 
 on:
   workflow_call:
@@ -67,6 +72,11 @@ on:
         required: false
         type: boolean
         default: false
+      mac_runner:
+        description: "The caller's provision-mac choice (codebuild or ec2); empty when run by hand."
+        required: false
+        type: string
+        default: ''
     outputs:
       macos:
         description: 'true when the macOS chain verified'
@@ -265,7 +275,7 @@ jobs:
       - name: Choose the Mac runner (INSTALL_MAC_RUNNER, RELEASING.md)
         id: mac-runner
         env:
-          INSTALL_MAC_RUNNER: ${{ vars.INSTALL_MAC_RUNNER }}
+          INSTALL_MAC_RUNNER: ${{ inputs.mac_runner || vars.INSTALL_MAC_RUNNER }}
         run: ./scripts/mac-runner.sh select
       - if: steps.mac-runner.outputs.mac_runner == 'codebuild'
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
@@ -277,7 +287,7 @@ jobs:
 
   build-macos-unsigned:
     needs: [preflight, provision-mac]
-    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac-build"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
     permissions:
       contents: read
       id-token: write # assume the CI-artifacts role for the S3 handoff
@@ -287,6 +297,16 @@ jobs:
       SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
       TARGET_TRIPLE: universal-apple-darwin
     steps:
+      - name: Refuse unless the host's trust gate ran (persistent Mac only)
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
+        run: |
+          set -euo pipefail
+          [ "$MAC_RUNNER" = ec2 ] || exit 0
+          test -f "$RUNNER_TEMP/.trust-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" || {
+            echo '::error::the job-started trust gate did not run on this host (RELEASING.md, The persistent macOS signing host)'
+            exit 1
+          }
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -398,14 +418,15 @@ jobs:
             done
           )
 
-      # The fleet image is expected to ship Rust; this only fills the gap if it
-      # does not, from a pinned rustup-init verified against its digest.
+      # The daemon PATH excludes user toolchains. Check the build account's rustup
+      # explicitly and add it for later steps, or install the pinned, verified rustup-init.
       - name: Check for an existing Rust toolchain
         id: rustup-check
         run: |
           set -euo pipefail
-          if command -v rustup >/dev/null 2>&1; then
+          if [ -x "$HOME/.cargo/bin/rustup" ]; then
             echo 'present=true' >> "$GITHUB_OUTPUT"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           else
             echo 'present=false' >> "$GITHUB_OUTPUT"
           fi
@@ -512,6 +533,16 @@ jobs:
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
     steps:
+      - name: Refuse unless the host's trust gate ran (persistent Mac only)
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
+        run: |
+          set -euo pipefail
+          [ "$MAC_RUNNER" = ec2 ] || exit 0
+          test -f "$RUNNER_TEMP/.trust-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" || {
+            echo '::error::the job-started trust gate did not run on this host (RELEASING.md, The persistent macOS signing host)'
+            exit 1
+          }
       # The S3 handoff below is a LOCAL composite action, so the repo must be
       # on disk before it can be resolved.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -560,7 +591,7 @@ jobs:
           security import "$ca_dir/DeveloperIDCA.cer" -k "$KEYCHAIN"
           security import "$ca_dir/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
 
-          printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/connect-desktop-cert.p12"
+          ( umask 077; printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/connect-desktop-cert.p12" )
           security import "$RUNNER_TEMP/connect-desktop-cert.p12" \
             -k "$KEYCHAIN" -f pkcs12 -P "$APPLE_SIGNING_CERT_PASSWORD" \
             -A -T /usr/bin/codesign
@@ -577,7 +608,7 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
           umask 077
-          printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/connect-desktop-notary-key.p8"
+          ( umask 077; printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/connect-desktop-notary-key.p8" )
           test -s "$RUNNER_TEMP/connect-desktop-notary-key.p8"
 
       - name: Sign, notarize, and staple the app
@@ -642,8 +673,7 @@ jobs:
           keychain_password_file="$RUNNER_TEMP/connect-desktop-keychain-password"
           test -f "$keychain_password_file"
           keychain_password="$(cat "$keychain_password_file")"
-          printf '%s' "$APPLE_INSTALLER_CERT_P12" \
-            | base64 -d > "$RUNNER_TEMP/connect-desktop-installer-cert.p12"
+          ( umask 077; printf '%s' "$APPLE_INSTALLER_CERT_P12" | base64 -d > "$RUNNER_TEMP/connect-desktop-installer-cert.p12" )
           security import "$RUNNER_TEMP/connect-desktop-installer-cert.p12" \
             -k "$keychain" -f pkcs12 \
             -P "$APPLE_INSTALLER_CERT_PASSWORD" -A -T /usr/bin/productsign
@@ -884,7 +914,7 @@ jobs:
   # keychain are gone from the job boundary.
   verify-macos-signed:
     needs: [preflight, sign-macos, provision-mac]
-    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac-build"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
     timeout-minutes: 40
     permissions:
       id-token: write # assume the CI-artifacts role for the S3 handoff
@@ -892,6 +922,16 @@ jobs:
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
+      - name: Refuse unless the host's trust gate ran (persistent Mac only)
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
+        run: |
+          set -euo pipefail
+          [ "$MAC_RUNNER" = ec2 ] || exit 0
+          test -f "$RUNNER_TEMP/.trust-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" || {
+            echo '::error::the job-started trust gate did not run on this host (RELEASING.md, The persistent macOS signing host)'
+            exit 1
+          }
       # The S3 handoff below is a LOCAL composite action, so the repo must be
       # on disk before it can be resolved.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -914,6 +954,8 @@ jobs:
           name: connect-desktop-macos-signed
           path: signed
       - name: Verify signed installation, sweep cases and uninstall
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
         run: |
           set -euo pipefail
           trap 'echo "::error::macOS verification failed at script line $LINENO"' ERR
@@ -984,6 +1026,15 @@ jobs:
           payload_uninstall_sh="$(find "$expanded_pkg" -type f -path '*/usr/local/lib/anyray-connect/uninstall.sh' -print -quit)"
           [ -n "$payload_uninstall_sh" ] || { echo '::error::PKG payload contains no uninstall.sh'; exit 1; }
           cmp "$uninstaller_scripts/uninstall.sh" "$payload_uninstall_sh"
+
+          # The persistent host runs no CI code as root (RELEASING.md, ANY-1405). There this
+          # job runs as the unprivileged build account: it keeps every check above, launches
+          # the signed engine once, and leaves the root install smoke to the CodeBuild fleet.
+          if [ "$MAC_RUNNER" = ec2 ]; then
+            test "$("$updater_app/Contents/MacOS/anyray-connect" --version | head -1)" = "anyray-connect $VERSION"
+            echo '::warning::root install, sweep and uninstall smoke skipped on the persistent Mac host (RELEASING.md, The persistent macOS signing host)'
+            exit 0
+          fi
 
           installed_app='/Applications/Anyray Connect.app'
           launcher='/usr/local/bin/anyray-connect'

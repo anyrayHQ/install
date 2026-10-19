@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
 # Runner job hooks for the persistent macOS signing host (RELEASING.md, "The persistent
-# macOS signing host"). Installed root-owned on the host and run through two symlinks,
-# job-started.sh and job-completed.sh, that the runner's .env names in
+# macOS signing host"). Installed root-owned on the host and run through four symlinks,
+# sign-job-started.sh, sign-job-completed.sh, build-job-started.sh and build-job-completed.sh,
+# that each role's runner .env names in
 # ACTIONS_RUNNER_HOOK_JOB_STARTED / ACTIONS_RUNNER_HOOK_JOB_COMPLETED. job-started runs before
 # the first step and fails the job when it exits non-zero: it refuses anything but a main
 # dispatch of a release workflow by a maintainer (this repo is public, so a fork pull request
-# can name the label in its own workflow), then checks the disk floor, resets the keychain
+# can name the label in its own workflow), checks the job and non-admin account for its
+# role, then checks the disk floor, resets the keychain
 # search list and sets the previous workspace aside. job-completed repeats the cleanup and
 # never fails the job.
 
 # Release maintainers' GitHub account ids. Must equal MAINTAINER_ACCOUNT_IDS in mac-fleet.sh
 # (the fleet webhook's actor filter); the test holds the two lists together.
 MAINTAINER_ACCOUNT_IDS="16443050 187185370"
+# The person who re-runs a job is GITHUB_TRIGGERING_ACTOR; GITHUB_ACTOR_ID stays the
+# original dispatcher. A renamed login fails closed (only someone with write access can re-run).
+MAINTAINER_LOGINS="0xtechdean Dima-Othentic"
+SIGN_ACCOUNT=anyray-sign
+BUILD_ACCOUNT=anyray-build
+SIGN_JOBS="sign-macos build-macos"
+BUILD_JOBS="build-macos-unsigned verify-macos-signed verify-macos-launch"
 REPOSITORY="anyrayHQ/install"
 # The only workflows that may run on this host, at main. A called workflow reports its caller's
 # ref here, and all three are dispatchable on their own, so all three are listed.
@@ -22,15 +31,21 @@ FREE_GB_FLOOR=20
 
 set -uo pipefail
 
-if [ "$#" -gt 0 ]; then
-  phase="$1"
+if [ "$#" -eq 2 ]; then
+  role="$1"
+  phase="$2"
+elif [ "$#" -eq 0 ]; then
+  name="${0##*/}"
+  name="${name%.sh}"
+  role="${name%%-*}"
+  phase="${name#*-}"
 else
-  phase="${0##*/}"
-  phase="${phase%.sh}"
+  echo 'Usage: mac-runner-hook.sh sign|build job-started|job-completed' >&2
+  exit 2
 fi
-case "$phase" in
-  job-started|job-completed) ;;
-  *) echo 'Usage: mac-runner-hook.sh job-started|job-completed' >&2; exit 2 ;;
+case "$role-$phase" in
+  sign-job-started|sign-job-completed|build-job-started|build-job-completed) ;;
+  *) echo 'Usage: mac-runner-hook.sh sign|build job-started|job-completed' >&2; exit 2 ;;
 esac
 
 problem() {
@@ -77,6 +92,57 @@ trust_gate() {
     problem 'GITHUB_ACTOR_ID check failed'
     return 1
   fi
+  allowed=0
+  for actor in $MAINTAINER_LOGINS; do
+    if [ "${GITHUB_TRIGGERING_ACTOR:-}" = "$actor" ]; then
+      allowed=1
+      break
+    fi
+  done
+  if [ "$allowed" -ne 1 ]; then
+    problem 'GITHUB_TRIGGERING_ACTOR check failed'
+    return 1
+  fi
+}
+
+job_gate() {
+  local jobs job
+  # Explicit per role: an unknown role must never inherit the build role's jobs.
+  case "$role" in
+    sign) jobs="$SIGN_JOBS" ;;
+    build) jobs="$BUILD_JOBS" ;;
+    *) problem 'Hook role check failed'; return 1 ;;
+  esac
+  for job in $jobs; do
+    [ "${GITHUB_JOB:-}" = "$job" ] && return 0
+  done
+  problem 'GITHUB_JOB check failed'
+  return 1
+}
+
+account_gate() {
+  local account user groups group
+  case "$role" in
+    sign) account="$SIGN_ACCOUNT" ;;
+    build) account="$BUILD_ACCOUNT" ;;
+    *) problem 'Hook role check failed'; return 1 ;;
+  esac
+  user="$(id -un)" || { problem 'Runner account check failed'; return 1; }
+  if [ "$user" != "$account" ]; then
+    problem 'Runner account check failed'
+    return 1
+  fi
+  groups="$(id -Gn)" || { problem 'Runner admin-group check failed'; return 1; }
+  for group in $groups; do
+    if [ "$group" = admin ]; then
+      problem 'Runner admin-group check failed'
+      return 1
+    fi
+  done
+  if sudo -n true >/dev/null 2>&1; then
+    problem 'Runner sudo check failed'
+    return 1
+  fi
 }
 
 validate_home_and_temp() {
@@ -111,27 +177,34 @@ free_gb() {
 }
 
 check_disk() {
-  local free trash old
+  local free trash old summary old_count oldest_minutes
   trash="$HOME/.runner-trash"
   free="$(free_gb)" || { problem 'Disk free-space check failed'; return 1; }
   if [ -d "$trash" ]; then
-    old="$(find "$trash" -mindepth 1 -maxdepth 1 -type d -mmin +60 -print -quit 2>/dev/null)" \
-      || { problem 'Runner trash age check failed'; return 1; }
+    if stat -f '%m' "$trash" >/dev/null 2>&1; then
+      old="$(find "$trash" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec stat -f '%m' {} + 2>/dev/null)" \
+        || { problem 'Runner trash age check failed'; return 1; }
+    else
+      old="$(find "$trash" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec stat -c '%Y' {} + 2>/dev/null)" \
+        || { problem 'Runner trash age check failed'; return 1; }
+    fi
     if [ -n "$old" ]; then
-      echo "::warning::Runner trash directories are older than 60 minutes; check $trash/cleanup.log"
-      if [ -f "$trash/cleanup.log" ]; then
-        tail -n 5 "$trash/cleanup.log" || true
-      fi
+      summary="$(printf '%s\n' "$old" | awk -v now="$(date +%s)" '
+        /^[0-9]+$/ { count++; if (count == 1 || $1 < oldest) oldest = $1 }
+        END { if (!count) exit 1; printf "%d %d\n", count, int((now - oldest) / 60) }
+      ')" || { problem 'Runner trash age check failed'; return 1; }
+      read -r old_count oldest_minutes <<< "$summary"
+      printf '::warning::Runner trash has %s directories older than 60 minutes; oldest is %s minutes old; details are in cleanup.log on the host\n' "$old_count" "$oldest_minutes"
     fi
   fi
   if [ "$free" -lt "$FREE_GB_FLOOR" ]; then
     if [ -d "$trash" ]; then
       find "$trash" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec rm -rf {} + 2>>"$trash/cleanup.log" \
-        || echo "::warning::Old runner trash cleanup failed; check $trash/cleanup.log" >&2
+        || echo '::warning::Old runner trash cleanup failed; check cleanup.log on the host' >&2
     fi
     free="$(free_gb)" || { problem 'Disk free-space recheck failed'; return 1; }
     if [ "$free" -lt "$FREE_GB_FLOOR" ]; then
-      problem "Disk floor check failed: less than $FREE_GB_FLOOR GB free; see $trash/cleanup.log and RELEASING.md, The persistent macOS signing host (ANY-1405)"
+      problem "Disk floor check failed: less than $FREE_GB_FLOOR GB free; see cleanup.log on the host and RELEASING.md, The persistent macOS signing host (ANY-1405)"
       return 1
     fi
   fi
@@ -187,10 +260,17 @@ set_workspace_aside() {
 
 if [ "$phase" = job-started ]; then
   trust_gate || exit 1
+  job_gate || exit 1
+  account_gate || exit 1
   validate_paths || exit 1
   check_disk || exit 1
   reset_keychains || exit 1
   set_workspace_aside || exit 1
+  if ! { : > "$RUNNER_TEMP/.trust-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"; } 2>/dev/null; then
+    problem 'Trust-gate canary write check failed'
+    exit 1
+  fi
+  printf '::notice::trust gate passed (%s %s)\n' "$role" "$phase"
 else
   reset_keychains || true
   if validate_paths; then

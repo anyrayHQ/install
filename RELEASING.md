@@ -533,7 +533,8 @@ To add a release maintainer (`gh api users/<login> --jq .id` gives the id), upda
      --query 'projects[].{name:name,filters:webhook.filterGroups}'
    ```
 
-Also update `MAINTAINER_ACCOUNT_IDS` in `scripts/mac-runner-hook.sh` to match
+Also update `MAINTAINER_ACCOUNT_IDS` and `MAINTAINER_LOGINS` in
+`scripts/mac-runner-hook.sh` to match the ids and canonical logins in
 `mac-fleet.sh`, and reinstall the persistent host's hooks as described below.
 
 Apple signing secrets (all required): `APPLE_SIGNING_CERT_P12` +
@@ -545,16 +546,18 @@ the abandoned rcodesign path and is unused.)
 
 ### The persistent macOS signing host (ANY-1405)
 
-**What and why.** The repository variable `INSTALL_MAC_RUNNER` selects the Mac
-runner in all three release workflows. `provision-mac` saves the choice once;
-every Mac job and teardown reads that output, so changing the variable during a
-run leaves that run's choice intact.
+**What and why.** `provision-mac` saves the Mac runner choice once per run. The
+binaries and fleetd workflows read the repository variable `INSTALL_MAC_RUNNER`.
+A called desktop workflow takes the caller's saved choice through `mac_runner`.
+Only a desktop run dispatched by hand reads the variable itself. Every Mac job
+and teardown reads the saved output, so changing the variable during a run leaves
+that run's choice intact.
 
 | Value | Mac jobs run on | provision-mac / teardown-mac |
 | --- | --- | --- |
 | unset or empty (default) | `codebuild-anyray-install-runner-mac-<run_id>-<run_attempt>` | create and delete the fleet |
 | `codebuild` | same as unset | same as unset |
-| `ec2` | `[self-hosted, macOS, ARM64, anyray-install-mac]` | provision reports the choice; teardown is skipped |
+| `ec2` | `anyray-install-mac` for signing, `anyray-install-mac-build` for build and verify (both self-hosted macOS ARM64) | provision reports the choice; teardown is skipped |
 | anything else | nothing; provision fails loudly | teardown still runs idempotent `down` |
 
 Measured over 30 days: about 20 fleet allocations, each with a 24-hour minimum
@@ -563,32 +566,65 @@ always-on `mac2.metal` host costs $0.65/h, or $468 per 30 days on demand and abo
 $393 on a 1-year no-upfront EC2 Instance Savings Plan. `mac2.metal` is not offered
 in eu-central-1; that region offers `mac2-m2.metal` at $1.052/h, about the fleet's
 cost. The signing host lives in us-east-2; the S3 handoff stays in eu-central-1.
-This host serves release signing only and is never shared with the monorepo's
+This host serves release jobs only and is never shared with the monorepo's
 PR Mac runner.
 
 **Security posture.**
 
-- One runner process runs one job at a time. The workflows also share the
-  `anyray-install-mac-release` concurrency group; a called desktop workflow
-  already holds its caller's group.
-- Before any step runs, the job-started hook refuses anything except a
-  `workflow_dispatch` of `release-connect-binaries.yml`,
-  `release-connect-desktop.yml`, or `release-fleetd-installer.yml` at
-  `refs/heads/main` in `anyrayHQ/install` by a release maintainer. GitHub supplies
-  the job's `GITHUB_*` variables and a workflow cannot overwrite them. This repo
-  is public, so a fork pull request could otherwise name the label in its own
-  workflow. `provision-mac` also refuses `ec2` outside a main dispatch.
-- Signing material reaches the host only through job env, is decoded into
-  `$RUNNER_TEMP` and a throwaway keychain, and is deleted by the job. The runner
-  wipes `$RUNNER_TEMP` around every job, and both hooks reset the keychain search
-  list. Nothing is stored permanently on the host: no certificate in a login
-  keychain and no `notarytool store-credentials`.
-- The instance profile is SSM-only. The security group has no inbound rule,
-  there is no key pair, and operators connect through Session Manager.
-- Jobs run as `ec2-user`, which has passwordless sudo because the signed-install
-  smoke needs root. The host's trust boundary is code on install main plus the
-  monorepo commit being released. The fleet had the same residual risk inside
-  its 24-hour reuse window.
+Two non-admin accounts share one host. Neither has sudo; the admin operator
+account is separate. One runner process per account runs one job at a time per
+role. The workflows also share the `anyray-install-mac-release` concurrency group;
+a called desktop workflow already holds its caller's group.
+
+| Role | macOS account | Runner label | Jobs |
+| --- | --- | --- | --- |
+| sign | `anyray-sign` | `anyray-install-mac` | desktop `sign-macos`, binaries `sign-macos`, fleetd `build-macos` |
+| build | `anyray-build` | `anyray-install-mac-build` | desktop `build-macos-unsigned`, desktop `verify-macos-signed`, binaries `verify-macos-launch` |
+
+The signing account `anyray-sign` (no admin, no sudo) runs only workflow code
+from install main, pinned actions, Apple's tools and the pinned fleetctl.
+It never runs build output. It holds Apple material only inside a signing job,
+decoded into `$RUNNER_TEMP` and a throwaway keychain, then deleted by the job.
+The runner wipes `$RUNNER_TEMP` around every job, and both hooks reset the keychain
+search list. No certificate stays in a login keychain and no
+`notarytool store-credentials` is used.
+
+The build account `anyray-build` (no admin, no sudo) runs build-time code from the
+released monorepo commit and its dependencies; cargo build scripts and proc macros always run.
+It runs build output in the two verify jobs. It cannot read the signing
+account's home (both homes are mode 0700) and cannot become root without a
+local privilege-escalation exploit.
+
+Residual risk: the build account persists across jobs, including its HOME
+toolchains, runner install and readable registration credentials. A dependency
+that runs code at build time can tamper with later builds, which are then signed,
+and can copy the build runner's credentials to receive later build jobs and their
+secrets (the monorepo read App key and the S3 artifact role). The CodeBuild fleet
+bounded this to about a day; here it lasts until the build account is reset.
+Reset it weekly and after any dependency incident using the procedure below.
+The follow-up that removes this is an ephemeral build account and runner per job.
+
+The root install, sweep and uninstall smoke does not run on this host: it would
+give build output root on the box holding the signing account. Persistent-host
+verification keeps the signature, notarization staple, Gatekeeper assessment,
+pkg structure, payload and uninstaller structure checks, then launches the signed
+engine once as the build account. The CodeBuild fleet path still runs the full
+root smoke. A scheduled root-volume reset was rejected: root can copy the runner registration credentials,
+and a reset does not revoke them. The follow-up is a disposable macOS VM per smoke.
+
+The organization runner group restricted to this repo and the three release
+workflows at main is the gate against fork pull requests. The hooks are a second
+layer: before any step, job-started requires a `workflow_dispatch` at
+`refs/heads/main` in `anyrayHQ/install`, an allowed workflow ref, a maintainer's
+original actor id and canonical triggering login, the role's job and its non-admin
+account without sudo. GitHub supplies these `GITHUB_*` contexts and a workflow
+cannot overwrite them. `provision-mac` also refuses `ec2` outside a main dispatch.
+The canary turns a host whose hooks were removed or never configured into a red job
+instead of an ungated one. It is not a defense against an account that is already compromised:
+that account could write the file itself.
+
+The instance profile is SSM-only. The security group has no inbound rule and
+there is no key pair. Operators use Session Manager and the admin `ec2-user`, which runs no runner.
 
 **Allocate and launch.** Use region us-east-2 and profile `team6`. Discover ids
 from command output or resource names; do not put them in this public repository.
@@ -668,13 +704,53 @@ Every install and workspace delete journals millions of FSEvents that this host
 never purges; they filled the monorepo's Mac host's disk, so repeat the `no_log`
 step whenever the host is rebuilt.
 
-**Runner.** As `ec2-user`, download the macOS arm64 runner into
-`~/actions-runner`. Take the version and its macOS arm64 SHA-256 from the
-[GitHub runner release page](https://github.com/actions/runner/releases), then
-verify before extracting:
+Create both accounts as root, non-admin and hidden, with homes mode 0700.
+The membership checks must say "no", and neither sudo check may print FAIL:
 
 ```bash
-mkdir -p ~/actions-runner/_diag
+for user in anyray-sign anyray-build; do
+  sudo sysadminctl -addUser "$user" -fullName "$user" -password "$(uuidgen)" -home "/Users/$user" -shell /bin/bash
+  sudo createhomedir -c -u "$user"
+  sudo dscl . create "/Users/$user" IsHidden 1
+  sudo chmod 0700 "/Users/$user"
+  dseditgroup -o checkmember -m "$user" admin   # must say "no"
+  sudo -u "$user" sudo -n true && echo "FAIL: $user can sudo"
+done
+sudo chmod 0700 /Users/ec2-user
+stat -f '%Su %Lp %N' /usr/local/bin /opt/homebrew/bin   # neither writable by the two accounts
+```
+
+The organization runner group is REQUIRED before `INSTALL_MAC_RUNNER=ec2`. An org
+owner must create it restricted to this repository, with public repositories
+allowed because this repo is public, and restricted to the three release
+workflows at main. Create it and read it back from the operator machine:
+
+```bash
+repo_id=$(gh api repos/anyrayHQ/install --jq .id)
+gh api -X POST orgs/anyrayHQ/actions/runner-groups -f name=anyray-install-mac \
+  -f visibility=selected -F "selected_repository_ids[]=$repo_id" \
+  -F allows_public_repositories=true -F restricted_to_workflows=true \
+  -f 'selected_workflows[]=anyrayHQ/install/.github/workflows/release-connect-binaries.yml@main' \
+  -f 'selected_workflows[]=anyrayHQ/install/.github/workflows/release-connect-desktop.yml@main' \
+  -f 'selected_workflows[]=anyrayHQ/install/.github/workflows/release-fleetd-installer.yml@main'
+gh api orgs/anyrayHQ/actions/runner-groups --jq '.runner_groups[] | select(.name=="anyray-install-mac") | {id, restricted_to_workflows, selected_workflows, allows_public_repositories}'
+```
+
+If the plan does not accept `restricted_to_workflows`, or the read-back does not
+show it and all three selected workflows, stop and do not set the variable.
+The desktop workflow is listed because the restriction applies to "jobs directly defined within the selected workflows".
+If a legitimate dry run queues with no runner, the workflow entry format did not
+match: try `@refs/heads/main` instead of `@main`, then read back and probe again.
+
+**Runners.** Download and verify the macOS arm64 runner for each account into
+`/Users/<user>/actions-runner`. Take the version and its macOS arm64 SHA-256 from
+the [GitHub runner release page](https://github.com/actions/runner/releases),
+then verify before extracting. Run this on the host for each account:
+
+```bash
+for user in anyray-sign anyray-build; do
+  sudo -u "$user" -H /bin/bash -e -o pipefail <<'RUNNER'
+mkdir -p ~/actions-runner/_diag ~/actions-runner/_work
 cd ~/actions-runner
 runner_version='<version from the runner release page>'
 runner_sha256='<macOS arm64 SHA-256 from the same release>'
@@ -682,85 +758,127 @@ runner_archive="actions-runner-osx-arm64-${runner_version}.tar.gz"
 curl -fsSL "https://github.com/actions/runner/releases/download/v${runner_version}/${runner_archive}" -o "$runner_archive"
 printf '%s  %s\n' "$runner_sha256" "$runner_archive" | shasum -a 256 -c
 tar -xzf "$runner_archive"
+RUNNER
+done
 ```
 
-Mint a registration token on an operator machine; it is valid for one hour:
+Mint an organization registration token on the operator machine; it is valid for
+one hour:
 
 ```bash
-gh api -X POST repos/anyrayHQ/install/actions/runners/registration-token --jq .token
+token=$(gh api -X POST orgs/anyrayHQ/actions/runners/registration-token --jq .token)  # operator machine
 ```
 
-Back on the host as `ec2-user`, substitute that token:
+On the host, set `token` to that token, then register each runner as its account
+into the required group. Run one runner process per account:
 
 ```bash
-./config.sh --unattended --url https://github.com/anyrayHQ/install --token <token> \
-  --name anyray-install-mac --labels anyray-install-mac --work _work
+for user in anyray-sign anyray-build; do
+  case "$user" in
+    anyray-sign) label=anyray-install-mac ;;
+    anyray-build) label=anyray-install-mac-build ;;
+  esac
+  sudo -u "$user" -H bash -c 'cd ~/actions-runner && ./config.sh --unattended --url https://github.com/anyrayHQ \
+    --token "$0" --name "$1" --labels "$1" --runnergroup anyray-install-mac --work _work' "$token" "$label"
+done
 ```
 
-Run one runner process only; that is what makes it one job at a time. Install
-the hooks root-owned from a reviewed main commit and point the runner at them:
+Each install stays owned by its account, under its mode 0700 home. A root-owned
+install does not start: `run.sh` copies `run-helper.sh.template` over
+`run-helper.sh` in the install directory on every start, and the runner writes
+its migrated credential files there. The registration credentials are readable by
+the account because the runner needs them; that is the credential-copying
+residual risk above. The runners update themselves from GitHub.
+
+Install the hooks root-owned from a reviewed main commit, with four role-specific
+symlinks. The hook paths go in each root-owned LaunchDaemon below, not in the
+account's `.env`:
 
 ```bash
 sha='<install main commit that carries scripts/mac-runner-hook.sh>'
 curl -fsSL "https://raw.githubusercontent.com/anyrayHQ/install/$sha/scripts/mac-runner-hook.sh" -o /tmp/mac-runner-hook.sh
 sudo install -d -o root -g wheel -m 0755 /usr/local/libexec/anyray-install-runner
 sudo install -o root -g wheel -m 0755 /tmp/mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/mac-runner-hook.sh
-sudo ln -sf mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/job-started.sh
-sudo ln -sf mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/job-completed.sh
-printf '%s\n' \
-  ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/libexec/anyray-install-runner/job-started.sh \
-  ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/libexec/anyray-install-runner/job-completed.sh \
-  >> ~/actions-runner/.env
+sudo ln -sf mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/sign-job-started.sh
+sudo ln -sf mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/sign-job-completed.sh
+sudo ln -sf mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/build-job-started.sh
+sudo ln -sf mac-runner-hook.sh /usr/local/libexec/anyray-install-runner/build-job-completed.sh
 ```
 
-Install the LaunchDaemon as root:wheel, mode 0644, and start it:
+The runner loads the account's `.env` over the daemon's environment, so an account
+that is already compromised can still drop its own hooks, or run its own listener
+with its credentials. The runner group is what keeps fork pull requests off this
+host; the hooks and the canary catch a host that was never set up right.
+
+Install two LaunchDaemons as root:wheel, mode 0644. The sign daemon is:
 
 ```bash
-sudo tee /Library/LaunchDaemons/com.anyray.install-actions-runner.plist >/dev/null <<'PLIST'
+sudo tee /Library/LaunchDaemons/com.anyray.install-actions-runner.sign.plist >/dev/null <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.anyray.install-actions-runner</string>
+  <string>com.anyray.install-actions-runner.sign</string>
   <key>UserName</key>
-  <string>ec2-user</string>
+  <string>anyray-sign</string>
   <key>WorkingDirectory</key>
-  <string>/Users/ec2-user/actions-runner</string>
+  <string>/Users/anyray-sign/actions-runner</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/ec2-user/actions-runner/run.sh</string>
+    <string>/Users/anyray-sign/actions-runner/run.sh</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>/Users/ec2-user</string>
+    <string>/Users/anyray-sign</string>
     <key>PATH</key>
-    <string>/Users/ec2-user/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+    <key>ACTIONS_RUNNER_HOOK_JOB_STARTED</key>
+    <string>/usr/local/libexec/anyray-install-runner/sign-job-started.sh</string>
+    <key>ACTIONS_RUNNER_HOOK_JOB_COMPLETED</key>
+    <string>/usr/local/libexec/anyray-install-runner/sign-job-completed.sh</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Users/ec2-user/actions-runner/_diag/launchd.stdout.log</string>
+  <string>/Users/anyray-sign/actions-runner/_diag/launchd.stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/ec2-user/actions-runner/_diag/launchd.stderr.log</string>
+  <string>/Users/anyray-sign/actions-runner/_diag/launchd.stderr.log</string>
 </dict>
 </plist>
 PLIST
-sudo chown root:wheel /Library/LaunchDaemons/com.anyray.install-actions-runner.plist
-sudo chmod 0644 /Library/LaunchDaemons/com.anyray.install-actions-runner.plist
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.anyray.install-actions-runner.plist
 ```
 
-The `.cargo/bin` entry lets the desktop build's existing Rust toolchain check
-find the rustup installed by the first release. Check that the runner is online
-from the operator machine:
+Jobs get this `PATH`: the daemon starts `run.sh`, which does not read the `.path`
+file `config.sh` writes (only the `svc.sh` service wrapper does), so a user
+directory captured at registration never lands ahead of the system ones.
+
+Derive the build daemon from it, so the two differ only in label, account, paths
+and hooks, then check both and bootstrap them:
 
 ```bash
-gh api repos/anyrayHQ/install/actions/runners \
-  --jq '.runners[] | select(.name=="anyray-install-mac") | {status, busy}'
+sudo sed -e 's/anyray-sign/anyray-build/g' \
+  -e 's/install-actions-runner\.sign/install-actions-runner.build/' \
+  -e 's/sign-job-/build-job-/g' \
+  /Library/LaunchDaemons/com.anyray.install-actions-runner.sign.plist \
+  | sudo tee /Library/LaunchDaemons/com.anyray.install-actions-runner.build.plist >/dev/null
+plutil -lint /Library/LaunchDaemons/com.anyray.install-actions-runner.sign.plist /Library/LaunchDaemons/com.anyray.install-actions-runner.build.plist
+grep -c 'anyray-build\|build-job-' /Library/LaunchDaemons/com.anyray.install-actions-runner.build.plist   # 8
+grep -c 'anyray-sign\|sign-job-' /Library/LaunchDaemons/com.anyray.install-actions-runner.build.plist     # 0
+sudo chown root:wheel /Library/LaunchDaemons/com.anyray.install-actions-runner.sign.plist /Library/LaunchDaemons/com.anyray.install-actions-runner.build.plist
+sudo chmod 0644 /Library/LaunchDaemons/com.anyray.install-actions-runner.sign.plist /Library/LaunchDaemons/com.anyray.install-actions-runner.build.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.anyray.install-actions-runner.sign.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.anyray.install-actions-runner.build.plist
+```
+
+The build job adds its own `$HOME/.cargo/bin` to PATH when it finds or installs
+rustup. Check that both runners are online from the operator machine:
+
+```bash
+gh api orgs/anyrayHQ/actions/runners --jq '.runners[] | select(.name|startswith("anyray-install-mac")) | {name, status, busy}'
 ```
 
 **GitHub settings.** A repo admin must require approval for every outside
@@ -771,21 +889,64 @@ gh api -X PUT repos/anyrayHQ/install/actions/permissions/fork-pr-contributor-app
   -f approval_policy=all_external_contributors
 ```
 
-Optionally, an org owner can register the runner in an organization runner group
-limited to this repository and the three release workflows at `refs/heads/main`.
-That stronger boundary prevents GitHub from dispatching anything else to it.
+**Switch over and prove it.** Before setting the variable, run this required probe
+from the non-main branch `probe/any-1405-hook`, file
+`.github/workflows/probe-mac-hook.yml`, twice:
 
-**Switch over and prove it.** Set the repository variable:
+```yaml
+name: Probe the Mac host trust gate (delete after use)
+on:
+  push:
+    branches: [probe/any-1405-hook]
+permissions:
+  contents: read
+env:
+  BASH_ENV: '$(/usr/bin/touch /tmp/hook-env-probe)'
+  GITHUB_EVENT_NAME: workflow_dispatch
+  GITHUB_REF: refs/heads/main
+jobs:
+  sign-macos:
+    runs-on: [self-hosted, macOS, ARM64, anyray-install-mac]
+    timeout-minutes: 5
+    steps:
+      - run: /usr/bin/touch /tmp/hook-env-probe-step
+  build-macos-unsigned:
+    runs-on: [self-hosted, macOS, ARM64, anyray-install-mac-build]
+    timeout-minutes: 5
+    steps:
+      - run: /usr/bin/touch /tmp/hook-env-probe-step
+```
+
+First round, open the runner group to all workflows of this repo and push the
+probe branch. This proves the hook. Both jobs must fail at "job started hook"
+with `::error::GITHUB_EVENT_NAME check failed`: the real event is `push`, and
+workflow env, including the spoofed `GITHUB_*` and `BASH_ENV`, never reaches the hook.
+Over Session Manager, confirm neither `/tmp/hook-env-probe` nor `/tmp/hook-env-probe-step` exists:
+`ls -l /tmp/hook-env-probe*` prints nothing on the host.
+
+A refusal from the hook proves that the runner invokes it through the symlink:
+invoked by its real name `mac-runner-hook.sh` with no arguments, it exits with the
+usage error instead. The job log line "A job started hook has been configured by the self-hosted runner administrator"
+shows that a hook ran.
+
+Second round, restrict the group to the three release workflows at main again
+and push the probe branch again. This proves the group. Both jobs must stay
+queued with no runner; cancel the run, then delete the branch.
+
+Only after both rounds pass, set the repository variable:
 
 ```bash
 gh variable set INSTALL_MAC_RUNNER -R anyrayHQ/install --body ec2
 ```
 
 Dispatch a staging desktop dry run from main with an explicit version and
-monorepo SHA. It passes when provision-mac's log says the Mac jobs use
-`anyray-install-mac`, all three Mac jobs ran on runner `anyray-install-mac`, and
-teardown-mac is skipped. After a week of releases, CloudTrail must show no
-`CreateFleet` for `anyray-install-mac-fleet`.
+monorepo SHA. It passes when provision-mac chooses `ec2`, with
+`build-macos-unsigned` and `verify-macos-signed` on
+`anyray-install-mac-build`, and `sign-macos` on `anyray-install-mac`. Each job log
+must show the hook's `trust gate passed (<role> job-started)` notice for its role.
+`verify-macos-signed` must show the root-smoke-skipped warning, and teardown-mac is skipped.
+After a week of releases, CloudTrail must show no `CreateFleet` for
+`anyray-install-mac-fleet`.
 
 **Rollback.** Delete the variable:
 
@@ -805,11 +966,35 @@ workspace aside, keeping only `.git`, and delete the moved contents detached at
 background priority. The started hook also covers a cancelled job, runner crash,
 or reboot that prevented the completed hook from running.
 
-A verify job that died mid-smoke can leave test pkg receipts, `/opt/orbit`, or
-the `anyray-smoke` user. The next verify refuses; reset with the `cleanup()` steps
-of `verify-macos-signed` as root. To update the hooks, reinstall from the newer
-reviewed main commit using the Runner commands above. The runner reads them per
-job, so no restart is needed.
+**Reset the build account.** Do this weekly and after any dependency incident.
+On the host, stop its daemon:
+
+```bash
+sudo launchctl bootout system/com.anyray.install-actions-runner.build
+```
+
+Find its id with the online-check API above, adding `id` to the output, or use
+this on the operator machine:
+
+```bash
+gh api orgs/anyrayHQ/actions/runners --jq '.runners[] | select(.name=="anyray-install-mac-build") | {id, name, status, busy}'
+```
+
+Delete its registration from GitHub on the operator machine, substituting that
+id in the path. This revokes the credentials before the account is removed:
+
+```bash
+gh api -X DELETE orgs/anyrayHQ/actions/runners/<id>
+```
+
+Then delete the account on the host and repeat the account, runner, hook and daemon steps for it:
+
+```bash
+sudo sysadminctl -deleteUser anyray-build
+```
+
+To update the hooks, reinstall from the newer reviewed main commit using the
+Runners commands above. The runner reads them per job, so no restart is needed.
 
 To release the host, discover the instance and host by the instance's name,
 terminate the instance, wait for `terminated`, then release the host:

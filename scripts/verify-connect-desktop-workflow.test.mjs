@@ -142,8 +142,9 @@ describe('desktop release workflow safety contract', () => {
     assert.ok(runners.length > 0);
     const macRunners = ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']
       .map((name) => job(name).match(/runs-on: .+/)[0]);
-    for (const runner of macRunners) {
-      assert.equal(runner, `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
+    for (const [i, runner] of macRunners.entries()) {
+      const label = i === 1 ? 'anyray-install-mac' : 'anyray-install-mac-build';
+      assert.equal(runner, `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
     }
     for (const runner of runners) {
       if (macRunners.includes(runner)) continue;
@@ -166,7 +167,8 @@ describe('desktop release workflow safety contract', () => {
     assert.match(job('provision-mac'), /needs: \[preflight, validate-source\]/);
     assert.match(job('build-macos-unsigned'), /needs: \[preflight, provision-mac\]/);
     for (const name of ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']) {
-      assert.equal(job(name).match(/runs-on: .+/)[0], `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
+      const label = name === 'sign-macos' ? 'anyray-install-mac' : 'anyray-install-mac-build';
+      assert.equal(job(name).match(/runs-on: .+/)[0], `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
     }
     assert.match(
       job('sign-macos'),

@@ -28,7 +28,7 @@ describe('the CLI release calls the desktop workflow', () => {
 
   test('one desktop job, after the CLI release and the CLI Mac teardown, stable and engine-reusing', () => {
     const desktop = job(caller, 'desktop');
-    assert.match(desktop, /needs: \[signing-preflight, build, sign-macos, sign-windows, package-linux, load-set, release, teardown-mac\]/);
+    assert.match(desktop, /needs: \[signing-preflight, provision-mac, build, sign-macos, verify-macos-launch, sign-windows, package-linux, load-set, release, teardown-mac\]/);
     assert.match(desktop, /inputs\.source_sha != '' && !inputs\.staging && \(\(inputs\.mode == 'release' && needs\.release\.result == 'success'\)/);
     assert.match(desktop, /uses: \.\/\.github\/workflows\/release-connect-desktop\.yml/);
     assert.match(desktop, /secrets: inherit/);
@@ -38,7 +38,7 @@ describe('the CLI release calls the desktop workflow', () => {
   });
 
   test('the CLI release never waits on desktop', () => {
-    assert.match(job(caller, 'release'), /needs: \[build, sign-macos, sign-windows, package-linux, load-set\]/);
+    assert.match(job(caller, 'release'), /needs: \[build, sign-macos, verify-macos-launch, sign-windows, package-linux, load-set\]/);
   });
 
   test('a bad desktop input fails in preflight, before anything ships', () => {

@@ -69,6 +69,10 @@ services:
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:?run ./setup.sh first}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
       ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
+      # Optional override of the token the gateway sends to the updater when an
+      # admin triggers a soft update (POST /admin/v1/settings/updates/run); empty
+      # falls back to ANYRAY_ADMIN_TOKEN, the same value the updater below uses.
+      ANYRAY_UPDATER_TOKEN: ${ANYRAY_UPDATER_TOKEN:-}
       ANYRAY_PROVIDER_KEY_OPENAI: ${ANYRAY_PROVIDER_KEY_OPENAI:-}
       ANYRAY_PROVIDER_KEY_ANTHROPIC: ${ANYRAY_PROVIDER_KEY_ANTHROPIC:-}
       ANYRAY_PROVIDER_KEY_AZURE_OPENAI: ${ANYRAY_PROVIDER_KEY_AZURE_OPENAI:-}

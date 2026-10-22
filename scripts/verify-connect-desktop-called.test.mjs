@@ -108,6 +108,14 @@ describe('prepare and publish modes', () => {
     assert.match(job(caller, 'release'), /inputs\.mode == 'publish' && needs\.load-set\.result == 'success' && needs\.load-set\.outputs\.cli_published != 'true'/);
   });
 
+  // v1.10.513 and v1.10.517: the monorepo published before the desktop record landed, so it
+  // sent no desktop_sums_sha256 and meant "the CLI alone". The desktop leg still ran with an
+  // empty `present`, published nothing, and reconcile-feed --require-all failed the run.
+  test('publish runs the desktop leg only when there is a desktop set to publish', () => {
+    const desktop = job(caller, 'desktop');
+    assert.match(desktop, /\(inputs\.mode == 'publish' && needs\.load-set\.result == 'success' && \(needs\.load-set\.outputs\.present != '' \|\| inputs\.desktop_sums_sha256 != ''\) && \(needs\.release\.result == 'success' \|\| needs\.load-set\.outputs\.cli_published == 'true'\)\)/);
+  });
+
   test('the desktop workflow publishes only staged OSes in publish mode and nothing in prepare', () => {
     for (const name of ['publish', 'reconcile-feed']) {
       assert.match(job(callee, name), /inputs\.mode != 'prepare'/);

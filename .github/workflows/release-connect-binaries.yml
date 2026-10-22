@@ -2446,10 +2446,12 @@ jobs:
 
   # The desktop app, from the same dispatch. The called workflow shares this run's id, so it reads
   # the engines `build` uploaded through the usual S3 artifact keys. It needs teardown-mac because
-  # it provisions its own Mac under the same runner name.
+  # it provisions its own Mac under the same runner name. A publish with no desktop set (no
+  # desktop_sums_sha256 and nothing staged) is the monorepo shipping the CLI alone, so the
+  # desktop leg stays out of it; a recorded desktop set that staged nothing still runs and fails.
   desktop:
     needs: [signing-preflight, provision-mac, build, sign-macos, verify-macos-launch, sign-windows, package-linux, load-set, release, teardown-mac]
-    if: ${{ !cancelled() && inputs.source_sha != '' && !inputs.staging && ((inputs.mode == 'release' && needs.release.result == 'success') || (inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.verify-macos-launch.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success') || (inputs.mode == 'publish' && needs.load-set.result == 'success' && (needs.release.result == 'success' || needs.load-set.outputs.cli_published == 'true'))) }}
+    if: ${{ !cancelled() && inputs.source_sha != '' && !inputs.staging && ((inputs.mode == 'release' && needs.release.result == 'success') || (inputs.mode == 'prepare' && needs.build.result == 'success' && needs.sign-macos.result == 'success' && needs.verify-macos-launch.result == 'success' && needs.sign-windows.result == 'success' && needs.package-linux.result == 'success') || (inputs.mode == 'publish' && needs.load-set.result == 'success' && (needs.load-set.outputs.present != '' || inputs.desktop_sums_sha256 != '') && (needs.release.result == 'success' || needs.load-set.outputs.cli_published == 'true'))) }}
     permissions:
       contents: write # the versioned desktop release
       id-token: write # the S3 handoff and the Mac fleet role

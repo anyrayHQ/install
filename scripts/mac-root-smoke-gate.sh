@@ -13,7 +13,7 @@ case "${CHANNEL:-}" in
     if [[ "${ROOT_SMOKE_ACCEPTED:-}" =~ $acceptance_pattern ]]; then
       printf '::warning::stable macOS ships without the root install smoke under the recorded acceptance %s\n' "$ROOT_SMOKE_ACCEPTED"
     else
-      printf '%s\n' "::error::the stable lane needs the root install smoke, which does not run on the persistent Mac host; set INSTALL_MAC_ROOT_SMOKE_ACCEPTED to Dean's written acceptance (RELEASING.md) or run stable on the CodeBuild fleet" >&2
+      printf '%s\n' "::error::the stable lane needs the root install smoke, which does not run on the persistent Mac host; set INSTALL_MAC_ROOT_SMOKE_ACCEPTED to Dean's written acceptance (RELEASING.md) or run stable on GitHub-hosted macOS (unset INSTALL_MAC_RUNNER)" >&2
       exit 1
     fi
     ;;

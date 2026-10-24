@@ -137,20 +137,23 @@ describe('desktop release workflow safety contract', () => {
     );
   });
 
-  test('runs every job on CodeBuild, never on a GitHub-hosted runner', () => {
+  test('runs every non-Mac job on CodeBuild; only the three Mac jobs may run GitHub-hosted', () => {
     const runners = workflow.match(/runs-on: .+/g) ?? [];
     assert.ok(runners.length > 0);
     const macRunners = ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']
       .map((name) => job(name).match(/runs-on: .+/)[0]);
     for (const [i, runner] of macRunners.entries()) {
       const label = i === 1 ? 'anyray-install-mac' : 'anyray-install-mac-build';
-      assert.equal(runner, `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
+      assert.equal(runner, `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || needs.provision-mac.outputs.mac_runner == 'codebuild' && format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) || 'macos-15' }}`);
     }
     for (const runner of runners) {
       if (macRunners.includes(runner)) continue;
       assert.match(runner, /^runs-on: codebuild-anyray-install-runner(-mac|-win|-ubuntu)?-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/);
     }
-    assert.doesNotMatch(workflow, /macos-15|ubuntu-24\.04|ubuntu-latest|windows-2025/);
+    // Outside comments, macos-15 appears only in the three Mac runs-on expressions above.
+    const hosted = workflow.split('\n').filter((line) => !line.trimStart().startsWith('#') && line.includes('macos-15'));
+    assert.deepEqual(hosted, macRunners.map((runner) => `    ${runner}`));
+    assert.doesNotMatch(workflow, /macos-latest|macos-14|ubuntu-24\.04|ubuntu-latest|windows-2025|windows-latest/);
   });
 
   test('builds Linux on the Ubuntu 22.04 project with a pinned rustup', () => {
@@ -168,14 +171,14 @@ describe('desktop release workflow safety contract', () => {
     assert.match(job('build-macos-unsigned'), /needs: \[preflight, provision-mac\]/);
     for (const name of ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']) {
       const label = name === 'sign-macos' ? 'anyray-install-mac' : 'anyray-install-mac-build';
-      assert.equal(job(name).match(/runs-on: .+/)[0], `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
+      assert.equal(job(name).match(/runs-on: .+/)[0], `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || needs.provision-mac.outputs.mac_runner == 'codebuild' && format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) || 'macos-15' }}`);
     }
     assert.match(
       job('sign-macos'),
       /needs: \[preflight, build-macos-unsigned, provision-mac\]/
     );
     assert.match(job('teardown-mac'), /needs: \[provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed\]/);
-    assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) && needs\.provision-mac\.result != 'skipped' && needs\.provision-mac\.outputs\.mac_runner != 'ec2' \}\}/);
+    assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) && needs\.provision-mac\.result != 'skipped' && needs\.provision-mac\.outputs\.mac_runner != 'ec2' && needs\.provision-mac\.outputs\.mac_runner != 'github' \}\}/);
   });
 
   test('bootstraps pinned Rust on both Windows jobs and MSVC once, in the build job', () => {

@@ -33,9 +33,11 @@ CLI release.
   it inside the app). The MSI bundles the Authenticode-signed `.exe` the CLI lane
   signed, so the desktop lane signs only `connect-tray.exe`. Run by hand, the
   desktop workflow still compiles its own engines.
-- **Its own Mac.** The called workflow provisions and tears down a Mac of its own;
-  `mac-fleet.sh up` reuses a live fleet. With `INSTALL_MAC_RUNNER=ec2`, both
-  workflows use the persistent host and nothing is provisioned.
+- **Its own Mac.** On the default GitHub-hosted runners each Mac job is a fresh
+  VM and nothing is provisioned. With `INSTALL_MAC_RUNNER=codebuild` the called
+  workflow provisions and tears down a Mac of its own; `mac-fleet.sh up` reuses a
+  live fleet. With `ec2`, both workflows use the persistent host and nothing is
+  provisioned.
 - **Per-OS publication.** One `publish` job runs a leg per OS in parallel, each only
   uploading its signed files to the versioned
   `connect-desktop[-staging]-v<version>-<sha12>` release (created if missing; an asset
@@ -67,6 +69,10 @@ CLI release.
 | `release` (default) | Build, sign and publish in one run, as above. |
 | `prepare` | Compiles the CLI from `connect-sets/<set_key>/npm/anyray-connect-<version>.tgz` in the CI artifacts bucket (not npm), signs and verifies the CLI and every desktop OS, and publishes nothing. `store-set` stores the signed CLI set under `connect-sets/<set_key>/` (`set_key` defaults to the version) as soon as the CLI is signed, without waiting for the desktop; the CLI set must be complete or nothing is stored. `store-desktop` then stores the desktop under `connect-sets/<set_key>/desktop/` with its own `SHA256SUMS` and `connect-set-desktop` notice. Its `MISSING` is always written, empty when every desktop OS verified, otherwise one OS name per line. Both sets carry `PACKAGE_SHA256`, the hash of the `.tgz` that was compiled: the caller must match it to the one it uploaded. |
 | `publish` | Builds nothing. Refuses the set unless the hash of its `SHA256SUMS` equals `set_sums_sha256`, and fetches only the files that file lists, each checked against it. With `desktop_sums_sha256` it does the same for `desktop/`, which may only carry `connect-desktop-*` artifacts; without it a split set publishes no desktop. Each set records the `VERSION` and `SOURCE_SHA` it was prepared for; a different `version` or `source_sha` is refused. Publishes the CLI release (a no-op when `connect-v<version>` already exists with every set file uploaded, rebuilt when assets are missing, refused when older than the published one), then calls the desktop workflow to publish each OS present and reconcile the feed. |
+
+`dry_run` does not change `prepare`: `store-set` and `store-desktop` still write the
+set, so a prepare dry run is not a rehearsal. Rehearse the Mac lane with a `release`
+dry run from main (see "CI runners").
 
 A partial publication from a `publish` run can be completed by dispatching `mode=publish`
 again with the same `version` and `set_sums_sha256`: it loads the same stored set, so
@@ -192,6 +198,71 @@ installs a LaunchAgent that handles either MDM ordering safely:
   automatically from `/Library/LaunchAgents`; that login run rechecks cached
   state so an expired certificate or rotated profile can recover. A full local `anyray-connect --revert` records an opt-out and stays
   reverted until the user explicitly applies Connect again.
+
+### The `release-signing` environment (Apple secrets)
+
+The seven Apple secrets above are **environment secrets** of `release-signing`, whose
+deployment-branch policy admits `main` only. The four jobs that read them declare it:
+`signing-preflight` and `sign-macos` in release-connect-binaries, `preflight` and
+`sign-macos` in release-connect-desktop. A job without the environment reads none of
+them, and GitHub refuses a job that declares it from any other ref before its first
+step: a pull request (`refs/pull/<n>/merge`), a branch dispatch, a fork. Fork pull
+requests receive no secrets at all, and neither release workflow has a
+`pull_request`, `pull_request_target` or `workflow_run` trigger.
+`scripts/verify-connect-desktop-signing-environment.test.mjs` holds these rules.
+
+Why: as repository secrets they were readable by any workflow run on any branch,
+including a same-repository pull request that edits a workflow to print them.
+GitHub-hosted Mac jobs have no maintainer-filtered webhook in front of them (see
+"CI runners"), so the environment is the boundary.
+
+What the environment changes:
+
+- The GitHub OIDC subject of both `sign-macos` jobs becomes
+  `repo:anyrayHQ/install:environment:release-signing` instead of
+  `repo:anyrayHQ/install:ref:refs/heads/main`. Both assume `AWS_CI_ARTIFACTS_ROLE_ARN`
+  for the S3 handoff, so that role's trust policy must admit the new subject. A
+  `StringLike` on `repo:anyrayHQ/install:*` already does.
+- The release workflows cannot sign from a branch any more. Dry runs go from main.
+- Each run records deployments to `release-signing` in the repository's Deployments page.
+
+Set it up once, as a repository admin. GitHub never returns a secret's value, so set
+each one again from the original `.p12` and `.p8` files and passwords (table above).
+`gh secret set` with no value on stdin prompts for it, which keeps passwords out of
+shell history.
+
+```bash
+gh api -X PUT repos/anyrayHQ/install/environments/release-signing --input - <<'JSON'
+{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+JSON
+gh api -X POST repos/anyrayHQ/install/environments/release-signing/deployment-branch-policies -f name=main -f type=branch
+base64 -i developer-id-application.p12 | gh secret set APPLE_SIGNING_CERT_P12 -R anyrayHQ/install --env release-signing
+gh secret set APPLE_SIGNING_CERT_PASSWORD -R anyrayHQ/install --env release-signing
+base64 -i developer-id-installer.p12 | gh secret set APPLE_INSTALLER_CERT_P12 -R anyrayHQ/install --env release-signing
+gh secret set APPLE_INSTALLER_CERT_PASSWORD -R anyrayHQ/install --env release-signing
+base64 -i AuthKey_XXXXXXXXXX.p8 | gh secret set APPLE_NOTARY_KEY -R anyrayHQ/install --env release-signing
+gh secret set APPLE_NOTARY_KEY_ID -R anyrayHQ/install --env release-signing
+gh secret set APPLE_NOTARY_ISSUER_ID -R anyrayHQ/install --env release-signing
+```
+
+Read it back:
+
+```bash
+gh api repos/anyrayHQ/install/environments/release-signing --jq '.deployment_branch_policy'
+gh api repos/anyrayHQ/install/environments/release-signing/deployment-branch-policies --jq '.branch_policies[] | {name, type}'
+gh secret list -R anyrayHQ/install --env release-signing
+```
+
+Expect `{"custom_branch_policies":true,"protected_branches":false}`, exactly one policy
+`{"name":"main","type":"branch"}`, and the seven names. Then prove one release from
+main. Only after that, delete the repository copies. That step is the one that closes
+the gap: until then any branch can still read them. `APPLE_SIGNING_CERT_PEM` goes too,
+since nothing reads it.
+
+```bash
+for name in APPLE_SIGNING_CERT_P12 APPLE_SIGNING_CERT_PASSWORD APPLE_INSTALLER_CERT_P12 APPLE_INSTALLER_CERT_PASSWORD APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID APPLE_SIGNING_CERT_PEM; do gh secret delete "$name" -R anyrayHQ/install; done
+gh secret list -R anyrayHQ/install | grep '^APPLE_' || echo 'no repository-level Apple secrets left'
+```
 
 ### Windows — Authenticode (Azure Artifact Signing + jsign)
 
@@ -456,15 +527,20 @@ mandatory* step.
 
 ## CI runners
 
-The release workflow runs on **self-hosted AWS CodeBuild runners** (org GitHub billing
-blocks GitHub-hosted runners). One persistent Linux runner project plus an
-**on-demand macOS fleet** created per release by default, or the persistent Mac host below:
+Linux and Windows jobs run on **self-hosted AWS CodeBuild runners**. The five Mac
+jobs (binaries `sign-macos` and `verify-macos-launch`; desktop `build-macos-unsigned`,
+`sign-macos` and `verify-macos-signed`) run on **GitHub-hosted `macos-15`** by
+default. This repository is public, so standard GitHub-hosted runners cost nothing.
+It is a scoped exception to keeping CI on AWS: only the Mac jobs moved (Dean,
+2026-10-24). The CodeBuild Mac fleet allocated a Mac, billed for 24 hours at about
+$35, on six days of seven for roughly 100 minutes of Mac work a day.
 
 | Job | Runner | CodeBuild project (eu-central-1) |
 | --- | --- | --- |
 | build, provision-mac, sign-windows, package-linux, release, teardown-mac | Amazon Linux (`amazonlinux2-x86_64-standard:5.0`) | `anyray-install-runner` |
-| sign-macos | **on-demand** macOS (MAC_ARM, `mac2-m2.metal`) | `anyray-install-runner-mac` (ephemeral) |
-| Mac jobs with `INSTALL_MAC_RUNNER=ec2` | self-hosted `anyray-install-mac` (EC2 `mac2.metal` Dedicated Host, us-east-2) | none |
+| the five Mac jobs, `INSTALL_MAC_RUNNER` unset or `github` (default) | GitHub-hosted `macos-15` (arm64), Xcode 16.4 | none |
+| the five Mac jobs, `INSTALL_MAC_RUNNER=codebuild` (fallback) | **on-demand** macOS (MAC_ARM, `mac2-m2.metal`) | `anyray-install-runner-mac` (ephemeral) |
+| the five Mac jobs, `INSTALL_MAC_RUNNER=ec2` | self-hosted `anyray-install-mac` (EC2 `mac2.metal` Dedicated Host, us-east-2) | none |
 | desktop Linux build and smoke jobs | Ubuntu 22.04 (`aws/codebuild/standard:7.0`) | `anyray-install-runner-ubuntu` |
 
 **`sign-windows` no longer needs Windows.** jsign is a pure-Java Authenticode
@@ -476,17 +552,49 @@ work. **Keep the `anyray-install-runner-win` project**: this workflow no longer
 uses it, but the desktop release's Windows jobs and `validate-artifacts.yml`
 still do.
 
-**Why macOS is on-demand.** Apple signing requires a Mac. EC2 Mac hosts have a
+**GitHub-hosted Mac jobs.** provision-mac still runs on the Linux runner, but only to
+save the choice: it assumes no AWS role and allocates nothing, and teardown-mac is
+skipped. Each Mac job runs in a fresh VM, so nothing one job leaves behind reaches the
+next. Right after its checkout, every Mac job selects Xcode 16.4 with
+`.github/actions/hosted-macos-xcode`, which fails if the image no longer carries that
+version or its `notarytool` and `stapler` do not resolve: the image's default Xcode
+moves between image releases. Bump it only after a dry run. Node still comes from
+`actions/setup-node` and Rust from the pinned toolchain; the image's own `rustup` (1.29.0,
+the same as `RUSTUP_VERSION`) installs it instead of a downloaded `rustup-init`.
+The image signs in its admin `runner` account, allows passwordless `sudo` and has
+Gatekeeper on, so `verify-macos-signed` runs the full root install, sweep and uninstall
+smoke and its `spctl` checks mean what they say. One difference from the headless
+CodeBuild Mac: the desktop postinstall opens the app for that signed-in account. A
+hosted VM has 3 cores and 7 GB of memory, so `build-macos-unsigned` is slower than on the
+fleet's M2; its timeout is 90 minutes.
+
+Rehearse the Mac lane without publishing anything with a CLI-only `release` dry run from
+main, or a staging desktop dry run (both build, sign, notarize and verify, and publish nothing):
+
+```bash
+gh workflow run release-connect-binaries.yml -R anyrayHQ/install --ref main -f version=latest -f dry_run=true
+gh workflow run release-connect-desktop.yml -R anyrayHQ/install --ref main -f version=<x.y.z> -f source_sha=<40-hex monorepo sha> -f channel=staging -f dry_run=true
+```
+
+Fall back to the fleet with the first command below; return to GitHub-hosted with the
+second. A run already past provision-mac keeps its choice.
+
+```bash
+gh variable set INSTALL_MAC_RUNNER -R anyrayHQ/install --body codebuild
+gh variable delete INSTALL_MAC_RUNNER -R anyrayHQ/install
+```
+
+**The CodeBuild fallback.** Apple signing requires a Mac. EC2 Mac hosts have a
 24-hour minimum charge; leaving a fleet ACTIVE continues billing beyond it.
 `mac-fleet.sh down` deletes the runner project and requests fleet deletion on
 success or failure. `up` accepts a fleet still usable in PENDING_DELETION, so
 releases may reuse the remaining paid window. It fails if readiness takes more
 than 20 minutes. Cleanup must never be replaced with simply leaving the fleet active.
-This is the default; the persistent host below replaces it once proven.
 
 The Connect CLI and desktop release workflows share the
 `anyray-install-mac-release` concurrency group for their entire runs. This keeps
-one release's teardown from deleting another release's runner. GitHub retains
+one release's teardown from deleting another release's runner, and GitHub-hosted
+runs keep it, so switching runners never lets two releases overlap. GitHub retains
 one running and one pending run per group; a new dispatch replaces an older
 pending run. Dispatch releases deliberately and do not overlap multiple requests.
 
@@ -507,7 +615,9 @@ The persistent runner projects (`anyray-install-runner`, `anyray-install-runner-
 (`WORKFLOW_JOB_QUEUED`) and **gated to the release maintainers' GitHub account ids** —
 required because the repo is public, so a fork-PR actor can never start a runner. A dispatch by
 anyone outside a project's filter leaves that project's jobs queued with no runner until the
-watchdog cancels them.
+watchdog cancels them. GitHub-hosted Mac jobs have no such filter. They exist only in the two
+release workflows, which start from `workflow_dispatch` (write access) or a call from one, and
+the Apple secrets are reachable only through the `release-signing` environment.
 
 To add a release maintainer (`gh api users/<login> --jq .id` gives the id), update these project filters:
 
@@ -546,8 +656,8 @@ that run's choice intact.
 
 | Value | Mac jobs run on | provision-mac / teardown-mac |
 | --- | --- | --- |
-| unset or empty (default) | `codebuild-anyray-install-runner-mac-<run_id>-<run_attempt>` | create and delete the fleet |
-| `codebuild` | same as unset | same as unset |
+| unset, empty or `github` (default) | GitHub-hosted `macos-15` | provision reports the choice; teardown is skipped |
+| `codebuild` | `codebuild-anyray-install-runner-mac-<run_id>-<run_attempt>` | create and delete the fleet |
 | `ec2` | `anyray-install-mac` for signing, `anyray-install-mac-build` for build and verify (both self-hosted macOS ARM64) | provision reports the choice; teardown is skipped |
 | anything else | nothing; provision fails loudly | teardown still runs idempotent `down` |
 
@@ -609,9 +719,9 @@ stable FAILS the macOS desktop leg on ec2 unless the repository variable
 Dean's written acceptance. To set it, use
 `gh variable set INSTALL_MAC_ROOT_SMOKE_ACCEPTED -R anyrayHQ/install --body <ANY-key or comment URL>`.
 Remove it with `gh variable delete INSTALL_MAC_ROOT_SMOKE_ACCEPTED -R anyrayHQ/install`.
-Without it, stable macOS keeps running on the CodeBuild fleet:
-unset `INSTALL_MAC_RUNNER` for that release. The CodeBuild fleet path still runs the full
-root smoke. A scheduled root-volume reset was rejected: root can copy the runner registration credentials,
+Without it, run stable macOS on GitHub-hosted runners instead:
+unset `INSTALL_MAC_RUNNER` for that release. GitHub-hosted runners and the CodeBuild fleet
+both run the full root smoke. A scheduled root-volume reset was rejected: root can copy the runner registration credentials,
 and a reset does not revoke them. The follow-up is a disposable macOS VM per smoke.
 
 The organization runner group restricted to this repo and the two release
@@ -985,8 +1095,9 @@ After a week of releases, CloudTrail must show no `CreateFleet` for
 gh variable delete INSTALL_MAC_RUNNER -R anyrayHQ/install
 ```
 
-The next run's provision-mac returns to the fleet and `mac-fleet.sh up` recreates
-it. Nothing else needs restoring. A run already past provision-mac keeps its choice.
+The next run's provision-mac returns to GitHub-hosted runners; set the variable to
+`codebuild` instead to return to the fleet, which `mac-fleet.sh up` recreates.
+Nothing else needs restoring. A run already past provision-mac keeps its choice.
 
 **Operating it.** If the host is down or the runner offline, Mac jobs queue.
 The monorepo's stuck-run watchdog cancels runs queued past 40 minutes; it never
@@ -1043,8 +1154,8 @@ aws ec2 release-hosts --region us-east-2 --profile team6 --host-ids "$HOST"
 
 A host released inside its first 24 hours is still billed for all 24.
 
-**Retiring the fleet.** In a later change, after the host has carried releases
-for a while, delete `scripts/mac-fleet.sh`, its test, provision-mac and
+**Retiring the fleet.** In a later change, after GitHub-hosted runners (or the host)
+have carried releases for a while, delete `scripts/mac-fleet.sh`, its test, provision-mac and
 teardown-mac, the `AWS_MAC_FLEET_ROLE_ARN` variable, and its role.
 
 ## Connect desktop installers: staging and stable lanes (ANY-250, ANY-337)
@@ -1392,8 +1503,8 @@ prerelease tag that holds the artifacts.
 
 The existing Apple Application certificate/password, the Apple Installer
 certificate/password, the notarization trio, four Azure variables, Linux GPG
-key/passphrase, and Mac-fleet role listed earlier in this document are
-mandatory; preflight fails closed and names anything absent. The pkg is signed
+key/passphrase, and Mac-fleet role (the `codebuild` fallback's) listed earlier in this
+document are mandatory; preflight fails closed and names anything absent. The pkg is signed
 with the Installer identity, separate from the Application identity used for
 the app and engine. The lane also needs only the two GitHub App secrets above.
 
@@ -1403,7 +1514,7 @@ Native runner requirements are:
 
 | Platform/job | Runner |
 | --- | --- |
-| macOS build, signing, signed smoke | Existing on-demand `codebuild-anyray-install-runner-mac-…` MAC_ARM fleet. Signing is artifact-only, with no private source checkout. Rust comes from the image, with a pinned `rustup-init` fallback. |
+| macOS build, signing, signed smoke | GitHub-hosted `macos-15` by default, the on-demand `codebuild-anyray-install-runner-mac-…` MAC_ARM fleet with `INSTALL_MAC_RUNNER=codebuild` ("CI runners"). Signing is artifact-only, with no private source checkout. Rust comes from the image, with a pinned `rustup-init` fallback. |
 | Windows build/bundle/native verify | Existing `codebuild-anyray-install-runner-win-…` Windows x64 project. The image is not documented to ship Rust or MSVC, so the build job installs a pinned VS 2022 Build Tools (only the x64 compiler and a Windows SDK) and both compile jobs a pinned `rustup-init.exe` (the bundle job links nothing, so it needs no MSVC), each checksum-verified, skipping whatever is already present. |
 | Linux build/native smoke | `codebuild-anyray-install-runner-ubuntu-…` (Ubuntu 22.04 `standard:7.0`), for webkit2gtk 4.1, Xvfb/DBus, and native deb/rpm tooling. `apt-get update` reads only `/etc/apt/sources.list`: the image's third-party sources (Chrome's times out for four minutes) are never installed from. 22.04 on purpose: the build host's glibc (2.35) is the floor for every machine that runs the shipped binary; 24.04 would drop Ubuntu 22.04 and Debian 12 users. Rust from a pinned `rustup-init`. |
 | Azure/GPG/assembly/publish | Existing `codebuild-anyray-install-runner-…` Linux project. |
@@ -1413,8 +1524,8 @@ first dry run must still validate the external side of that trust boundary: the
 App is installed on `anyrayHQ/monorepo` and its installation grant is repository
 Contents read-only.
 
-No job uses a GitHub-hosted runner, so the lane does not depend on the org's
-Actions billing. The persistent install runner is Amazon Linux and cannot
+Only the Mac jobs use GitHub-hosted runners, which are free on this public
+repository, so the lane does not depend on the org's Actions billing. The persistent install runner is Amazon Linux and cannot
 substitute for the Ubuntu or Mac build environments; the Ubuntu project and the
 Mac fleet are the replacements.
 

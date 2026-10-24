@@ -49,7 +49,7 @@ export DEPLOYMENT_TOKEN="adt_..."        # from app.anyray.ai → Deployments
 | `CLUSTER` | no | `anyray` | Cluster name (reused if it already exists). |
 | `NAMESPACE` | no | `anyray` | Kubernetes namespace. |
 | `IMAGE_TAG` | no | template default | One-click accepts only the chart's coordinated release pin or `policy-stable`. |
-| `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-4-5` | Target for the `anyray-default` model alias. |
+| `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-5-5` | Target for the `anyray-default` model alias. |
 
 ## What you get
 

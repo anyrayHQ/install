@@ -13,7 +13,7 @@
     {
       "name": "gateway",
       "source": {
-        "image": "public.ecr.aws/anyray/gateway:v1.10.480"
+        "image": "public.ecr.aws/anyray/gateway:v1.10.521"
       },
       "deploy": {
         "healthcheckPath": "/",
@@ -31,7 +31,7 @@
         "ANYRAY_SPEND_DB_URL": "${{Postgres.DATABASE_URL}}",
         "ANYRAY_OPTIMIZER_URL": "http://${{optimizer.RAILWAY_PRIVATE_DOMAIN}}:8088",
         "ANYRAY_OPTIMIZER_TOKEN": "${{optimizer.ANYRAY_OPTIMIZER_TOKEN}}",
-        "ANYRAY_DEFAULT_MODEL": "anthropic/claude-sonnet-4-5",
+        "ANYRAY_DEFAULT_MODEL": "anthropic/claude-sonnet-5-5",
         "ANYRAY_CONTENT_KEY": "${{secret(64, \"0123456789abcdef\")}}",
         "ANYRAY_CONTENT_MODE": "encrypted",
         "ANYRAY_ALLOW_PLAINTEXT": "false",
@@ -52,7 +52,7 @@
     {
       "name": "optimizer",
       "source": {
-        "image": "public.ecr.aws/anyray/optimizer:v1.10.480"
+        "image": "public.ecr.aws/anyray/optimizer:v1.10.521"
       },
       "deploy": {
         "healthcheckPath": "/health",
@@ -79,7 +79,7 @@
     {
       "name": "proxy",
       "source": {
-        "image": "public.ecr.aws/anyray/proxy:v1.10.480"
+        "image": "public.ecr.aws/anyray/proxy:v1.10.521"
       },
       "deploy": {
         "healthcheckPath": "/anyray-login",

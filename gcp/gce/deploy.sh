@@ -27,7 +27,7 @@
 #                     Scope to your office/VPN range — never 0.0.0.0/0.
 #   DEPLOYMENT_TOKEN  Anyray Cloud deployment token (adt_...). REQUIRED for metering.
 #   IMAGE_TAG         Anyray image tag (default: coordinated release pin)
-#   DEFAULT_MODEL     anyray-default routing target (default: anthropic/claude-sonnet-4-5)
+#   DEFAULT_MODEL     anyray-default routing target (default: anthropic/claude-sonnet-5-5)
 #   NETWORK           VPC network (default: default)
 #
 # Content stays encrypted at rest (ANYRAY_CONTENT_MODE=encrypted); only metadata
@@ -49,7 +49,7 @@ MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-2}"
 [ -f "$HERE/../../ci/storage-defaults.env" ] && . "$HERE/../../ci/storage-defaults.env"
 DISK_SIZE="${DISK_SIZE:-${ANYRAY_VM_DATA_DISK_GB:-200}GB}"
 IMAGE_TAG="${IMAGE_TAG:-policy-stable}"
-DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}"
+DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-5-5}"
 NETWORK="${NETWORK:-default}"
 ALLOWED_CIDR="${ALLOWED_CIDR:-}"
 DEPLOYMENT_TOKEN="${DEPLOYMENT_TOKEN:-}"

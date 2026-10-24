@@ -28,7 +28,7 @@ describe('the CLI release calls the desktop workflow', () => {
 
   test('one desktop job, after the CLI release and the CLI Mac teardown, stable and engine-reusing', () => {
     const desktop = job(caller, 'desktop');
-    assert.match(desktop, /needs: \[signing-preflight, build, sign-macos, sign-windows, package-linux, load-set, release, teardown-mac\]/);
+    assert.match(desktop, /needs: \[signing-preflight, provision-mac, build, sign-macos, verify-macos-launch, sign-windows, package-linux, load-set, release, teardown-mac\]/);
     assert.match(desktop, /inputs\.source_sha != '' && !inputs\.staging && \(\(inputs\.mode == 'release' && needs\.release\.result == 'success'\)/);
     assert.match(desktop, /uses: \.\/\.github\/workflows\/release-connect-desktop\.yml/);
     assert.match(desktop, /secrets: inherit/);
@@ -38,7 +38,7 @@ describe('the CLI release calls the desktop workflow', () => {
   });
 
   test('the CLI release never waits on desktop', () => {
-    assert.match(job(caller, 'release'), /needs: \[build, sign-macos, sign-windows, package-linux, load-set\]/);
+    assert.match(job(caller, 'release'), /needs: \[build, sign-macos, verify-macos-launch, sign-windows, package-linux, load-set\]/);
   });
 
   test('a bad desktop input fails in preflight, before anything ships', () => {
@@ -90,12 +90,14 @@ describe('prepare and publish modes', () => {
     assert.match(build, /id: pkg\n\s+if: \$\{\{ inputs\.mode != 'prepare' \}\}/);
   });
 
-  test('prepare stores the set (MISSING always written, SHA256SUMS last) and publishes nothing', () => {
+  test('prepare stores the CLI set (SHA256SUMS last), then the desktop set with MISSING, and publishes nothing', () => {
     const store = job(caller, 'store-set');
     assert.match(store, /inputs\.mode == 'prepare'/);
-    assert.match(store, /MACOS_OK: \$\{\{ needs\.desktop\.outputs\.macos \}\}/);
-    assert.match(store, /printf '%b' "\$missing" > set\/MISSING/);
-    assert.ok(store.indexOf('set/SHA256SUMS "${set_prefix}/SHA256SUMS"') > store.indexOf('set/MISSING "${set_prefix}/MISSING"'));
+    assert.ok(store.indexOf('set/SHA256SUMS "${set_prefix}/SHA256SUMS"') > store.indexOf('set/SOURCE_SHA "${set_prefix}/SOURCE_SHA"'));
+    const desktop = job(caller, 'store-desktop');
+    assert.match(desktop, /MACOS_OK: \$\{\{ needs\.desktop\.outputs\.macos \}\}/);
+    assert.match(desktop, /: > desktop\/MISSING/);
+    assert.ok(desktop.indexOf('desktop/SHA256SUMS "${set_prefix}/SHA256SUMS"') > desktop.indexOf('for file in MISSING PACKAGE_SHA256 VERSION SOURCE_SHA'));
     assert.match(job(caller, 'release'), /inputs\.mode == 'release' && needs\.build\.result == 'success'/);
   });
 
@@ -104,6 +106,14 @@ describe('prepare and publish modes', () => {
     assert.ok(load.indexOf('SET_SUMS_SHA256" ]') < load.indexOf('aws s3 cp "${src}/${file}"'));
     assert.match(load, /sha256sum --check --strict SHA256SUMS/);
     assert.match(job(caller, 'release'), /inputs\.mode == 'publish' && needs\.load-set\.result == 'success' && needs\.load-set\.outputs\.cli_published != 'true'/);
+  });
+
+  // v1.10.513 and v1.10.517: the monorepo published before the desktop record landed, so it
+  // sent no desktop_sums_sha256 and meant "the CLI alone". The desktop leg still ran with an
+  // empty `present`, published nothing, and reconcile-feed --require-all failed the run.
+  test('publish runs the desktop leg only when there is a desktop set to publish', () => {
+    const desktop = job(caller, 'desktop');
+    assert.match(desktop, /\(inputs\.mode == 'publish' && needs\.load-set\.result == 'success' && \(needs\.load-set\.outputs\.present != '' \|\| inputs\.desktop_sums_sha256 != ''\) && \(needs\.release\.result == 'success' \|\| needs\.load-set\.outputs\.cli_published == 'true'\)\)/);
   });
 
   test('the desktop workflow publishes only staged OSes in publish mode and nothing in prepare', () => {

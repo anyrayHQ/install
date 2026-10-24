@@ -140,7 +140,14 @@ describe('desktop release workflow safety contract', () => {
   test('runs every job on CodeBuild, never on a GitHub-hosted runner', () => {
     const runners = workflow.match(/runs-on: .+/g) ?? [];
     assert.ok(runners.length > 0);
+    const macRunners = ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']
+      .map((name) => job(name).match(/runs-on: .+/)[0]);
+    for (const [i, runner] of macRunners.entries()) {
+      const label = i === 1 ? 'anyray-install-mac' : 'anyray-install-mac-build';
+      assert.equal(runner, `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
+    }
     for (const runner of runners) {
+      if (macRunners.includes(runner)) continue;
       assert.match(runner, /^runs-on: codebuild-anyray-install-runner(-mac|-win|-ubuntu)?-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/);
     }
     assert.doesNotMatch(workflow, /macos-15|ubuntu-24\.04|ubuntu-latest|windows-2025/);
@@ -160,23 +167,24 @@ describe('desktop release workflow safety contract', () => {
     assert.match(job('provision-mac'), /needs: \[preflight, validate-source\]/);
     assert.match(job('build-macos-unsigned'), /needs: \[preflight, provision-mac\]/);
     for (const name of ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed']) {
-      assert.match(job(name), /runs-on: codebuild-anyray-install-runner-mac-/);
+      const label = name === 'sign-macos' ? 'anyray-install-mac' : 'anyray-install-mac-build';
+      assert.equal(job(name).match(/runs-on: .+/)[0], `runs-on: \${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`);
     }
     assert.match(
       job('sign-macos'),
       /needs: \[preflight, build-macos-unsigned, provision-mac\]/
     );
     assert.match(job('teardown-mac'), /needs: \[provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed\]/);
-    assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) && needs\.provision-mac\.result != 'skipped' \}\}/);
+    assert.match(job('teardown-mac'), /if: \$\{\{ always\(\) && needs\.provision-mac\.result != 'skipped' && needs\.provision-mac\.outputs\.mac_runner != 'ec2' \}\}/);
   });
 
   test('bootstraps pinned Rust on both Windows jobs and MSVC once, in the build job', () => {
     const build = job('build-windows-unsigned');
     assert.match(build, /Rust toolchain and MSVC build tools \(pinned\)/);
     assert.match(build, /VS_BUILDTOOLS_SHA256/);
-    assert.match(build, /Microsoft\.VisualStudio\.Workload\.VCTools/);
+    assert.match(build, /Microsoft\.VisualStudio\.Component\.VC\.Tools\.x86\.x64/);
     const bundle = job('bundle-windows-unsigned');
-    assert.doesNotMatch(bundle, /VS_BUILDTOOLS|vswhere|VCTools/);
+    assert.doesNotMatch(bundle, /VS_BUILDTOOLS|vswhere|VC\.Tools|VCTools/);
     for (const body of [build, bundle]) assert.match(body, /RUSTUP_INIT_SHA256_WINDOWS_X64/);
     assert.match(workflow, /VS_BUILDTOOLS_URL: 'https:\/\/download\.visualstudio\.microsoft\.com\//);
     assert.doesNotMatch(workflow, /aka\.ms/);
@@ -212,6 +220,10 @@ describe('desktop release workflow safety contract', () => {
     assert.match(sign, /<readme file="connect-desktop-readme\.html" mime-type="text\/html"\/>/);
     assert.match(
       sign,
+      /<domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"\/>/
+    );
+    assert.match(
+      sign,
       /If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent\./
     );
     assert.match(sign, /Anyray Connect CLI package \(ai\.anyray\.connect\)/);
@@ -229,6 +241,18 @@ describe('desktop release workflow safety contract', () => {
     assert.match(verify, /= '\.\/Applications\/Anyray Connect\.app'/);
     assert.match(verify, /connect-desktop-readme\.html/);
     assert.match(verify, /PKG contains no Installer readme/);
+    assert.match(
+      verify,
+      /test "\$\(xmllint --xpath 'string\(\/installer-gui-script\/domains\/@enable_localSystem\)' "\$distribution"\)" = true\n/
+    );
+    assert.match(
+      verify,
+      /test "\$\(xmllint --xpath 'string\(\/installer-gui-script\/domains\/@enable_anywhere\)' "\$distribution"\)" = false\n/
+    );
+    assert.match(
+      verify,
+      /test "\$\(xmllint --xpath 'string\(\/installer-gui-script\/domains\/@enable_currentUserHome\)' "\$distribution"\)" = false\n/
+    );
     assert.match(
       verify,
       /If any of these deprecated Anyray components are on this Mac, the installer removes them: the anyray-connect command-line package and the Fleet endpoint agent\./

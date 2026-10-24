@@ -65,10 +65,14 @@ services:
       ANYRAY_OPTIMIZER_TOKEN: ${ANYRAY_OPTIMIZER_TOKEN:?run ./setup.sh first}
       # Model the `anyray-default` routing sentinel resolves to. Set it to a model
       # your configured provider serves (a bare model is read under `anthropic`).
-      ANYRAY_DEFAULT_MODEL: ${ANYRAY_DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}
+      ANYRAY_DEFAULT_MODEL: ${ANYRAY_DEFAULT_MODEL:-anthropic/claude-sonnet-5-5}
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:?run ./setup.sh first}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
       ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
+      # Optional override of the token the gateway sends to the updater when an
+      # admin triggers a soft update (POST /admin/v1/settings/updates/run); empty
+      # falls back to ANYRAY_ADMIN_TOKEN, the same value the updater below uses.
+      ANYRAY_UPDATER_TOKEN: ${ANYRAY_UPDATER_TOKEN:-}
       ANYRAY_PROVIDER_KEY_OPENAI: ${ANYRAY_PROVIDER_KEY_OPENAI:-}
       ANYRAY_PROVIDER_KEY_ANTHROPIC: ${ANYRAY_PROVIDER_KEY_ANTHROPIC:-}
       ANYRAY_PROVIDER_KEY_AZURE_OPENAI: ${ANYRAY_PROVIDER_KEY_AZURE_OPENAI:-}
@@ -123,6 +127,14 @@ services:
       # and while the gateway fails open on a 401 rather than erroring, that
       # silently costs ALL savings and busts the prompt cache on warm sessions.
       ANYRAY_OPTIMIZER_SIGNING_KEY: ${ANYRAY_OPTIMIZER_SIGNING_KEY:-}
+      # Corporate forward proxy for outbound calls (LLM providers, Billing).
+      # Set HTTPS_PROXY / HTTP_PROXY to http://host:port when this host has no
+      # direct internet access. NO_PROXY is a comma-separated list of hosts that
+      # skip the proxy; in-stack service names always connect directly.
+      # Empty = connect directly.
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
     volumes:
       - anyray_gateway_data:/data
     # /livez, NOT `/`. `GET /` is the gateway's READINESS probe and a metered
@@ -399,6 +411,11 @@ services:
       WATCHTOWER_HTTP_API_UPDATE: "true"
       WATCHTOWER_HTTP_API_TOKEN: ${ANYRAY_UPDATER_TOKEN:-${ANYRAY_ADMIN_TOKEN}}
       WATCHTOWER_INCLUDE_RESTARTING: "true"
+      # Registry checks use the same forward proxy as the gateway. Empty = direct.
+      # The Docker socket proxy is always reached directly.
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: docker-socket-proxy${NO_PROXY:+,${NO_PROXY}}
 
 volumes:
   anyray_gateway_data:

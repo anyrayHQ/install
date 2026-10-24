@@ -19,17 +19,23 @@ name: Release Anyray Connect desktop
 # short-lived, contents:read GitHub App token. Before source executes, the exact
 # requested commit must be reachable from the fetched origin/main and all CLI /
 # Cargo / Tauri versions must match the explicit input. Private source is never
-# uploaded as an artifact. Signing jobs only receive unsigned build artifacts,
-# never private source, so build.rs and other source-controlled code cannot read
-# the Apple, Azure, or Linux signing material.
+# uploaded as an artifact. Signing jobs receive only unsigned build artifacts,
+# never private source. On the persistent Mac host (INSTALL_MAC_RUNNER=ec2) build
+# and verify jobs run as a separate non-admin account from the signing jobs, no
+# signing job executes build output, and nothing runs as root, so build.rs and
+# other source-controlled code cannot reach the Apple material there. The CodeBuild
+# fleet reuses one host account for every Mac job of a release day (see
+# verify-macos-signed's cleanup), so on that path the boundary is the job, not the account.
 #
-# Every job runs on the account's CodeBuild runners; nothing here depends on
+# Jobs use the account's CodeBuild runners by default; nothing here depends on
 # GitHub-hosted runner billing. Linux compiles on the Ubuntu 22.04 project
 # (`anyray-install-runner-ubuntu`) on purpose: the build host's glibc is the
 # floor for every machine that runs the shipped binary, and 24.04's 2.39 would
 # drop the Ubuntu 22.04 and Debian 12 users that 2.35 still covers. macOS
-# compiles, signs, and smokes on the on-demand MAC_ARM fleet, so the Mac is
-# provisioned after source/publication validation and released after the signed smoke.
+# compiles, signs, and smokes on the on-demand MAC_ARM fleet by default. On the
+# persistent signing host with INSTALL_MAC_RUNNER=ec2 (RELEASING.md), verification
+# skips the root install smoke. The fleet is provisioned after source/publication
+# validation and released after the signed smoke.
 
 on:
   workflow_call:
@@ -66,6 +72,16 @@ on:
         required: false
         type: boolean
         default: false
+      mac_runner:
+        description: "The caller's provision-mac choice (codebuild or ec2); empty when run by hand."
+        required: false
+        type: string
+        default: ''
+      macos_signed_manifest:
+        description: "publish mode: the digests of the staged signed macOS files, from the caller's load-set"
+        required: false
+        type: string
+        default: ''
     outputs:
       macos:
         description: 'true when the macOS chain verified'
@@ -76,6 +92,9 @@ on:
       linux:
         description: 'true when the Linux chain verified'
         value: ${{ jobs.outcome.outputs.linux }}
+      macos_manifest:
+        description: "digests of the signed macOS files, for the caller's store-desktop"
+        value: ${{ jobs.sign-macos.outputs.manifest }}
   workflow_dispatch:
     inputs:
       version:
@@ -255,17 +274,28 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      # codebuild (the per-release fleet, the default) or ec2 (the persistent signing
+      # host). Chosen once per run; every Mac job and teardown-mac read it from here.
+      mac_runner: ${{ steps.mac-runner.outputs.mac_runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+      - name: Choose the Mac runner (INSTALL_MAC_RUNNER, RELEASING.md)
+        id: mac-runner
+        env:
+          INSTALL_MAC_RUNNER: ${{ inputs.mac_runner || vars.INSTALL_MAC_RUNNER }}
+        run: ./scripts/mac-runner.sh select
+      - if: steps.mac-runner.outputs.mac_runner == 'codebuild'
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
           role-to-assume: ${{ vars.AWS_MAC_FLEET_ROLE_ARN }}
           aws-region: eu-central-1
-      - run: ./scripts/mac-fleet.sh up
+      - if: steps.mac-runner.outputs.mac_runner == 'codebuild'
+        run: ./scripts/mac-fleet.sh up
 
   build-macos-unsigned:
     needs: [preflight, provision-mac]
-    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac-build"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
     permissions:
       contents: read
       id-token: write # assume the CI-artifacts role for the S3 handoff
@@ -275,6 +305,16 @@ jobs:
       SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
       TARGET_TRIPLE: universal-apple-darwin
     steps:
+      - name: Refuse unless the host's trust gate ran (persistent Mac only)
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
+        run: |
+          set -euo pipefail
+          [ "$MAC_RUNNER" = ec2 ] || exit 0
+          test -f "$RUNNER_TEMP/.trust-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" || {
+            echo '::error::the job-started trust gate did not run on this host (RELEASING.md, The persistent macOS signing host)'
+            exit 1
+          }
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -386,14 +426,15 @@ jobs:
             done
           )
 
-      # The fleet image is expected to ship Rust; this only fills the gap if it
-      # does not, from a pinned rustup-init verified against its digest.
+      # The daemon PATH excludes user toolchains. Check the build account's rustup
+      # explicitly and add it for later steps, or install the pinned, verified rustup-init.
       - name: Check for an existing Rust toolchain
         id: rustup-check
         run: |
           set -euo pipefail
-          if command -v rustup >/dev/null 2>&1; then
+          if [ -x "$HOME/.cargo/bin/rustup" ]; then
             echo 'present=true' >> "$GITHUB_OUTPUT"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           else
             echo 'present=false' >> "$GITHUB_OUTPUT"
           fi
@@ -416,14 +457,19 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Build the unsigned universal Tauri app bundle
-        env:
-          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: ${{ needs.preflight.outputs.distribution }}
+      - name: Pinned Rust toolchain and targets
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
           rustup default "$RUST_TOOLCHAIN"
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+
+      - name: Build the unsigned universal Tauri app bundle
+        env:
+          ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: ${{ needs.preflight.outputs.distribution }}
+        run: |
+          set -euo pipefail
           npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$TAURI_CLI_VERSION"
           (
             cd private-source/connect-tray/src-tauri
@@ -480,11 +526,13 @@ jobs:
 
   sign-macos:
     needs: [preflight, build-macos-unsigned, provision-mac]
-    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
     permissions:
       contents: read
       id-token: write # assume the CI-artifacts role for the S3 handoff
     timeout-minutes: 75
+    outputs:
+      manifest: ${{ steps.digests.outputs.manifest }}
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       APPLE_SIGNING_CERT_P12: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
@@ -495,12 +543,24 @@ jobs:
       APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
     steps:
+      - name: Refuse unless the host's trust gate ran (persistent Mac only)
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
+        run: |
+          set -euo pipefail
+          [ "$MAC_RUNNER" = ec2 ] || exit 0
+          test -f "$RUNNER_TEMP/.trust-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" || {
+            echo '::error::the job-started trust gate did not run on this host (RELEASING.md, The persistent macOS signing host)'
+            exit 1
+          }
       # The S3 handoff below is a LOCAL composite action, so the repo must be
       # on disk before it can be resolved.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           sparse-checkout: |
             .github/actions
+            scripts/artifact-digest.sh
+            scripts/safe-unzip.sh
           sparse-checkout-cone-mode: false
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
@@ -543,7 +603,7 @@ jobs:
           security import "$ca_dir/DeveloperIDCA.cer" -k "$KEYCHAIN"
           security import "$ca_dir/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
 
-          printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/connect-desktop-cert.p12"
+          ( umask 077; printf '%s' "$APPLE_SIGNING_CERT_P12" | base64 -d > "$RUNNER_TEMP/connect-desktop-cert.p12" )
           security import "$RUNNER_TEMP/connect-desktop-cert.p12" \
             -k "$KEYCHAIN" -f pkcs12 -P "$APPLE_SIGNING_CERT_PASSWORD" \
             -A -T /usr/bin/codesign
@@ -560,14 +620,16 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
           umask 077
-          printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/connect-desktop-notary-key.p8"
+          ( umask 077; printf '%s' "$APPLE_NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/connect-desktop-notary-key.p8" )
           test -s "$RUNNER_TEMP/connect-desktop-notary-key.p8"
 
       - name: Sign, notarize, and staple the app
         run: |
           set -euo pipefail
-          mkdir -p expanded out
-          ditto -x -k unsigned/connect-desktop-unsigned.zip expanded
+          # This build-controlled input reaches the signing account; see the safe-unzip.sh script.
+          rm -rf expanded
+          mkdir -p out
+          ./scripts/safe-unzip.sh extract unsigned/connect-desktop-unsigned.zip expanded
           app="$(find expanded -maxdepth 1 -type d -name '*.app' -print -quit)"
           [ -n "$app" ] || { echo '::error::unsigned app artifact contains no .app'; exit 1; }
           engine="$app/Contents/MacOS/anyray-connect"
@@ -613,6 +675,7 @@ jobs:
       - name: Package the updater bundle
         run: |
           set -euo pipefail
+          ./scripts/safe-unzip.sh verify-tree expanded
           app="$(find expanded -maxdepth 1 -type d -name '*.app' -print -quit)"
           [ -n "$app" ] || { echo '::error::signed app is missing before updater packaging'; exit 1; }
           tarball="out/anyray-connect-desktop-${VERSION}-macos-universal.app.tar.gz"
@@ -625,8 +688,7 @@ jobs:
           keychain_password_file="$RUNNER_TEMP/connect-desktop-keychain-password"
           test -f "$keychain_password_file"
           keychain_password="$(cat "$keychain_password_file")"
-          printf '%s' "$APPLE_INSTALLER_CERT_P12" \
-            | base64 -d > "$RUNNER_TEMP/connect-desktop-installer-cert.p12"
+          ( umask 077; printf '%s' "$APPLE_INSTALLER_CERT_P12" | base64 -d > "$RUNNER_TEMP/connect-desktop-installer-cert.p12" )
           security import "$RUNNER_TEMP/connect-desktop-installer-cert.p12" \
             -k "$keychain" -f pkcs12 \
             -P "$APPLE_INSTALLER_CERT_PASSWORD" -A -T /usr/bin/productsign
@@ -716,6 +778,7 @@ jobs:
       - name: Build and sign the macOS installer (Developer ID Installer)
         run: |
           set -euo pipefail
+          ./scripts/safe-unzip.sh verify-tree expanded
           app="$(find expanded -maxdepth 1 -type d -name '*.app' -print -quit)"
           [ -n "$app" ] || { echo '::error::signed app is missing before PKG packaging'; exit 1; }
           root="$RUNNER_TEMP/connect-desktop-pkgroot"
@@ -781,6 +844,7 @@ jobs:
               '  <title>Anyray Connect</title>' \
               '  <readme file="connect-desktop-readme.html" mime-type="text/html"/>' \
               '  <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>' \
+              '  <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>' \
               '  <choices-outline>' \
               '    <line choice="default">' \
               '      <line choice="ai.anyray.connect-tray"/>' \
@@ -854,6 +918,10 @@ jobs:
             security delete-keychain "$RUNNER_TEMP/connect-desktop-signing.keychain-db"
           fi
 
+      - name: Record the digests of the signed outputs
+        id: digests
+        run: ./scripts/artifact-digest.sh emit manifest out/*.pkg out/*.app.tar.gz
+
       - uses: ./.github/actions/s3-artifact-upload
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
@@ -865,8 +933,8 @@ jobs:
   # and bundled engine execute only after the Apple secrets and throwaway
   # keychain are gone from the job boundary.
   verify-macos-signed:
-    needs: [preflight, sign-macos]
-    runs-on: codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: [preflight, sign-macos, provision-mac]
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac-build"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
     timeout-minutes: 40
     permissions:
       id-token: write # assume the CI-artifacts role for the S3 handoff
@@ -874,6 +942,16 @@ jobs:
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
+      - name: Refuse unless the host's trust gate ran (persistent Mac only)
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
+        run: |
+          set -euo pipefail
+          [ "$MAC_RUNNER" = ec2 ] || exit 0
+          test -f "$RUNNER_TEMP/.trust-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" || {
+            echo '::error::the job-started trust gate did not run on this host (RELEASING.md, The persistent macOS signing host)'
+            exit 1
+          }
       # The S3 handoff below is a LOCAL composite action, so the repo must be
       # on disk before it can be resolved.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -895,7 +973,17 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
           path: signed
+      # Check exactly the bytes sign-macos signed: the bucket is writable, so a working
+      # build could otherwise stand in for this check and be swapped back before publish.
+      - name: Verify the signed macOS files against the signing job's digests
+        env:
+          MACOS_MANIFEST: ${{ needs.sign-macos.outputs.manifest }}
+        run: ./scripts/artifact-digest.sh verify connect-desktop-macos-signed signed "$MACOS_MANIFEST"
       - name: Verify signed installation, sweep cases and uninstall
+        env:
+          MAC_RUNNER: ${{ needs.provision-mac.outputs.mac_runner }}
+          CHANNEL: ${{ needs.preflight.outputs.channel }}
+          ROOT_SMOKE_ACCEPTED: ${{ vars.INSTALL_MAC_ROOT_SMOKE_ACCEPTED }}
         run: |
           set -euo pipefail
           trap 'echo "::error::macOS verification failed at script line $LINENO"' ERR
@@ -929,6 +1017,10 @@ jobs:
           test -f "$distribution"
           test "$(xmllint --xpath 'string(/installer-gui-script/readme/@file)' "$distribution")" \
             = 'connect-desktop-readme.html'
+          # One allowed domain makes Installer skip the Destination Select step.
+          test "$(xmllint --xpath 'string(/installer-gui-script/domains/@enable_localSystem)' "$distribution")" = true
+          test "$(xmllint --xpath 'string(/installer-gui-script/domains/@enable_anywhere)' "$distribution")" = false
+          test "$(xmllint --xpath 'string(/installer-gui-script/domains/@enable_currentUserHome)' "$distribution")" = false
           readme="$(find "$expanded_pkg" -type f -name connect-desktop-readme.html -print -quit)"
           [ -n "$readme" ] || { echo '::error::PKG contains no Installer readme'; exit 1; }
           grep -Fq \
@@ -962,6 +1054,16 @@ jobs:
           payload_uninstall_sh="$(find "$expanded_pkg" -type f -path '*/usr/local/lib/anyray-connect/uninstall.sh' -print -quit)"
           [ -n "$payload_uninstall_sh" ] || { echo '::error::PKG payload contains no uninstall.sh'; exit 1; }
           cmp "$uninstaller_scripts/uninstall.sh" "$payload_uninstall_sh"
+
+          # The persistent host runs no CI code as root (RELEASING.md, ANY-1405). There this
+          # job runs as the unprivileged build account: it keeps every check above, launches
+          # the signed engine once, then fails on stable unless the acceptance variable is set,
+          # so publish and store-desktop treat macOS as not verified without that acceptance.
+          if [ "$MAC_RUNNER" = ec2 ]; then
+            test "$("$updater_app/Contents/MacOS/anyray-connect" --version | head -1)" = "anyray-connect $VERSION"
+            ./scripts/mac-root-smoke-gate.sh
+            exit 0
+          fi
 
           installed_app='/Applications/Anyray Connect.app'
           launcher='/usr/local/bin/anyray-connect'
@@ -1365,7 +1467,8 @@ jobs:
 
   teardown-mac:
     needs: [provision-mac, build-macos-unsigned, sign-macos, verify-macos-signed]
-    if: ${{ always() && needs.provision-mac.result != 'skipped' }}
+    # Only explicit ec2 skips teardown; an empty choice still runs idempotent down so no fleet stays ACTIVE and billing.
+    if: ${{ always() && needs.provision-mac.result != 'skipped' && needs.provision-mac.outputs.mac_runner != 'ec2' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -1494,9 +1597,12 @@ jobs:
             Invoke-WebRequest -Uri $env:VS_BUILDTOOLS_URL -OutFile $bootstrapper
             $got = (Get-FileHash $bootstrapper -Algorithm SHA256).Hash.ToLower()
             if ($got -ne $env:VS_BUILDTOOLS_SHA256) { throw "vs_BuildTools.exe checksum mismatch: got $got" }
+            # Only what Rust links the tray with: the x64 compiler and linker, and a Windows SDK.
+            # The whole VCTools workload with its recommended extras took about twice as long.
             $install = Start-Process -FilePath $bootstrapper -Wait -PassThru -ArgumentList @(
               '--quiet', '--wait', '--norestart', '--nocache',
-              '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended'
+              '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+              '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.22621'
             )
             if ($install.ExitCode -notin 0, 3010) { throw "VS Build Tools install failed with exit $($install.ExitCode)" }
           }
@@ -1512,6 +1618,10 @@ jobs:
             $env:Path = "$cargoBin;$env:Path"
           }
           rustup --version
+          rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$env:RUST_TOOLCHAIN"
+          rustup target add $env:TARGET_TRIPLE
+
 
       - name: Compile the unsigned Windows app executable
         shell: pwsh
@@ -1521,9 +1631,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if ($PSVersionTable.PSVersion -lt [version]'7.3') { throw 'Desktop builds require PowerShell 7.3+ for native command error handling' }
           $PSNativeCommandUseErrorActionPreference = $true
-          rustup toolchain install "$env:RUST_TOOLCHAIN" --profile minimal --no-self-update
-          rustup default "$env:RUST_TOOLCHAIN"
-          rustup target add $env:TARGET_TRIPLE
           npm install --prefix "$env:RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$env:TAURI_CLI_VERSION"
           Push-Location private-source/connect-tray/src-tauri
           node "$env:GITHUB_WORKSPACE/scripts/run-desktop-tauri.mjs" "$env:RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --target $env:TARGET_TRIPLE --no-bundle --ci -- --locked
@@ -2246,7 +2353,14 @@ jobs:
           set -euo pipefail
           SUDO=""
           [ "$(id -u)" -ne 0 ] && SUDO=sudo
-          $SUDO apt-get update
+          # Only the Ubuntu archive in /etc/apt/sources.list: the image also lists third-party
+          # sources no job here installs from, and one (dl.google.com) times out for 4 minutes.
+          grep -Eq '^deb .*archive\.ubuntu\.com/ubuntu' /etc/apt/sources.list || {
+            echo '::error::/etc/apt/sources.list has no Ubuntu archive; the Ubuntu-only update would read nothing'
+            exit 1
+          }
+          no_parts="$(mktemp -d)"
+          $SUDO apt-get update -o Dir::Etc::SourceParts="$no_parts"
           $SUDO apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev build-essential libssl-dev libxdo-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf rpm
@@ -2266,6 +2380,12 @@ jobs:
           ./rustup-init -y --no-modify-path --profile minimal --default-toolchain none
           rm -f rustup-init
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Pinned Rust toolchain and target
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add "$TARGET_TRIPLE"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         if: ${{ !inputs.reuse_engines }}
         with:
@@ -2312,9 +2432,6 @@ jobs:
           ANYRAY_CONNECT_DESKTOP_DISTRIBUTION: ${{ needs.preflight.outputs.distribution }}
         run: |
           set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
-          rustup default "$RUST_TOOLCHAIN"
-          rustup target add "$TARGET_TRIPLE"
           npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-audit --no-fund --ignore-scripts --save-exact "@tauri-apps/cli@$TAURI_CLI_VERSION"
           (
             cd private-source/connect-tray/src-tauri
@@ -2434,7 +2551,14 @@ jobs:
           as_root() {
             if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
           }
-          as_root apt-get update
+          # Only the Ubuntu archive in /etc/apt/sources.list: the image also lists third-party
+          # sources no job here installs from, and one (dl.google.com) times out for 4 minutes.
+          grep -Eq '^deb .*archive\.ubuntu\.com/ubuntu' /etc/apt/sources.list || {
+            echo '::error::/etc/apt/sources.list has no Ubuntu archive; the Ubuntu-only update would read nothing'
+            exit 1
+          }
+          no_parts="$(mktemp -d)"
+          as_root apt-get update -o Dir::Etc::SourceParts="$no_parts"
           as_root apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
             rpm xvfb xauth dbus-x11 procps passwd python3 curl ca-certificates
@@ -2754,7 +2878,7 @@ jobs:
   # manifest and feed once. A failed or unfinished OS does not stop the others; reconcile-feed names
   # it. Nothing publishes unless the source and publication checks passed, and never on a dry run.
   publish:
-    needs: [preflight, validate-source, verify-macos-signed, verify-windows-signatures, smoke-linux-installers, sign-linux-artifacts]
+    needs: [preflight, sign-macos, validate-source, verify-macos-signed, verify-windows-signatures, smoke-linux-installers, sign-linux-artifacts]
     if: ${{ always() && needs.preflight.result == 'success' && (needs.validate-source.result == 'success' || inputs.mode == 'publish') && !inputs.dry_run && inputs.mode != 'prepare' }}
     strategy:
       fail-fast: false
@@ -2807,6 +2931,11 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: ${{ matrix.artifact }}
           path: platform/${{ matrix.artifact }}
+      - name: Verify the signed macOS files against the signing job's digests
+        if: ${{ matrix.os == 'macos' && format('{0}', matrix.ready) == 'true' }}
+        env:
+          MACOS_MANIFEST: ${{ inputs.mode == 'publish' && inputs.macos_signed_manifest || inputs.mode != 'publish' && needs.sign-macos.outputs.manifest || '' }}
+        run: ./scripts/artifact-digest.sh verify connect-desktop-macos-signed "platform/connect-desktop-macos-signed" "$MACOS_MANIFEST"
       - name: Download this OS's second signed set
         if: ${{ format('{0}', matrix.ready) == 'true' && matrix.artifact2 != '' }}
         uses: ./.github/actions/s3-artifact-download
@@ -2877,7 +3006,7 @@ jobs:
   # dry_run publishes nothing, but the consolidated checksums and signed channel manifest the real
   # publish would write are built here and kept as a workflow artifact for inspection.
   assemble-dry-run:
-    needs: [preflight, verify-macos-signed, verify-windows-signatures, smoke-linux-installers, sign-linux-artifacts]
+    needs: [preflight, sign-macos, verify-macos-signed, verify-windows-signatures, smoke-linux-installers, sign-linux-artifacts]
     if: ${{ always() && inputs.dry_run && inputs.mode == 'release' && needs.preflight.result == 'success' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
@@ -2908,6 +3037,10 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-macos-signed
           path: platform/macos
+      - name: Verify the signed macOS files against the signing job's digests
+        env:
+          MACOS_MANIFEST: ${{ needs.sign-macos.outputs.manifest }}
+        run: ./scripts/artifact-digest.sh verify connect-desktop-macos-signed "platform/macos" "$MACOS_MANIFEST"
       - uses: ./.github/actions/s3-artifact-download
         with:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}

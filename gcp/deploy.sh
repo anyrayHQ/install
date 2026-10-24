@@ -21,7 +21,7 @@
 #                     Scope to your office/VPN range — never 0.0.0.0/0.
 #   DEPLOYMENT_TOKEN  Anyray Cloud deployment token (adt_...). REQUIRED for metering.
 #   IMAGE_TAG         Chart appVersion or policy-stable (default: chart pin)
-#   DEFAULT_MODEL     anyray-default routing target (default: anthropic/claude-sonnet-4-5)
+#   DEFAULT_MODEL     anyray-default routing target (default: anthropic/claude-sonnet-5-5)
 #
 # Content stays encrypted at rest (ANYRAY_CONTENT_MODE=encrypted); only metadata
 # is logged. The content key + pseudonym salt are generated locally and never
@@ -44,7 +44,7 @@ REGION="${REGION:-us-central1}"
 CLUSTER="${CLUSTER:-anyray}"
 NAMESPACE="${NAMESPACE:-anyray}"
 IMAGE_TAG="${IMAGE_TAG:-policy-stable}"
-DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-4-5}"
+DEFAULT_MODEL="${DEFAULT_MODEL:-anthropic/claude-sonnet-5-5}"
 ALLOWED_CIDR="${ALLOWED_CIDR:-}"
 DEPLOYMENT_TOKEN="${DEPLOYMENT_TOKEN:-}"
 

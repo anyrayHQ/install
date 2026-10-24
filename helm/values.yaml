@@ -342,7 +342,7 @@ gateway:
   allowPlaintext: "false"
   # Target for the `anyray-default` model alias (request names no model). Matches
   # the other deploy artifacts; blank it to fall back to the gateway's own default.
-  defaultModel: "anthropic/claude-sonnet-4-5"
+  defaultModel: "anthropic/claude-sonnet-5-5"
   # On-top mode: point Anyray at an existing OpenAI-compatible gateway (LiteLLM,
   # OpenRouter, …) so clients send NO per-request x-anyray-config header — the
   # gateway seeds its default routing config from this URL on first boot. For an
@@ -392,6 +392,20 @@ gateway:
     seatExclude: ""
   # Extra env vars (provider-key fallbacks, rate limits, …)
   # in plain k8s env syntax: [{name: ANYRAY_RATE_LIMIT_RPM, value: "600"}]
+  #
+  # Outbound through a corporate forward proxy: set HTTPS_PROXY (and HTTP_PROXY
+  # if you need it) plus NO_PROXY for hosts that skip the proxy. The chart's own
+  # services always connect directly; list any other internal host in NO_PROXY.
+  # A proxy URL that carries a password belongs in a Secret, not in this file.
+  #   extraEnv:
+  #     - name: HTTPS_PROXY
+  #       value: http://proxy.example.com:3128
+  #     # or, with credentials:
+  #     # - name: HTTPS_PROXY
+  #     #   valueFrom:
+  #     #     secretKeyRef: {name: anyray-egress-proxy, key: url}
+  #     - name: NO_PROXY
+  #       value: .corp.example.com
   extraEnv: []
   # Extra volumes for this pod, and where to mount them in its container, in
   # plain k8s syntax. The usual case is a database CA bundle for a URL that

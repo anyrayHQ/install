@@ -8,7 +8,7 @@ import urllib.request, json, sys
 
 # Fire a completion through LiteLLM.
 body = json.dumps({
-    "model": "gpt-4o",
+    "model": "gpt-6.1-sol",
     "messages": [{"role": "user", "content": "hello"}],
     "max_tokens": 200,
 }).encode()

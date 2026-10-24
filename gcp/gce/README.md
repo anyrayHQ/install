@@ -54,7 +54,7 @@ export DEPLOYMENT_TOKEN="adt_..."        # from app.anyray.ai → Deployments
 | `MACHINE_TYPE` | no | `e2-standard-2` | VM size (2 vCPU / 8 GB). |
 | `DISK_SIZE` | no | `200GB` | Persistent data-disk size. Holds the 90-day trace retention window plus the images and `/data` volumes. |
 | `IMAGE_TAG` | no | template default | Starts on the coordinated release pin; refreshed templates may follow `policy-stable`. |
-| `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-4-5` | Target for the `anyray-default` model alias. |
+| `DEFAULT_MODEL` | no | `anthropic/claude-sonnet-5-5` | Target for the `anyray-default` model alias. |
 | `NETWORK` | no | `default` | VPC network for the VM + firewall rules. |
 
 Re-run `deploy.sh` to update an existing VM's Billing token, image, model, and

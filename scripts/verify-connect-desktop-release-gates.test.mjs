@@ -76,7 +76,8 @@ test('every engine build from source puts a pnpm shim on PATH before building co
   assert.ok(builds.length >= 3, `found ${builds.length} engine builds`);
   for (const build of builds) {
     const step = text.slice(text.lastIndexOf('\n      - name:', build.index), build.index);
-    assert.match(step, /corepack enable pnpm --install-directory/, step.split('\n')[1]);
+    // corepack enable --install-directory fails (ENOENT) unless the directory exists.
+    assert.match(step, /(?:mkdir -p "\$pnpm_shims"|New-Item -ItemType Directory -Force -Path \$pnpm_shims)[^\n]*\n\s*corepack enable pnpm --install-directory/, step.split('\n')[1]);
     assert.match(step, /PATH *= *"\$pnpm_shims[:;]/, step.split('\n')[1]);
   }
 });

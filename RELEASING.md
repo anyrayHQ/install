@@ -576,6 +576,12 @@ gh workflow run release-connect-binaries.yml -R anyrayHQ/install --ref main -f v
 gh workflow run release-connect-desktop.yml -R anyrayHQ/install --ref main -f version=<x.y.z> -f source_sha=<40-hex monorepo sha> -f channel=staging -f dry_run=true
 ```
 
+Leave `source_sha` off the CLI rehearsal. With it, a `release` run checks that the npm
+package's `gitHead` is that commit, and a version shipped through `prepare`/`publish` has
+none on npm, so the run stops at validate-desktop. The desktop rehearsal makes no npm check:
+take `version` and `source_sha` from the version's publish run (its `VERSION_INPUT` and
+`SOURCE_SHA_INPUT`).
+
 Fall back to the fleet with the first command below; return to GitHub-hosted with the
 second. A run already past provision-mac keeps its choice.
 

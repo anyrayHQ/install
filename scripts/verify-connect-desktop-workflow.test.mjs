@@ -821,10 +821,15 @@ test('all Mac fleet owners serialize the full workflow, including cleanup', () =
 });
 
 test('native builds use the source-pinned pnpm before any packaging command', () => {
-  assert.doesNotMatch(workflow, /corepack pnpm -C|corepack enable|cargo install tauri-cli/);
+  // A global `corepack enable` once resolved pnpm outside the source project (12.3.4, not the
+  // pinned 10.34.5). The run-local shim connect's bare `pnpm` needs resolves inside it, as
+  // `corepack pnpm` does, so it is the one form allowed, and only after the cd.
+  assert.doesNotMatch(workflow, /corepack pnpm -C|corepack enable(?! pnpm --install-directory)|cargo install tauri-cli/);
   for (const name of ['build-macos-unsigned', 'build-linux-unsigned', 'build-windows-unsigned']) {
     const body = job(name);
-    assert.match(body, /(?:cd|Push-Location) private-source\n(?:            #[^\n]*\n|          try \{\n)?\s*corepack pnpm --filter/);
+    const cd = body.search(/(?:cd|Push-Location) private-source\n/);
+    const firstCorepack = body.search(/corepack (?:pnpm|enable)/);
+    assert.ok(cd !== -1 && firstCorepack > cd, `${name}: corepack runs before the cd into private-source`);
     assert.match(body, /--filter 'anyray-vscode\.\.\.'/);
     assert.match(body, /--config.node-linker=isolated/);
   }

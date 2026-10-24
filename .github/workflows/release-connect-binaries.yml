@@ -519,6 +519,8 @@ jobs:
   # moved to GitHub-hosted (2026-10-24).
   provision-mac:
     needs: build
+    # Explicit: the implicit success() also skips when validate-desktop skipped (a CLI-only or staging run).
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -551,6 +553,7 @@ jobs:
   # produce a signature that verifies but won't launch; proven by E2E).
   sign-macos:
     needs: [build, provision-mac]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.provision-mac.result == 'success' }}
     runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || needs.provision-mac.outputs.mac_runner == 'codebuild' && format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) || 'macos-15' }}
     # The Apple secrets live in this environment, which admits only refs/heads/main (RELEASING.md).
     environment: release-signing
@@ -1059,6 +1062,7 @@ jobs:
   # runs as the unprivileged build account (RELEASING.md, ANY-1405).
   verify-macos-launch:
     needs: [provision-mac, sign-macos]
+    if: ${{ !cancelled() && needs.provision-mac.result == 'success' && needs.sign-macos.result == 'success' }}
     runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac-build"]') || needs.provision-mac.outputs.mac_runner == 'codebuild' && format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) || 'macos-15' }}
     timeout-minutes: 20
     permissions:
@@ -1216,6 +1220,7 @@ jobs:
   #      main reason to prefer it over a password-based service principal.
   sign-windows:
     needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:
@@ -1542,6 +1547,7 @@ jobs:
   # public key ships alongside them.
   package-linux:
     needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:

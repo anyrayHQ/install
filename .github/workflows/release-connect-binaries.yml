@@ -19,7 +19,8 @@ name: Release anyray-connect binaries
 # desktop failure never blocks or changes the CLI release.
 #
 # Code signing (RFC 0010 §6, setting names in RELEASING.md): the darwin
-# binaries are Developer ID-signed + notarized on an on-demand Mac; the macOS
+# binaries are Developer ID-signed + notarized on a Mac (GitHub-hosted macos-15
+# by default, INSTALL_MAC_RUNNER in RELEASING.md); the macOS
 # MDM package is additionally Installer-signed, notarized, and stapled; the Windows
 # binary is Authenticode-signed by jsign against a certificate held by **Azure
 # Artifact Signing** (on the LINUX runner — jsign is pure Java, so no Windows
@@ -58,7 +59,7 @@ on:
         required: false
         default: ''
       dry_run:
-        description: 'Test run: build + sign + notarize + exercise the on-demand Mac fleet, but do NOT publish a GitHub release (no customer-facing change). Signed assets are uploaded as a workflow artifact for inspection.'
+        description: 'Test run: build + sign + notarize on the selected Mac runner, but do NOT publish a GitHub release (no customer-facing change). Signed assets are uploaded as a workflow artifact for inspection. With mode=prepare the signed set is still stored under connect-sets/<set_key>/.'
         required: false
         type: boolean
         default: false
@@ -123,6 +124,8 @@ jobs:
   # it listed and unset, which is how this trap re-arms.
   signing-preflight:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    # The Apple secrets live in this environment, which admits only refs/heads/main (RELEASING.md).
+    environment: release-signing
     timeout-minutes: 40
     outputs:
       set_key: ${{ steps.set.outputs.set_key }}
@@ -502,17 +505,18 @@ jobs:
   # below still check the Apple secrets, but `signing-preflight` has already
   # failed the run if any is missing, so on a real release they cannot be false
   # and an unsigned binary cannot pass through.
-  # Use the on-demand Mac fleet by default, or the persistent signing host with
-  # INSTALL_MAC_RUNNER=ec2 (RELEASING.md). The fleet path creates the MAC_ARM fleet
-  # + ephemeral runner project, with teardown-mac removing the runner.
-  # Runs on the Linux runner and assumes a scoped GitHub-OIDC role to drive the
-  # fleet lifecycle (scripts/mac-fleet.sh).
+  # provision-mac saves INSTALL_MAC_RUNNER once per run (RELEASING.md, CI runners).
+  # Unset or github (the default) runs the Mac jobs on GitHub-hosted macos-15, free
+  # on this public repository: nothing is allocated and teardown-mac is skipped.
+  # codebuild is the fallback: this job assumes a scoped GitHub-OIDC role and creates
+  # the MAC_ARM fleet + ephemeral runner project (scripts/mac-fleet.sh), and
+  # teardown-mac removes the runner. ec2 is the persistent signing host.
   #
-  # Cost is one 24h-minimum EC2 Mac charge per DAY the lane runs, not per
+  # The fleet costs one 24h-minimum EC2 Mac charge per DAY the lane runs, not per
   # release: teardown deliberately leaves the fleet so every run inside that
-  # already-paid window reuses the same Mac. Deleting it per release re-bought
-  # the minimum each time (~$720/mo for 2.7h of use) — see `down` in
-  # scripts/mac-fleet.sh.
+  # already-paid window reuses the same Mac. That still came to about $35 a day on
+  # six days of seven for ~100 minutes of Mac work a day, which is why the default
+  # moved to GitHub-hosted (2026-10-24).
   provision-mac:
     needs: build
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
@@ -521,8 +525,9 @@ jobs:
       contents: read
       id-token: write # assume the fleet-lifecycle role via OIDC
     outputs:
-      # codebuild (the per-release fleet, the default) or ec2 (the persistent signing
-      # host). Chosen once per run; every Mac job and teardown-mac read it from here.
+      # github (GitHub-hosted macos-15, the default), codebuild (the per-release fleet) or
+      # ec2 (the persistent signing host). Chosen once per run; every Mac job and
+      # teardown-mac read it from here.
       mac_runner: ${{ steps.mac-runner.outputs.mac_runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -540,13 +545,15 @@ jobs:
         run: ./scripts/mac-fleet.sh up
 
   # Developer ID-signs + notarizes the two darwin binaries and the universal
-  # macOS installer on the on-demand Mac
+  # macOS installer on the selected Mac
   # using Apple's own codesign + notarytool — the only tooling that correctly
   # signs Bun-compiled binaries (rcodesign/quill mishandle the x64 Mach-O and
   # produce a signature that verifies but won't launch; proven by E2E).
   sign-macos:
     needs: [build, provision-mac]
-    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac"]') || needs.provision-mac.outputs.mac_runner == 'codebuild' && format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) || 'macos-15' }}
+    # The Apple secrets live in this environment, which admits only refs/heads/main (RELEASING.md).
+    environment: release-signing
     timeout-minutes: 40
     permissions:
       contents: read
@@ -584,6 +591,9 @@ jobs:
             .github/actions
             scripts/artifact-digest.sh
           sparse-checkout-cone-mode: false
+      - name: Pin Xcode (GitHub-hosted macOS only)
+        if: needs.provision-mac.outputs.mac_runner == 'github'
+        uses: ./.github/actions/hosted-macos-xcode
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -1049,7 +1059,7 @@ jobs:
   # runs as the unprivileged build account (RELEASING.md, ANY-1405).
   verify-macos-launch:
     needs: [provision-mac, sign-macos]
-    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac-build"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}
+    runs-on: ${{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","anyray-install-mac-build"]') || needs.provision-mac.outputs.mac_runner == 'codebuild' && format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) || 'macos-15' }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -1071,6 +1081,9 @@ jobs:
             .github/actions
             scripts/artifact-digest.sh
           sparse-checkout-cone-mode: false
+      - name: Pin Xcode (GitHub-hosted macOS only)
+        if: needs.provision-mac.outputs.mac_runner == 'github'
+        uses: ./.github/actions/hosted-macos-xcode
       - name: Authenticate for the S3 artifact handoff
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
@@ -1118,8 +1131,8 @@ jobs:
   # lifecycle role.
   teardown-mac:
     needs: [provision-mac, sign-macos, verify-macos-launch]
-    # Only explicit ec2 skips teardown; an empty choice still runs idempotent down so no fleet stays ACTIVE and billing.
-    if: ${{ always() && needs.provision-mac.result != 'skipped' && needs.provision-mac.outputs.mac_runner != 'ec2' }}
+    # github and ec2 allocate no fleet and skip teardown; an empty choice still runs idempotent down so no fleet stays ACTIVE and billing.
+    if: ${{ always() && needs.provision-mac.result != 'skipped' && needs.provision-mac.outputs.mac_runner != 'ec2' && needs.provision-mac.outputs.mac_runner != 'github' }}
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     timeout-minutes: 40
     permissions:

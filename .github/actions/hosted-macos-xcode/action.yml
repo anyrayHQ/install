@@ -1,0 +1,10 @@
+name: Pin Xcode on a GitHub-hosted macOS runner
+description: >-
+  Selects the Xcode the Mac release jobs build, sign, notarize and staple with on
+  GitHub-hosted macos-15, and fails if the image no longer carries it or its
+  notarytool and stapler do not resolve. The version lives in pin-xcode.sh.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: bash "$GITHUB_ACTION_PATH/pin-xcode.sh"

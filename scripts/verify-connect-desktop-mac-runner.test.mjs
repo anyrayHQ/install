@@ -11,7 +11,11 @@ import { fileURLToPath } from 'node:url';
 
 // The workflow expression. The dollar sign is interpolated rather than backslash-escaped
 // (CodeQL js/useless-regexp-character-escape).
-const runsOn = (label) => `${'$'}{{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) }}`;
+const runsOn = (label) => `${'$'}{{ needs.provision-mac.outputs.mac_runner == 'ec2' && fromJSON('["self-hosted","macOS","ARM64","${label}"]') || needs.provision-mac.outputs.mac_runner == 'codebuild' && format('codebuild-anyray-install-runner-mac-{0}-{1}', github.run_id, github.run_attempt) || 'macos-15' }}`;
+// The GitHub-hosted image the Mac jobs run on by default (INSTALL_MAC_RUNNER unset or github).
+const HOSTED_MAC = 'macos-15';
+// Any runs-on that lands a job on a Mac: the CodeBuild fleet, the persistent host or GitHub-hosted.
+const MAC_RUNS_ON = /anyray-install-(?:mac|runner-mac)|macos-/;
 const SIGN_RUNS_ON = runsOn('anyray-install-mac');
 const BUILD_RUNS_ON = runsOn('anyray-install-mac-build');
 const WORKFLOWS = [
@@ -193,11 +197,24 @@ function assertMoved(tree) {
   assert.equal(readFileSync(join(trash, moved[0], 'out', 'y.pkg'), 'utf8'), 'signed output');
 }
 
-test('selection preserves the CodeBuild default on pull requests for unset, empty and codebuild', (t) => {
-  for (const value of [undefined, '', 'codebuild']) {
-    const result = select(t, value, { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/pull/1/merge', GITHUB_REPOSITORY: 'someone/install' });
+test('selection defaults to GitHub-hosted macOS for unset, empty and github on any event', (t) => {
+  for (const value of [undefined, '', 'github']) {
+    for (const overrides of [{}, { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/pull/1/merge', GITHUB_REPOSITORY: 'someone/install' }]) {
+      const result = select(t, value, overrides);
+      assert.equal(result.status, 0, result.log);
+      assert.equal(result.output, 'mac_runner=github\n');
+      assert.match(result.log, /::notice::Mac jobs use GitHub-hosted macos-15/);
+      assert.equal((result.log.match(/::notice::/g) ?? []).length, 1);
+    }
+  }
+});
+
+test('selection keeps codebuild as the explicit fallback on any event', (t) => {
+  for (const overrides of [{}, { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/pull/1/merge', GITHUB_REPOSITORY: 'someone/install' }]) {
+    const result = select(t, 'codebuild', overrides);
     assert.equal(result.status, 0, result.log);
     assert.equal(result.output, 'mac_runner=codebuild\n');
+    assert.match(result.log, /::notice::Mac jobs use the CodeBuild Mac fleet/);
     assert.equal((result.log.match(/::notice::/g) ?? []).length, 1);
   }
 });
@@ -227,11 +244,11 @@ test('selection refuses each untrusted ec2 event, ref and repository without wri
 });
 
 test('selection refuses invalid switch values without logging the raw value', (t) => {
-  for (const value of ['EC2', 'ec2 ', 'true', 'fleet', '::warning::injected']) {
+  for (const value of ['EC2', 'ec2 ', 'GitHub', 'github ', 'macos-15', 'true', 'fleet', '::warning::injected']) {
     const result = select(t, value);
     assert.equal(result.status, 1, result.log);
     assert.equal(result.output, '');
-    assert.match(result.log, /::error::INSTALL_MAC_RUNNER must be unset, codebuild or ec2/);
+    assert.match(result.log, /::error::INSTALL_MAC_RUNNER must be unset, github, codebuild or ec2/);
     assert.ok(!result.log.includes(value), result.log);
   }
 });
@@ -253,11 +270,15 @@ test('selection returns usage status for missing or unknown subcommands', (t) =>
   }
 });
 
-test('exactly the six release Mac jobs use Mac runners', () => {
-  const actual = WORKFLOWS.flatMap((file) => Object.entries(jobs(readWorkflow(file)))
-    .filter(([, body]) => /anyray-install-(?:mac|runner-mac)/.test(field(body, 'runs-on') ?? ''))
+test('exactly the five release Mac jobs use Mac runners, in every workflow of the repo', () => {
+  const dir = new URL('../.github/workflows/', import.meta.url);
+  const files = readdirSync(dir).filter((name) => /\.ya?ml$/.test(name));
+  assert.ok(files.length > WORKFLOWS.length, 'workflow directory listing is empty');
+  const actual = files.flatMap((file) => Object.entries(jobs(readWorkflow(file)))
+    .filter(([, body]) => MAC_RUNS_ON.test(field(body, 'runs-on') ?? ''))
     .map(([id]) => `${file}:${id}`));
   const expected = WORKFLOWS.flatMap((file) => MAC_JOBS[file].map((id) => `${file}:${id}`));
+  assert.equal(expected.length, 5);
   assert.deepEqual(actual.sort(), expected.sort());
 });
 
@@ -270,17 +291,17 @@ for (const file of WORKFLOWS) {
       const role = ROLE_JOBS.sign.includes(id) ? 'sign' : 'build';
       assert.equal(runner, role === 'sign' ? SIGN_RUNS_ON : BUILD_RUNS_ON, `${id}: Mac runner selection expression is absent`);
       assert.ok(needs(body).includes('provision-mac'), `${id} needs provision-mac`);
-      for (const choice of ['codebuild', '']) {
-        const today = 'codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}'
-          .replace(/\$\{\{\s*(github\.[a-z_]+)\s*\}\}/g, (_, expression) => evaluate(expression, choice));
-        assert.equal(today, 'codebuild-anyray-install-runner-mac-777-2');
-        assert.equal(evaluate(runner, choice), today);
-      }
+      const fleet = 'codebuild-anyray-install-runner-mac-${{ github.run_id }}-${{ github.run_attempt }}'
+        .replace(/\$\{\{\s*(github\.[a-z_]+)\s*\}\}/g, (_, expression) => evaluate(expression, 'codebuild'));
+      assert.equal(fleet, 'codebuild-anyray-install-runner-mac-777-2');
+      assert.equal(evaluate(runner, 'codebuild'), fleet);
+      // github is the default; an empty choice (provision-mac never ran) cannot reach a fleet label.
+      for (const choice of ['github', '']) assert.equal(evaluate(runner, choice), HOSTED_MAC, `${id}/${choice}`);
       assert.deepEqual(evaluate(runner, 'ec2'), ['self-hosted', 'macOS', 'ARM64', role === 'sign' ? 'anyray-install-mac' : 'anyray-install-mac-build']);
     }
     for (const [id, body] of Object.entries(allJobs)) {
       if (!MAC_JOBS[file].includes(id)) {
-        assert.doesNotMatch(field(body, 'runs-on') ?? '', /provision-mac|self-hosted|anyray-install-mac/, id);
+        assert.doesNotMatch(field(body, 'runs-on') ?? '', /provision-mac|self-hosted|anyray-install-mac|macos-/, id);
       }
     }
   });
@@ -305,16 +326,17 @@ for (const file of WORKFLOWS) {
     assert.equal(field(up, 'run', 8), './scripts/mac-fleet.sh up');
     for (const step of [credentials, up]) {
       assert.equal(evaluate(field(step, 'if', 8), 'codebuild'), true);
-      assert.equal(evaluate(field(step, 'if', 8), 'ec2'), false);
+      // Only the fleet allocates anything: GitHub-hosted and ec2 never assume the fleet role.
+      for (const choice of ['github', 'ec2', '']) assert.equal(evaluate(field(step, 'if', 8), choice), false, choice);
     }
   });
 
-  test(`${file}: teardown skips only ec2 and preserves the provision result policy`, () => {
+  test(`${file}: teardown skips github and ec2 and preserves the provision result policy`, () => {
     const teardown = jobs(readWorkflow(file))['teardown-mac'];
     for (const result of ['success', 'failure', 'cancelled', 'skipped']) {
-      for (const choice of ['codebuild', '', 'ec2']) {
+      for (const choice of ['codebuild', '', 'github', 'ec2']) {
         assert.equal(evaluate(field(teardown, 'if'), choice, result),
-          choice !== 'ec2' && result !== 'skipped', `${result}/${choice}`);
+          ['codebuild', ''].includes(choice) && result !== 'skipped', `${result}/${choice}`);
       }
     }
     assert.ok(needs(teardown).includes('provision-mac'));
@@ -330,7 +352,7 @@ test('the hook workflow allowlist equals the workflows containing Mac jobs', () 
   const match = hook.match(/^ALLOWED_WORKFLOWS="([^"]+)"/m);
   assert.ok(match, 'ALLOWED_WORKFLOWS is absent');
   const expected = WORKFLOWS.filter((file) => Object.values(jobs(readWorkflow(file)))
-    .some((body) => /anyray-install-(?:mac|runner-mac)/.test(field(body, 'runs-on') ?? '')))
+    .some((body) => MAC_RUNS_ON.test(field(body, 'runs-on') ?? '')))
     .map((file) => `anyrayHQ/install/.github/workflows/${file}@refs/heads/main`);
   assert.deepEqual(new Set(match[1].split('\n')), new Set(expected));
 });
@@ -445,7 +467,7 @@ for (const acceptance of [
     const result = smokeGate('stable', acceptance);
     assert.equal(result.status, 1, result.log);
     assert.match(result.log, /::error::the stable lane needs the root install smoke/);
-    assert.match(result.log, /set INSTALL_MAC_ROOT_SMOKE_ACCEPTED to Dean's written acceptance \(RELEASING.md\) or run stable on the CodeBuild fleet/);
+    assert.match(result.log, /set INSTALL_MAC_ROOT_SMOKE_ACCEPTED to Dean's written acceptance \(RELEASING.md\) or run stable on GitHub-hosted macOS \(unset INSTALL_MAC_RUNNER\)/);
     if (acceptance) assert.ok(!result.log.includes(acceptance), 'rejected acceptance was printed');
   });
 }
@@ -467,7 +489,7 @@ test('the runbook states the stable root-smoke acceptance and the fleet fallback
   assert.match(section, /INSTALL_MAC_ROOT_SMOKE_ACCEPTED[\s\S]*Jira key or the GitHub comment URL[\s\S]*Dean's written acceptance/);
   assert.ok(section.includes('gh variable set INSTALL_MAC_ROOT_SMOKE_ACCEPTED -R anyrayHQ/install --body <ANY-key or comment URL>'));
   assert.ok(section.includes('gh variable delete INSTALL_MAC_ROOT_SMOKE_ACCEPTED -R anyrayHQ/install'));
-  assert.match(section, /without it[\s\S]*stable macOS[\s\S]*CodeBuild fleet[\s\S]*unset `INSTALL_MAC_RUNNER` for that release/i);
+  assert.match(section, /without it[\s\S]*stable macOS[\s\S]*GitHub-hosted[\s\S]*unset `INSTALL_MAC_RUNNER` for that release/i);
 });
 
 test('rustup detection uses the build home and restores its PATH entry', (t) => {
@@ -593,7 +615,8 @@ test('the runbook requires both probe rounds before enabling ec2', () => {
   const releasing = readFileSync(new URL('../RELEASING.md', import.meta.url), 'utf8');
   const first = releasing.indexOf('First round,');
   const second = releasing.indexOf('Second round,');
-  const enable = releasing.indexOf('gh variable set INSTALL_MAC_RUNNER');
+  // The CI runners section also sets the variable, to codebuild; only enabling ec2 is gated.
+  const enable = releasing.indexOf('gh variable set INSTALL_MAC_RUNNER -R anyrayHQ/install --body ec2');
   assert.ok(first >= 0 && second > first && enable > second, 'both probe rounds must precede enabling ec2');
   assert.ok(releasing.includes('.github/workflows/probe-mac-hook.yml'), 'probe workflow path is absent');
   assert.match(releasing, /First round,[\s\S]*all workflows of this repo[\s\S]*proves the hook/);
@@ -665,7 +688,7 @@ test('called desktop declares the optional saved mac_runner input', () => {
   assert.equal(field(input, 'type', 8), 'string');
   assert.equal(field(input, 'required', 8), 'false');
   assert.equal(field(input, 'default', 8), "''");
-  assert.match(input, /description: .*caller's provision-mac choice \(codebuild or ec2\); empty when run by hand/);
+  assert.match(input, /description: .*caller's provision-mac choice \(github, codebuild or ec2\); empty when run by hand/);
 });
 
 test('called desktop selection prefers the caller choice over the variable in either direction', () => {
@@ -673,8 +696,8 @@ test('called desktop selection prefers the caller choice over the variable in ei
   const selection = steps(provision).find((body) => field(body, 'id', 8) === 'mac-runner');
   const expression = field(selection, 'INSTALL_MAC_RUNNER', 10);
   for (const [input, variable, expected] of [
-    ['codebuild', 'ec2', 'codebuild'], ['ec2', 'codebuild', 'ec2'],
-    ['', 'codebuild', 'codebuild'], ['', 'ec2', 'ec2'], ['', '', ''],
+    ['codebuild', 'ec2', 'codebuild'], ['ec2', 'codebuild', 'ec2'], ['github', 'codebuild', 'github'],
+    ['', 'codebuild', 'codebuild'], ['', 'ec2', 'ec2'], ['', 'github', 'github'], ['', '', ''],
   ]) {
     assert.equal(evaluate(expression, '', 'success', { inputs: { mac_runner: input }, vars: { INSTALL_MAC_RUNNER: variable } }),
       expected, `input=${input}, variable=${variable}`);
@@ -740,6 +763,7 @@ test('the runbook registers the persistent label and documents the switch and ro
   assert.match(releasing, /sudo -u "\$user" -H bash -c 'cd ~\/actions-runner && \.\/config\.sh --unattended --url https:\/\/github\.com\/anyrayHQ \\\n\s*--token "\$0" --name "\$1" --labels "\$1" --runnergroup anyray-install-mac --work _work' "\$token" "\$label"/);
   assert.match(releasing, /INSTALL_MAC_RUNNER/);
   assert.match(releasing, /gh variable delete INSTALL_MAC_RUNNER -R anyrayHQ\/install/);
+  assert.ok(releasing.includes('gh variable set INSTALL_MAC_RUNNER -R anyrayHQ/install --body codebuild'), 'the fleet fallback switch is absent');
 });
 
 test('the runbook creates non-admin role accounts and keeps each runner install startable', () => {
@@ -1104,4 +1128,102 @@ test('the new scripts are executable', () => {
   for (const name of ['mac-runner.sh', 'mac-runner-hook.sh']) {
     assert.equal(statSync(new URL(`./${name}`, import.meta.url)).mode & 0o777, 0o755);
   }
+});
+
+// GitHub-hosted macos-15 ships several Xcodes and moves its default between image releases.
+const PIN_XCODE_STEP = `        name: Pin Xcode (GitHub-hosted macOS only)
+        if: needs.provision-mac.outputs.mac_runner == 'github'
+        uses: ./.github/actions/hosted-macos-xcode`;
+
+for (const file of WORKFLOWS) {
+  for (const id of MAC_JOBS[file]) {
+    test(`${file}:${id} pins Xcode on GitHub-hosted runners, right after the checkout that brings the action`, () => {
+      const jobSteps = steps(jobs(readWorkflow(file))[id]);
+      const checkout = jobSteps.findIndex((step) => field(step, 'uses', 8)?.startsWith('actions/checkout@'));
+      assert.ok(checkout >= 0, `${id} has no checkout`);
+      const sparse = jobSteps[checkout].match(/sparse-checkout: \|\n((?: {12}[^\n]*\n)+)/);
+      if (sparse) assert.match(sparse[1], /^ {12}\.github\/actions$/m, `${id} sparse checkout must bring .github/actions`);
+      const pin = jobSteps[checkout + 1];
+      assert.equal(pin?.trimEnd(), PIN_XCODE_STEP, `${id}: the Xcode pin must follow the checkout`);
+      const condition = field(pin, 'if', 8);
+      for (const choice of ['github', 'codebuild', 'ec2', '']) {
+        assert.equal(evaluate(condition, choice), choice === 'github', `${id}/${choice}`);
+      }
+      assert.equal(jobSteps.filter((step) => step.includes('hosted-macos-xcode')).length, 1);
+    });
+  }
+}
+
+test('no job outside the Mac jobs pins Xcode', () => {
+  for (const file of WORKFLOWS) {
+    for (const [id, body] of Object.entries(jobs(readWorkflow(file)))) {
+      if (!MAC_JOBS[file].includes(id)) assert.ok(!body.includes('hosted-macos-xcode'), `${file}:${id}`);
+    }
+  }
+});
+
+test('the Xcode pin action runs its script with bash from the action directory', () => {
+  const action = readFileSync(new URL('../.github/actions/hosted-macos-xcode/action.yml', import.meta.url), 'utf8');
+  assert.match(action, /^runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: bash "\$GITHUB_ACTION_PATH\/pin-xcode\.sh"\n$/m);
+  assert.doesNotMatch(action, /\$\{\{/, 'the action takes no inputs and interpolates nothing');
+});
+
+function pinXcode(t, { selectStatus = 0, version = 'Xcode 16.4', missingTool = '' } = {}) {
+  const dir = temporaryTree(t);
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const log = join(dir, 'calls.log');
+  writeFileSync(log, '');
+  const stub = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
+  stub('sudo', 'printf "sudo %s\\n" "$*" >> "$PIN_LOG"; exec "$@"');
+  stub('xcode-select', 'printf "xcode-select %s\\n" "$*" >> "$PIN_LOG"; exit "$PIN_SELECT_STATUS"');
+  stub('xcodebuild', 'printf "%s\\nBuild version 16F6\\n" "$PIN_VERSION"');
+  stub('xcrun', '[ "$1" = --find ] && [ "$2" != "$PIN_MISSING_TOOL" ] && { echo "/Applications/Xcode_16.4.app/Contents/Developer/usr/bin/$2"; exit 0; }; exit 1');
+  stub('sw_vers', 'echo 15.7.9');
+  const result = spawnSync('/bin/bash', [
+    fileURLToPath(new URL('../.github/actions/hosted-macos-xcode/pin-xcode.sh', import.meta.url)),
+  ], { encoding: 'utf8', timeout: 10_000, env: {
+    PATH: `${bin}:/usr/bin:/bin`, PIN_LOG: log, PIN_SELECT_STATUS: String(selectStatus),
+    PIN_VERSION: version, PIN_MISSING_TOOL: missingTool,
+  } });
+  return { ...result, log: result.stdout + result.stderr, calls: readFileSync(log, 'utf8') };
+}
+
+test('pin-xcode selects Xcode 16.4 and proves notarytool and stapler resolve', (t) => {
+  const result = pinXcode(t);
+  assert.equal(result.status, 0, result.log);
+  assert.equal(result.calls, 'sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer\nxcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer\n');
+  assert.match(result.log, /::notice::Mac job uses Xcode 16\.4 \(Build version 16F6\) on macOS 15\.7\.9/);
+});
+
+test('pin-xcode fails when the image no longer carries the pinned Xcode', (t) => {
+  const result = pinXcode(t, { selectStatus: 1 });
+  assert.equal(result.status, 1, result.log);
+  assert.match(result.log, /::error::Xcode 16\.4 is not on this runner image/);
+  assert.doesNotMatch(result.log, /::notice::/);
+});
+
+test('pin-xcode fails when the selected developer directory reports another Xcode', (t) => {
+  const result = pinXcode(t, { version: 'Xcode 26.0.1' });
+  assert.equal(result.status, 1, result.log);
+  assert.match(result.log, /::error::xcode-select did not select Xcode 16\.4/);
+});
+
+for (const tool of ['notarytool', 'stapler']) {
+  test(`pin-xcode fails when ${tool} does not resolve`, (t) => {
+    const result = pinXcode(t, { missingTool: tool });
+    assert.equal(result.status, 1, result.log);
+    assert.match(result.log, new RegExp(`::error::xcrun cannot find ${tool} in Xcode 16\\.4`));
+  });
+}
+
+test('the runbook names the pinned hosted Xcode and the switch back to the fleet', () => {
+  const script = readFileSync(new URL('../.github/actions/hosted-macos-xcode/pin-xcode.sh', import.meta.url), 'utf8');
+  const version = script.match(/^XCODE_VERSION='([0-9.]+)'$/m)?.[1];
+  assert.equal(version, '16.4');
+  const releasing = readFileSync(new URL('../RELEASING.md', import.meta.url), 'utf8');
+  const runners = releasing.split('\n## CI runners\n')[1].split('\n### ')[0];
+  assert.ok(runners.includes(`GitHub-hosted \`${HOSTED_MAC}\``), 'the CI runners section must name the hosted image');
+  assert.ok(runners.includes(`Xcode ${version}`), 'the CI runners section must name the pinned Xcode');
+  assert.ok(runners.includes('gh variable set INSTALL_MAC_RUNNER -R anyrayHQ/install --body codebuild'));
 });

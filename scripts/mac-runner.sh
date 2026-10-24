@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Each CodeBuild Mac fleet allocation bills a 24-hour minimum; an always-on EC2
-# host can serve repeated releases for less. Choose once per workflow run so a
-# variable changed mid-run cannot split jobs between hosts or strand a fleet.
-# RELEASING.md has the persistent host setup and rollback runbook.
+# Mac jobs run on GitHub-hosted macos-15 by default: this repository is public, so
+# they cost nothing, while each CodeBuild Mac fleet allocation bills a 24-hour
+# minimum (Dean, 2026-10-24). `codebuild` keeps the fleet as the fallback and `ec2`
+# the persistent host. Choose once per workflow run so a variable changed mid-run
+# cannot split jobs between hosts or strand a fleet. RELEASING.md, CI runners.
 set -euo pipefail
 
 if [ "$#" -ne 1 ] || [ "${1:-}" != select ]; then
@@ -16,7 +17,11 @@ if [ -z "${GITHUB_OUTPUT:-}" ]; then
 fi
 
 case "${INSTALL_MAC_RUNNER:-}" in
-  ''|codebuild)
+  ''|github)
+    echo 'mac_runner=github' >> "$GITHUB_OUTPUT"
+    echo '::notice::Mac jobs use GitHub-hosted macos-15 runners'
+    ;;
+  codebuild)
     echo 'mac_runner=codebuild' >> "$GITHUB_OUTPUT"
     echo '::notice::Mac jobs use the CodeBuild Mac fleet'
     ;;
@@ -37,7 +42,7 @@ case "${INSTALL_MAC_RUNNER:-}" in
     echo '::notice::Mac jobs use anyray-install-mac (the persistent EC2 signing host)'
     ;;
   *)
-    echo '::error::INSTALL_MAC_RUNNER must be unset, codebuild or ec2' >&2
+    echo '::error::INSTALL_MAC_RUNNER must be unset, github, codebuild or ec2' >&2
     exit 1
     ;;
 esac

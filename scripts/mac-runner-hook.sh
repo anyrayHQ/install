@@ -19,14 +19,13 @@ MAINTAINER_ACCOUNT_IDS="16443050 187185370"
 MAINTAINER_LOGINS="0xtechdean Dima-Othentic"
 SIGN_ACCOUNT=anyray-sign
 BUILD_ACCOUNT=anyray-build
-SIGN_JOBS="sign-macos build-macos"
+SIGN_JOBS="sign-macos"
 BUILD_JOBS="build-macos-unsigned verify-macos-signed verify-macos-launch"
 REPOSITORY="anyrayHQ/install"
 # The only workflows that may run on this host, at main. A called workflow reports its caller's
-# ref here, and all three are dispatchable on their own, so all three are listed.
+# ref here, and both are dispatchable on their own, so both are listed.
 ALLOWED_WORKFLOWS="anyrayHQ/install/.github/workflows/release-connect-binaries.yml@refs/heads/main
-anyrayHQ/install/.github/workflows/release-connect-desktop.yml@refs/heads/main
-anyrayHQ/install/.github/workflows/release-fleetd-installer.yml@refs/heads/main"
+anyrayHQ/install/.github/workflows/release-connect-desktop.yml@refs/heads/main"
 FREE_GB_FLOOR=20
 
 set -uo pipefail

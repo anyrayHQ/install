@@ -93,7 +93,9 @@ if [ -f "$REPO_DIR/.env" ]; then
   else
     echo "→ Existing deployment found on the data disk — starting it."
   fi
-  ( cd "$REPO_DIR" && docker compose up -d )
+  # --remove-orphans: a service the updated template dropped (endpoint-control)
+  # is stopped and removed rather than left running beside the new stack.
+  ( cd "$REPO_DIR" && docker compose up -d --remove-orphans )
   printf '%s\n' "$DEPLOY_GENERATION" > "$REPO_DIR/.deploy-generation"
   chmod 600 "$REPO_DIR/.deploy-generation"
   touch "$REPO_DIR/.ready"

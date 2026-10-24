@@ -139,7 +139,7 @@ jobs:
           set -euo pipefail
           render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi)"
           fail=0
-          for c in gateway optimizer proxy endpoint-control; do
+          for c in gateway optimizer proxy; do
             if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:${APP_VERSION}"; then
               echo "::error::default render does not pin ${c} to appVersion ${APP_VERSION} — an upgrade would move a running deployment off its fixed build:"
               printf '%s\n' "$render" | grep -E "image:.*/${c}:" || true
@@ -147,7 +147,7 @@ jobs:
             fi
           done
           # A moving tag must never be the default, by any of its names.
-          if printf '%s\n' "$render" | grep -Eq 'anyray/(gateway|optimizer|proxy|endpoint-control):(latest|stable|policy-stable)'; then
+          if printf '%s\n' "$render" | grep -Eq 'anyray/(gateway|optimizer|proxy):(latest|stable|policy-stable)'; then
             echo "::error::default render uses a moving channel — production images must default to a pinned build"
             fail=1
           fi
@@ -162,7 +162,7 @@ jobs:
           # component and each Deployment is checked on its own, so one pod
           # cannot pass on another's values.
           args=()
-          for c in gateway optimizer endpoint-control; do
+          for c in gateway optimizer; do
             args+=(--set "${c}.extraVolumes[0].name=ca-${c}"
                    --set "${c}.extraVolumes[0].secret.secretName=ca-${c}"
                    --set "${c}.extraVolumeMounts[0].name=ca-${c}"
@@ -170,7 +170,7 @@ jobs:
           done
           render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi "${args[@]}")"
           fail=0
-          for c in gateway optimizer endpoint-control; do
+          for c in gateway optimizer; do
             doc="$(printf '%s\n' "$render" | awk -v want="anyray-${c}" '
               /^---/ { if (dep && hit) printf "%s", buf; buf=""; dep=0; hit=0; next }
               { buf = buf $0 "\n" }
@@ -198,14 +198,14 @@ jobs:
           render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
             --set-string image.tag=policy-stable)"
           fail=0
-          for c in gateway optimizer proxy endpoint-control; do
+          for c in gateway optimizer proxy; do
             if ! printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:policy-stable"; then
               echo "::error::opt-in render does not put ${c} on the policy-stable channel"
               fail=1
             fi
           done
           # A moving tag whose pods never re-pull makes the whole scheme decorative.
-          if [ "$(printf '%s\n' "$render" | grep -c 'imagePullPolicy: Always')" -lt 4 ]; then
+          if [ "$(printf '%s\n' "$render" | grep -c 'imagePullPolicy: Always')" -lt 3 ]; then
             echo "::error::moving channel rendered without imagePullPolicy: Always"
             fail=1
           fi
@@ -297,29 +297,20 @@ jobs:
           # one proxy build, its hashed assets 404 on the other). Every app
           # Deployment must be pinned, each by an init container that pulls its
           # image fresh, and the pin step must be able to read its own pod.
-          render() {
-            helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
-              --set-string image.tag=policy-stable "$@"
-          }
-          cronjob="$(render | awk '/^kind: CronJob$/,0')"
-          role="$(render | awk '/^kind: Role$/,/^---/')"
-          for c in gateway optimizer proxy endpoint-control; do
+          render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
+            --set-string image.tag=policy-stable)"
+          cronjob="$(awk '/^kind: CronJob$/,0' <<<"$render")"
+          role="$(awk '/^kind: Role$/,/^---/' <<<"$render")"
+          for c in gateway optimizer proxy; do
             grep -q "\\\\\"deployment\\\\\":\\\\\"anyray-${c}\\\\\"" <<<"$cronjob" \
               || { echo "::error::the autoUpdate pin step does not pin ${c}"; exit 1; }
           done
-          for r in resolve-optimizer resolve-proxy resolve-endpoint-control pin; do
+          for r in resolve-optimizer resolve-proxy pin; do
             grep -q -- "- name: ${r}$" <<<"$cronjob" \
               || { echo "::error::no ${r} init container resolves its digest"; exit 1; }
           done
-          test "$(grep -c 'imagePullPolicy: Always' <<<"$cronjob")" -eq 4
+          test "$(grep -c 'imagePullPolicy: Always' <<<"$cronjob")" -eq 3
           grep -q 'resources: \["pods"\]' <<<"$role"
-          # endpoint-control off: it is neither resolved nor pinned (its
-          # Deployment does not exist, so pinning it would fail every night).
-          off="$(render --set endpoint-control.enabled=false | awk '/^kind: CronJob$/,0')"
-          if grep -q 'endpoint-control' <<<"$off"; then
-            echo "::error::endpoint-control disabled but still pinned"
-            exit 1
-          fi
 
       - name: autoUpdate pin step behaves against a fake API server
         run: node --test tests/autoupdate-pin.test.mjs
@@ -332,7 +323,7 @@ jobs:
           # admission webhook then refuses the whole Ingress. The regex is
           # validPathType in internal/ingress/inspector/rules.go (controller-v1.12.0).
           render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
-            --set ingress.enabled=true --set endpoint-control.enabled=true)"
+            --set ingress.enabled=true)"
           bad="$(printf '%s\n' "$render" | awk '
             /^kind: /                 { ing = ($2 == "Ingress") }
             ing && /- path: /         { p = $3 }
@@ -391,7 +382,7 @@ jobs:
           set -euo pipefail
           render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
             --set-string image.tag=policy-stable)"
-          for c in gateway optimizer proxy endpoint-control; do
+          for c in gateway optimizer proxy; do
             printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:policy-stable"
           done
-          test "$(printf '%s\n' "$render" | grep -c 'imagePullPolicy: Always')" -ge 4
+          test "$(printf '%s\n' "$render" | grep -c 'imagePullPolicy: Always')" -ge 3

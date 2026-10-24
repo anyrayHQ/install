@@ -28,5 +28,9 @@ else
   printf 'ANYRAY_IMAGE_TAG=%s\n' "$target" >> "$env_file"
 fi
 
-ANYRAY_IMAGE_TAG="$target" docker compose up --pull never -d
+# --remove-orphans stops and removes the container of a service the template
+# no longer defines (endpoint-control was retired), instead of leaving it
+# running. Services behind an inactive profile (caddy) are still defined, so
+# they are kept.
+ANYRAY_IMAGE_TAG="$target" docker compose up --pull never -d --remove-orphans
 echo "Anyray GCE install reconciled to ${target}."

@@ -355,8 +355,8 @@ print('== a failed restart blocks no other service, and fails the run ==')
 # One service's error must not strand the rest on the stale credential, and it
 # must reach the function's error metric: nothing reads the scheduled result.
 sm = FakeSm({PREFIX + 'db-url': url_for('old-synthetic')}, 'new-synthetic')
-ecs = FakeEcs({'endpoint': [BEFORE], 'gateway': [BEFORE], 'proxy': [BEFORE]},
-              fail={'endpoint': RuntimeError('AccessDeniedException')})
+ecs = FakeEcs({'optimizer': [BEFORE], 'gateway': [BEFORE], 'proxy': [BEFORE]},
+              fail={'optimizer': RuntimeError('AccessDeniedException')})
 mod, sent = load(sm, ecs)
 raised = None
 try:
@@ -366,7 +366,7 @@ except Exception as e:
 check('every other stale service still restarts',
       sorted(ecs.forced) == ['gateway', 'proxy'], ecs.forced)
 check('the run fails, naming the service and the error',
-      raised is not None and 'endpoint' in str(raised) and 'RuntimeError' in str(raised),
+      raised is not None and 'optimizer' in str(raised) and 'RuntimeError' in str(raised),
       repr(raised))
 check('the rewrite still lands',
       sm.store[PREFIX + 'db-url'] == url_for('new-synthetic'), 'db-url not rewritten')

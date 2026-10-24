@@ -114,9 +114,6 @@ images:
   proxy:
     repository: public.ecr.aws/anyray/proxy
     tag: ""
-  endpoint-control:
-    repository: public.ecr.aws/anyray/endpoint-control
-    tag: ""
   # Postgres is third-party, so its tag carries an immutable digest as well: `17`
   # is a floating minor and a tag can be re-pushed. The digest is the multi-arch
   # index (linux/amd64 + linux/arm64) for postgres 17.10, matching the pin in
@@ -179,12 +176,11 @@ priorityClassName: ""
 #   back for a shorter window.
 # terminationGracePeriodSeconds — total budget from "terminating" to SIGKILL,
 #   which has to cover preStopDrainSeconds PLUS the application's own drain.
-#   THREE services drain, each on its own budget, and the chart charges each one
-#   its own: the gateway for ANYRAY_SHUTDOWN_DRAIN_MS (default 90000), the
+#   TWO services drain, each on its own budget, and the chart charges each one
+#   its own: the gateway for ANYRAY_SHUTDOWN_DRAIN_MS (default 90000), and the
 #   optimizer for the same variable with its own 15000 default (an optimize call
-#   is bounded by the gateway's ceiling on it, not by how long a model takes),
-#   and endpoint-control for a hardcoded 35000 force-exit. On SIGTERM each stops
-#   accepting connections and lets in-flight requests
+#   is bounded by the gateway's ceiling on it, not by how long a model takes).
+#   On SIGTERM each stops accepting connections and lets in-flight requests
 #   (notably long streaming completions) finish; if this budget runs out first the
 #   kubelet SIGKILLs mid-drain and resets every open stream — which a coding
 #   assistant reports as "Connection closed mid-response", blamed on the gateway
@@ -428,8 +424,7 @@ gateway:
   #
   # Turning it off is safe because nothing authoritative lives here any more.
   # Provider keys, user access keys, routing config, content settings, per-user
-  # caps, model aliases, team policy, the audit log, and (from appVersion
-  # v1.10.307) the end-point lane's fleetd installers are all in the shared
+  # caps, model aliases, team policy, and the audit log are all in the shared
   # Postgres, read identically by every replica. What remains on the volume is
   # the entitlement-lease cache, which is re-fetched, and legacy off-Postgres
   # fallbacks this chart never uses.
@@ -439,13 +434,9 @@ gateway:
   # that while the volume is mounted. Upgrading the image and taking persistence
   # away in the SAME `helm upgrade` starts the pod with an empty volume, so there
   # is nothing to copy. Set `persistence.enabled: true` explicitly for the
-  # upgrade that first lands v1.10.307+, then remove that override once the copy
-  # has actually run. Do NOT use Ready as the signal: the copy is best-effort so
-  # it can never hold up a boot, which means readiness does not wait for it.
-  # `GET /admin/endpoint-fleet/installers` reads the database, so a non-empty
-  # list there is the real proof (and if you never uploaded an installer there is
-  # nothing to wait for). The old PVC is retained either way
-  # ("helm.sh/resource-policy": keep), so the worst case is re-uploading them.
+  # upgrade that first lands the newer image, then remove that override on the
+  # next one. The old PVC is retained either way ("helm.sh/resource-policy":
+  # keep).
   persistence:
     enabled: false
     size: 1Gi
@@ -533,51 +524,6 @@ proxy:
       memory: "256Mi"
   extraEnv: []
 
-# End-point control (RFC 0014) — the client-operated device-evidence service.
-# Employee laptops run the signed fleetd agent against the deployment's public
-# origin: the Ingress/HTTPRoute route the fixed agent-plane path families
-# (/api/v1/osquery, /api/fleet/orbit, /api/v1/evidence) to it on the SAME host
-# the console and gateway share, so no extra hostname or certificate is needed.
-# Its admin token is PAIRED with ANYRAY_ADMIN_TOKEN (same Secret key — the
-# gateway authenticates to it by falling back to its own admin token), and its
-# endpoint_* tables live in the same Postgres as the gateway's spend store.
-# Stateless (no volume), so replicas can scale freely.
-endpoint-control:
-  # On by default — it is part of the minimum stack, not an add-on. Turn it off
-  # for the two cases where rendering it is worse than not having it:
-  #   - a security review that has not cleared a device-evidence plane yet
-  #     (nothing else in the chart changes; the gateway simply leaves the
-  #     end-point lane dormant rather than pointing at an absent Service);
-  #   - an image.tag pinned BELOW v1.10.246, the first release that published
-  #     public.ecr.aws/anyray/endpoint-control. Older pins have no image to
-  #     pull and the Deployment would sit in ImagePullBackOff forever, so an
-  #     `helm upgrade --wait` (what the AKS/GKE scripts run) times out.
-  enabled: true
-  # Two by default since chart 0.8.0. Stateless: fleetd check-ins, script
-  # leases and policy results all go through Postgres, so either pod answers.
-  replicas: 2
-  autoscaling:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 10
-    targetCPUUtilizationPercentage: 70
-  # Public origin fleetd is pointed at. Leave blank on an Ingress/HTTPRoute
-  # install and it defaults to https://<host>; set it explicitly for
-  # LoadBalancer / NodePort / non-TLS installs, where the chart routes no
-  # agent-plane paths and the agent plane has no origin until you give it one.
-  publicUrl: ""
-  resources:
-    requests:
-      cpu: "100m"
-      memory: "128Mi"
-    limits:
-      cpu: "250m"
-      memory: "256Mi"
-  extraEnv: []
-  # Same shape as gateway.extraVolumes / gateway.extraVolumeMounts.
-  extraVolumes: []
-  extraVolumeMounts: []
-
 # Postgres — the Anyray spend + trace store. The gateway persists content-free
 # traces + observations to the anyray_traces / anyray_observations tables
 # (auto-created on first use; any stored content is AES-256-GCM encrypted at rest)
@@ -586,10 +532,9 @@ postgres:
   enabled: true
   # Connection limit for the bundled Postgres (the image default is 100). Each
   # gateway pod opens up to 24 connections at peak from v1.10.431, and each
-  # optimizer and endpoint-control pod up to 8. The default two of each use up
-  # to 80 connections. On older images, each gateway pod uses about 47 and each
-  # optimizer and endpoint-control pod about 20, or ~175 for two of each. Raise
-  # it before raising replicas or enabling an HPA.
+  # optimizer pod up to 8. The default two of each use up to 64 connections. On
+  # older images, each gateway pod uses about 47 and each optimizer pod about 20,
+  # or ~135 for two of each. Raise it before raising replicas or enabling an HPA.
   # External Postgres: size its limit the same way.
   maxConnections: 300
   # The bundled Postgres is a SINGLE pod on a ReadWriteOnce volume. It is sized

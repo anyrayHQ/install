@@ -497,10 +497,6 @@ jobs:
             echo "::error::Railway optimizer pin differs from gateway"
             exit 1
           }
-          [ "$(tag_for endpoint-control)" = "$gateway_tag" ] || {
-            echo "::error::Railway endpoint-control pin differs from gateway"
-            exit 1
-          }
           [ "$(tag_for proxy)" = "$gateway_tag" ] || {
             echo "::error::Railway proxy pin differs from gateway"
             exit 1
@@ -538,6 +534,7 @@ jobs:
 
           grep -Fq 'git -C "$REPO_DIR" pull --ff-only' gcp/gce/startup-script.sh
           grep -Fq './setup.sh --connect "$DEPLOYMENT_TOKEN"' gcp/gce/startup-script.sh
+          grep -Fq 'docker compose up -d --remove-orphans' gcp/gce/startup-script.sh
           grep -Fq 'anyray-deploy-generation' gcp/gce/deploy.sh
           grep -Fq "google_metadata_script_runner startup" gcp/gce/deploy.sh
           grep -Fq '^adt_[A-Za-z0-9_-]+$' railway/railway-iac-bootstrap.sh

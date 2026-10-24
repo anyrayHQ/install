@@ -138,14 +138,15 @@ before sending traffic.
 ## Upgrade
 
 ```bash
-git fetch && git reset --keep origin/main && docker compose pull && docker compose up -d
+git fetch && git reset --keep origin/main && docker compose pull && docker compose up -d --remove-orphans
 ```
 
-Use the full command for releases reported as a hard/template update; do not
-pull and restart only the application images. Use `policy-stable` for
-compatible soft updates (or keep an immutable `vX.Y.Z` pin). Existing explicit
-overrides are preserved until the operator changes them during a template
-refresh.
+`--remove-orphans` removes the container of any service a release drops from
+`docker-compose.yml`. Use the full command for releases reported as a
+hard/template update; do not pull and restart only the application images. Use
+`policy-stable` for compatible soft updates (or keep an immutable `vX.Y.Z` pin).
+Existing explicit overrides are preserved until the operator changes them during
+a template refresh.
 
 The AWS Quick Launch template pins `ImageTag` to an immutable release. When
 upgrading an older stack that stored `ImageTag=latest`, replace that parameter

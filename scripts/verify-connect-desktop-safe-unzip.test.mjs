@@ -272,25 +272,13 @@ test('desktop signing uses checked sandbox extraction before codesign and checks
 });
 
 test('every SIGN job refuses to extract downloaded build archives', () => {
-  for (const [file, id] of [['release-connect-desktop.yml', 'sign-macos'], ['release-connect-binaries.yml', 'sign-macos'], ['release-fleetd-installer.yml', 'build-macos']]) {
+  for (const [file, id] of [['release-connect-desktop.yml', 'sign-macos'], ['release-connect-binaries.yml', 'sign-macos']]) {
     const body = jobs(read(file))[id];
     assert.match(field(body, 'runs-on'), /"anyray-install-mac"/);
-    const all = steps(body);
-    const downloads = all.filter((s) => field(s, 'uses', 8) === './.github/actions/s3-artifact-download');
-    const roots = downloads.map((s) => field(s, 'path', 10));
-    for (const run of all.map(stepRun)) {
-      for (const line of run.split('\n').filter((line) => !line.trimStart().startsWith('#') && unsafeExtraction.test(line.replace(/safe-unzip\.sh/g, 'safe-script')))) {
-        assert.equal(file, 'release-fleetd-installer.yml', `${file}:${id} extracts a build archive`);
-        // fleetd extracts its checksum-pinned fleetctl or packages that fleetctl just built.
-        assert.match(line.trim(), /^(?:tar -xzf "\$RUNNER_TEMP\/fleetctl.tar.gz" -C "\$RUNNER_TEMP"|tar -x[fO]|pkgutil --expand(?:-full)? fleetd.pkg)/);
-        for (const root of roots) assert.ok(!line.includes(`${root}/`), 'downloaded artifact extraction');
+    for (const run of steps(body).map(stepRun)) {
+      for (const line of run.split('\n').filter((line) => !line.trimStart().startsWith('#'))) {
+        assert.doesNotMatch(line.replace(/safe-unzip\.sh/g, 'safe-script'), unsafeExtraction, `${file}:${id} extracts a build archive`);
       }
-    }
-    if (file === 'release-fleetd-installer.yml') {
-      assert.equal(roots.length, 0, 'fleetd must not download build artifacts');
-      const fleetctl = all.find((s) => field(s, 'dest', 10) === '${{ runner.temp }}/fleetctl.tar.gz');
-      assert.equal(field(fleetctl, 'uses', 8), './.github/actions/fetch-pinned');
-      assert.equal(field(fleetctl, 'sha256', 10), '${{ env.FLEETCTL_SHA256 }}');
     }
   }
 });

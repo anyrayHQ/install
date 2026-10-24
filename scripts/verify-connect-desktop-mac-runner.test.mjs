@@ -17,15 +17,13 @@ const BUILD_RUNS_ON = runsOn('anyray-install-mac-build');
 const WORKFLOWS = [
   'release-connect-desktop.yml',
   'release-connect-binaries.yml',
-  'release-fleetd-installer.yml',
 ];
 const MAC_JOBS = {
   'release-connect-desktop.yml': ['build-macos-unsigned', 'sign-macos', 'verify-macos-signed'],
   'release-connect-binaries.yml': ['sign-macos', 'verify-macos-launch'],
-  'release-fleetd-installer.yml': ['build-macos'],
 };
 const ROLE_JOBS = {
-  sign: ['sign-macos', 'build-macos'],
+  sign: ['sign-macos'],
   build: ['build-macos-unsigned', 'verify-macos-signed', 'verify-macos-launch'],
 };
 const MAINTAINERS = ['16443050', '187185370'];
@@ -313,15 +311,13 @@ for (const file of WORKFLOWS) {
 
   test(`${file}: teardown skips only ec2 and preserves the provision result policy`, () => {
     const teardown = jobs(readWorkflow(file))['teardown-mac'];
-    const fleetd = file === 'release-fleetd-installer.yml';
     for (const result of ['success', 'failure', 'cancelled', 'skipped']) {
       for (const choice of ['codebuild', '', 'ec2']) {
         assert.equal(evaluate(field(teardown, 'if'), choice, result),
-          choice !== 'ec2' && (fleetd || result !== 'skipped'), `${result}/${choice}`);
+          choice !== 'ec2' && result !== 'skipped', `${result}/${choice}`);
       }
     }
     assert.ok(needs(teardown).includes('provision-mac'));
-    if (fleetd) assert.deepEqual(needs(teardown), ['provision-mac', 'build-macos']);
     const teardownSteps = steps(teardown);
     assert.equal(teardownSteps.length, 3);
     assert.equal(field(teardownSteps[2], 'run', 8), './scripts/mac-fleet.sh down');
@@ -356,7 +352,6 @@ test('signing jobs never execute build output and the binary launches run in ver
   const signingJobs = [
     binaries['sign-macos'],
     jobs(readWorkflow('release-connect-desktop.yml'))['sign-macos'],
-    jobs(readWorkflow('release-fleetd-installer.yml'))['build-macos'],
   ];
   for (const body of signingJobs) {
     assert.doesNotMatch(body, /(?:"\$(?:bin|universal_connect|engine)"|"?out\/[^\s"]+"?|"[^"\n]*anyray-connect[^"\n]*")\s+--(?:help|version)\b/);
@@ -613,7 +608,7 @@ test('the third probe replaces a listed workflow at a non-main ref before enabli
   const enable = releasing.indexOf('gh variable set INSTALL_MAC_RUNNER');
   assert.ok(third > second && second >= 0 && enable > third, 'the third probe round must precede enabling ec2');
   const round = releasing.slice(third, enable);
-  assert.match(round, /REPLACE the whole content of\s+`\.github\/workflows\/release-fleetd-installer.yml`/);
+  assert.match(round, /REPLACE the whole content of\s+`\.github\/workflows\/release-connect-binaries.yml`/);
   assert.match(round, /nothing else in that workflow runs/);
   const block = round.match(/```yaml\n([\s\S]*?)\n```/);
   assert.equal(block?.[1], `name: Probe the runner group's ref pinning (delete after use)
@@ -623,7 +618,7 @@ on:
 permissions:
   contents: read
 jobs:
-  build-macos:
+  sign-macos:
     runs-on: [self-hosted, macOS, ARM64, anyray-install-mac]
     timeout-minutes: 5
     steps:
@@ -646,18 +641,18 @@ test('the runbook checks probe sentinels and proves invocation through the hook 
   assert.match(releasing, /symlink[\s\S]*mac-runner-hook\.sh[\s\S]*no arguments[\s\S]*usage error/);
 });
 
-for (const [file, count] of WORKFLOWS.map((file, i) => [file, i === 2 ? 2 : 3])) {
+for (const file of WORKFLOWS) {
   test(`${file}: every secret decode uses a one-line umask 077 subshell`, () => {
     const decodes = readWorkflow(file).split('\n').filter((line) => line.includes('base64 -d'));
-    assert.equal(decodes.length, count, 'secret decode count changed');
+    assert.equal(decodes.length, 3, 'secret decode count changed');
     for (const line of decodes) {
       assert.match(line, /^\s*\( umask 077; printf '%s' "\$[A-Z0-9_]+" \| base64 -d > "\$RUNNER_TEMP\/[^"]+" \)$/);
     }
   });
 }
 
-test('the eight secret decodes preserve the binaries keychain umask 022 rule', () => {
-  assert.equal(WORKFLOWS.flatMap((file) => readWorkflow(file).split('\n')).filter((line) => line.includes('base64 -d')).length, 8);
+test('the six secret decodes preserve the binaries keychain umask 022 rule', () => {
+  assert.equal(WORKFLOWS.flatMap((file) => readWorkflow(file).split('\n')).filter((line) => line.includes('base64 -d')).length, 6);
   const binaries = readWorkflow('release-connect-binaries.yml');
   assert.match(binaries, /# umask is scoped to the password file: a 0600 keychain-db is\n\s+# unreadable to trustd, so codesign can't build the cert chain/);
   assert.match(binaries, /^          umask 022$/m);
@@ -810,7 +805,7 @@ test('the runbook wires all four hooks and both unprivileged LaunchDaemons', () 
 test('the runbook states the signing boundary and persistent build-account risks', () => {
   const section = persistentRunbook();
   for (const required of [
-    'pinned fleetctl', 'It never runs build output', 'cargo build scripts and proc macros always run',
+    "from install main, pinned actions and Apple's tools.", 'It never runs build output', 'cargo build scripts and proc macros always run',
     'both homes are mode 0700', 'local privilege-escalation exploit',
     'tamper with later builds, which are then signed', "copy the build runner's credentials",
     'monorepo read App key', 'S3 artifact role', 'until the build account is reset',
@@ -890,7 +885,8 @@ test('job-started refuses each trust deviation and missing variable before touch
 
 for (const role of ['sign', 'build']) {
   const other = role === 'sign' ? 'build' : 'sign';
-  for (const job of [...ROLE_JOBS[other], 'unknown', undefined, ROLE_JOBS[role].join(' ')]) {
+  // The last value is a space-joined run of the role's own jobs: it must not pass word by word.
+  for (const job of [...ROLE_JOBS[other], 'unknown', undefined, [...ROLE_JOBS[role], ...ROLE_JOBS[role]].join(' ')]) {
     test(`${role} role refuses GITHUB_JOB ${job ?? '<missing>'} without touching the host`, (t) => {
       const tree = hookTree(t, role);
       const result = runHook(tree, 'job-started', { GITHUB_JOB: job });

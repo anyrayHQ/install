@@ -126,7 +126,7 @@ permissions:
   contents: read
 
 concurrency:
-  # Shared with the CLI and fleetd releases: all own the same Mac project. A called run
+  # Shared with the CLI release: both own the same Mac project. A called run
   # already holds its caller's group, so it takes its own to avoid waiting on itself.
   group: ${{ inputs.reuse_engines && format('connect-desktop-called-{0}', github.run_id) || 'anyray-install-mac-release' }}
   cancel-in-progress: false

@@ -106,11 +106,10 @@ instead of deep inside jsign or `codesign`.
 > posture; if a lane is genuinely retired, remove it from the preflight list in
 > the same commit rather than leaving it listed and unset.
 
-Both `release-connect-binaries.yml` and the endpoint-package workflow
-`release-fleetd-installer.yml` fail closed unless the macOS application and
+`release-connect-binaries.yml` fails closed unless the macOS application and
 installer certificates, notarization credentials, Azure Artifact Signing
-configuration, and Linux GPG release key are all present. Neither workflow may
-publish a partly signed asset set.
+configuration, and Linux GPG release key are all present. It may not publish a
+partly signed asset set.
 
 **Build provenance is the exception**: `actions/attest-build-provenance` is
 *not* secret-gated. It signs through the workflow's own OIDC identity, so every
@@ -363,12 +362,6 @@ forget:
       Anyray, not the brand, and Azure bakes the validated entity name into every
       certificate the profile issues.
 
-`fleetd.msi` is signed by `release-fleetd-installer.yml` through the same Azure
-Artifact Signing profile. The workflow then verifies the final MSI with Windows'
-native `Get-AuthenticodeSignature` before a release can consume it. That matters
-because the gateway re-serves this artifact to enrolled machines: the exact MSI
-verified on Windows is the one uploaded as the release asset.
-
 ### Linux — GPG-signed `.deb`/`.rpm` **and `SHA256SUMS`**
 
 | Secret | What it is | Where to get it |
@@ -379,9 +372,7 @@ verified on Windows is the one uploaded as the release asset.
 One key, two consumers. `package-linux` publishes the **public** key as the
 release asset `anyray-connect-signing-key.asc` plus a detached `.asc` next to
 each package; the `release` job additionally detach-signs the checksum file to
-`SHA256SUMS.asc`. The Fleet endpoint-package lane uses the same key as a hard
-release prerequisite, and also signs its `endpoint-release.json` manifest plus
-each `.deb`/`.rpm` asset.
+`SHA256SUMS.asc`.
 
 **After provisioning the key, record its fingerprint below.** The release job
 prints `signing key fingerprint: <40 hex>` in its log, and the release notes
@@ -482,8 +473,8 @@ no `signtool`. This is also why the lane does **not** use Microsoft's own signin
 integration: that path is SignTool + .NET 8 + the Artifact Signing dlib, all
 Windows-only, and would drag the job back onto a Windows fleet to do the same
 work. **Keep the `anyray-install-runner-win` project**: this workflow no longer
-uses it, but `release-fleetd-installer.yml`'s `build-windows` still does
-(fleetctl shells out to WiX `heat`, which needs a real Windows host).
+uses it, but the desktop release's Windows jobs and `validate-artifacts.yml`
+still do.
 
 **Why macOS is on-demand.** Apple signing requires a Mac. EC2 Mac hosts have a
 24-hour minimum charge; leaving a fleet ACTIVE continues billing beyond it.
@@ -493,7 +484,7 @@ releases may reuse the remaining paid window. It fails if readiness takes more
 than 20 minutes. Cleanup must never be replaced with simply leaving the fleet active.
 This is the default; the persistent host below replaces it once proven.
 
-The Connect CLI, desktop, and fleetd release workflows share the
+The Connect CLI and desktop release workflows share the
 `anyray-install-mac-release` concurrency group for their entire runs. This keeps
 one release's teardown from deleting another release's runner. GitHub retains
 one running and one pending run per group; a new dispatch replaces an older
@@ -547,7 +538,7 @@ the abandoned rcodesign path and is unused.)
 ### The persistent macOS signing host (ANY-1405)
 
 **What and why.** `provision-mac` saves the Mac runner choice once per run. The
-binaries and fleetd workflows read the repository variable `INSTALL_MAC_RUNNER`.
+binaries workflow reads the repository variable `INSTALL_MAC_RUNNER`.
 A called desktop workflow takes the caller's saved choice through `mac_runner`.
 Only a desktop run dispatched by hand reads the variable itself. Every Mac job
 and teardown reads the saved output, so changing the variable during a run leaves
@@ -581,11 +572,11 @@ a called desktop workflow already holds its caller's group.
 
 | Role | macOS account | Runner label | Jobs |
 | --- | --- | --- | --- |
-| sign | `anyray-sign` | `anyray-install-mac` | desktop `sign-macos`, binaries `sign-macos`, fleetd `build-macos` |
+| sign | `anyray-sign` | `anyray-install-mac` | desktop `sign-macos`, binaries `sign-macos` |
 | build | `anyray-build` | `anyray-install-mac-build` | desktop `build-macos-unsigned`, desktop `verify-macos-signed`, binaries `verify-macos-launch` |
 
 The signing account `anyray-sign` (no admin, no sudo) runs only workflow code
-from install main, pinned actions, Apple's tools and the pinned fleetctl.
+from install main, pinned actions and Apple's tools.
 It never runs build output. It holds Apple material only inside a signing job,
 decoded into `$RUNNER_TEMP` and a throwaway keychain, then deleted by the job.
 The runner wipes `$RUNNER_TEMP` around every job, and both hooks reset the keychain
@@ -623,7 +614,7 @@ unset `INSTALL_MAC_RUNNER` for that release. The CodeBuild fleet path still runs
 root smoke. A scheduled root-volume reset was rejected: root can copy the runner registration credentials,
 and a reset does not revoke them. The follow-up is a disposable macOS VM per smoke.
 
-The organization runner group restricted to this repo and the three release
+The organization runner group restricted to this repo and the two release
 workflows at main is the gate against fork pull requests. The hooks are a second
 layer: before any step, job-started requires a `workflow_dispatch` at
 `refs/heads/main` in `anyrayHQ/install`, an allowed workflow ref, a maintainer's
@@ -707,7 +698,7 @@ codesign --version
 productsign --help
 xmllint --version
 aws --version
-python3 --version                                   # safe-unzip.sh and fleetd's build use it
+python3 --version                                   # safe-unzip.sh uses it
 test -x /usr/bin/zipinfo && test -x /usr/bin/sandbox-exec && test -x /usr/bin/ditto   # safe-unzip.sh
 sudo -iu ec2-user brew install jq
 touch /System/Volumes/Data/.fseventsd/no_log && killall fseventsd
@@ -735,7 +726,7 @@ stat -f '%Su %Lp %N' /usr/local/bin /opt/homebrew/bin   # neither writable by th
 
 The organization runner group is REQUIRED before `INSTALL_MAC_RUNNER=ec2`. An org
 owner must create it restricted to this repository, with public repositories
-allowed because this repo is public, and restricted to the three release
+allowed because this repo is public, and restricted to the two release
 workflows at main. Create it and read it back from the operator machine:
 
 ```bash
@@ -744,13 +735,12 @@ gh api -X POST orgs/anyrayHQ/actions/runner-groups -f name=anyray-install-mac \
   -f visibility=selected -F "selected_repository_ids[]=$repo_id" \
   -F allows_public_repositories=true -F restricted_to_workflows=true \
   -f 'selected_workflows[]=anyrayHQ/install/.github/workflows/release-connect-binaries.yml@main' \
-  -f 'selected_workflows[]=anyrayHQ/install/.github/workflows/release-connect-desktop.yml@main' \
-  -f 'selected_workflows[]=anyrayHQ/install/.github/workflows/release-fleetd-installer.yml@main'
+  -f 'selected_workflows[]=anyrayHQ/install/.github/workflows/release-connect-desktop.yml@main'
 gh api orgs/anyrayHQ/actions/runner-groups --jq '.runner_groups[] | select(.name=="anyray-install-mac") | {id, restricted_to_workflows, selected_workflows, allows_public_repositories}'
 ```
 
 If the plan does not accept `restricted_to_workflows`, or the read-back does not
-show it and all three selected workflows, stop and do not set the variable.
+show it and both selected workflows, stop and do not set the variable.
 The desktop workflow is listed because the restriction applies to "jobs directly defined within the selected workflows".
 If a legitimate dry run queues with no runner, the workflow entry format did not
 match: try `@refs/heads/main` instead of `@main`, then read back and probe again.
@@ -942,12 +932,12 @@ invoked by its real name `mac-runner-hook.sh` with no arguments, it exits with t
 usage error instead. The job log line "A job started hook has been configured by the self-hosted runner administrator"
 shows that a hook ran.
 
-Second round, restrict the group to the three release workflows at main again
+Second round, restrict the group to the two release workflows at main again
 and push the probe branch again. This proves the group. Both jobs must stay
 queued with no runner; cancel the run, then delete the branch.
 
 Third round, on a branch `probe/any-1405-ref`, REPLACE the whole content of
-`.github/workflows/release-fleetd-installer.yml` (a listed workflow path) with this
+`.github/workflows/release-connect-binaries.yml` (a listed workflow path) with this
 single probe job, so nothing else in that workflow runs:
 
 ```yaml
@@ -958,7 +948,7 @@ on:
 permissions:
   contents: read
 jobs:
-  build-macos:
+  sign-macos:
     runs-on: [self-hosted, macOS, ARM64, anyray-install-mac]
     timeout-minutes: 5
     steps:

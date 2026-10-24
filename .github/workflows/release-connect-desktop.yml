@@ -407,6 +407,11 @@ jobs:
           set -euo pipefail
           (
             cd private-source
+            # connect's build script runs bare `pnpm`, and `corepack pnpm` puts none on
+            # PATH: install corepack's shim into a run-local directory instead.
+            pnpm_shims="$RUNNER_TEMP/pnpm-shims"
+            corepack enable pnpm --install-directory "$pnpm_shims"
+            PATH="$pnpm_shims:$PATH"
             # Corepack must see this packageManager; -C only affects pnpm afterwards.
             corepack pnpm --filter 'anyray-connect...' --filter 'anyray-vscode...' install --frozen-lockfile --ignore-scripts --config.node-linker=isolated
             corepack pnpm --filter anyray-connect build
@@ -1584,6 +1589,11 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           Push-Location private-source
           try {
+            # connect's build script runs bare `pnpm`, and `corepack pnpm` puts none on
+            # PATH: install corepack's shim into a run-local directory instead.
+            $pnpm_shims = Join-Path $env:RUNNER_TEMP 'pnpm-shims'
+            corepack enable pnpm --install-directory $pnpm_shims
+            $env:PATH = "$pnpm_shims;$env:PATH"
             corepack pnpm --filter 'anyray-connect...' --filter 'anyray-vscode...' install --frozen-lockfile --ignore-scripts --config.node-linker=isolated
             corepack pnpm --filter anyray-connect build
           } finally { Pop-Location }
@@ -2432,6 +2442,11 @@ jobs:
           set -euo pipefail
           (
             cd private-source
+            # connect's build script runs bare `pnpm`, and `corepack pnpm` puts none on
+            # PATH: install corepack's shim into a run-local directory instead.
+            pnpm_shims="$RUNNER_TEMP/pnpm-shims"
+            corepack enable pnpm --install-directory "$pnpm_shims"
+            PATH="$pnpm_shims:$PATH"
             # Corepack must see this packageManager; -C only affects pnpm afterwards.
             corepack pnpm --filter 'anyray-connect...' --filter 'anyray-vscode...' install --frozen-lockfile --ignore-scripts --config.node-linker=isolated
             corepack pnpm --filter anyray-connect build

@@ -133,9 +133,20 @@ serviceAccount:
   create: false
   name: ""
   annotations: {}
+  # Mount the Kubernetes API token into the gateway, optimizer, proxy and
+  # Postgres pods? None of them calls the API, so a token there only helps
+  # whoever compromises one. Set true if a sidecar you
+  # inject needs it, or null to leave it to the service account. The autoUpdate
+  # job keeps its own token: it runs kubectl.
+  automountServiceAccountToken: false
 
 podAnnotations: {}
 podLabels: {}
+# Global security contexts, applied to EVERY pod (Postgres included) and
+# winning over the per-component ones below whenever they are non-empty. Prefer
+# the per-component <component>.podSecurityContext / containerSecurityContext:
+# the bundled Postgres starts as root and drops privileges itself, so a global
+# runAsNonRoot stops it from starting.
 podSecurityContext: {}
 containerSecurityContext: {}
 
@@ -441,6 +452,25 @@ gateway:
     enabled: false
     size: 1Gi
     storageClass: ""
+  # Runs the gateway as uid 1000 (`node`) with no privileges. The image already
+  # runs the gateway as that user: its entrypoint starts as root only to hand
+  # /data to `node`, then drops to it. With /data an emptyDir there is nothing to
+  # hand over, so pinning the user changes nothing the gateway runs as.
+  # Not applied while gateway.persistence.enabled=true (an older volume may be
+  # root-owned, and the entrypoint must start as root to adopt it), nor when the
+  # global podSecurityContext / containerSecurityContext above are set, which
+  # win. Set a key to null to drop it, or the whole block to null for none.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 # Optimizer
 optimizer:
@@ -500,6 +530,10 @@ optimizer:
   # Same shape as gateway.extraVolumes / gateway.extraVolumeMounts.
   extraVolumes: []
   extraVolumeMounts: []
+  # Empty by default: the optimizer image runs as root. Same shape and
+  # precedence as gateway.podSecurityContext / containerSecurityContext.
+  podSecurityContext: {}
+  containerSecurityContext: {}
 
 # Proxy (nginx reverse proxy / console)
 proxy:
@@ -523,6 +557,20 @@ proxy:
       cpu: "250m"
       memory: "256Mi"
   extraEnv: []
+  # Run nginx without root, which Pod Security "restricted" requires. Off by
+  # default, where nginx's master process runs as root (it binds :80, then its
+  # workers drop to uid 101) exactly as before. On, the proxy runs as uid 101
+  # with no capabilities, binds :80 through the safe
+  # net.ipv4.ip_unprivileged_port_start sysctl, and writes to three emptyDirs
+  # (/etc/nginx/conf.d, /var/cache/nginx, /run). proxy.podSecurityContext and
+  # containerSecurityContext below merge over those contexts key by key; the
+  # global ones do not apply to the proxy while this is on.
+  nonRoot:
+    enabled: false
+  # Same shape and precedence as gateway.podSecurityContext /
+  # containerSecurityContext.
+  podSecurityContext: {}
+  containerSecurityContext: {}
 
 # Postgres — the Anyray spend + trace store. The gateway persists content-free
 # traces + observations to the anyray_traces / anyray_observations tables
@@ -610,6 +658,11 @@ postgres:
     limits:
       cpu: "500m"
       memory: "512Mi"
+  # Empty by default: the Postgres image starts as root and drops to its own
+  # user, so runAsNonRoot here stops it starting. Same precedence as
+  # gateway.podSecurityContext / containerSecurityContext.
+  podSecurityContext: {}
+  containerSecurityContext: {}
   external:
     # Point the gateway's trace + spend store at a managed Postgres instead of
     # the bundled StatefulSet (set postgres.enabled=false). The gateway reads this

@@ -534,7 +534,7 @@ suspended subscription is refused whatever calls it.
 ## Cluster policy knobs
 
 Set these values when your cluster requires a specific service account, private
-registry pull secret, scheduling constraints, or pod security context:
+registry pull secret, or scheduling constraints:
 
 ```yaml
 serviceAccount:
@@ -553,10 +553,42 @@ tolerations:
     operator: Equal
     value: ai-platform
     effect: NoSchedule
-podSecurityContext:
-  runAsNonRoot: true
-containerSecurityContext:
-  allowPrivilegeEscalation: false
+```
+
+### Pod security
+
+No app pod gets a Kubernetes API token, and the gateway runs as a non-root user
+by default. The optimizer, proxy and Postgres images start as root, so their
+defaults leave them as they were. Every default below is a value you can change.
+
+| Value | Default | What it does |
+| --- | --- | --- |
+| `serviceAccount.automountServiceAccountToken` | `false` | Mounts the API token into the gateway, optimizer, proxy and Postgres pods. None of them calls the API. Set `true` if a sidecar you inject needs it, or `null` to leave it to the service account. The `autoUpdate` job keeps its token: it runs kubectl. |
+| `gateway.podSecurityContext` | uid/gid/fsGroup `1000`, `runAsNonRoot`, seccomp `RuntimeDefault` | The gateway image already drops to uid 1000 (`node`) at boot, so this changes nothing it runs as. Not applied while `gateway.persistence.enabled` is `true`: an older volume can be root-owned, and only the image's own entrypoint, starting as root, can adopt it. |
+| `gateway.containerSecurityContext` | `allowPrivilegeEscalation: false`, drop `ALL` capabilities | Same conditions as above. |
+| `optimizer.podSecurityContext` / `containerSecurityContext` | `{}` | The image runs as root. It also boots as uid 1000 with no capabilities, if you set that here. |
+| `proxy.nonRoot.enabled` | `false` | Runs nginx as its own user (uid 101) with no capabilities. It binds `:80` through the `net.ipv4.ip_unprivileged_port_start` sysctl, which every kubelet allows, and writes to three emptyDirs (`/etc/nginx/conf.d`, `/var/cache/nginx`, `/run`). Off, nginx starts as root as before. |
+| `proxy.podSecurityContext` / `containerSecurityContext` | `{}` | Merged over the `nonRoot` contexts key by key when that is on. |
+| `postgres.podSecurityContext` / `containerSecurityContext` | `{}` | The bundled Postgres starts as root and drops privileges itself, so do not set `runAsNonRoot` here. |
+| `podSecurityContext` / `containerSecurityContext` | `{}` | Global. When set, applies to every pod (Postgres included) and replaces the per-component values, except the proxy's while `proxy.nonRoot.enabled` is on. |
+
+To meet Pod Security `restricted`, with external Postgres and no `autoUpdate`
+job (a pinned `image.tag`, or `autoUpdate.enabled: false`):
+
+```yaml
+optimizer:
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile: { type: RuntimeDefault }
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities: { drop: ["ALL"] }
+proxy:
+  nonRoot:
+    enabled: true
 ```
 
 `nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints`, and

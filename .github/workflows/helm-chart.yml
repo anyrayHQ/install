@@ -188,6 +188,94 @@ jobs:
           done
           [ "$fail" = 0 ]
 
+      - name: App pods get no API token, and only non-root images run non-root
+        run: |
+          set -euo pipefail
+          # The security defaults must change nothing an existing install runs
+          # as. The gateway image already drops to uid 1000 at boot, so pinning
+          # that user is safe; the optimizer, nginx proxy and Postgres images
+          # start as root, so forcing them non-root would stop them starting.
+          base=(--set host=anyray.example.com --set postgres.storage=150Gi)
+          workloads="Deployment:anyray-gateway Deployment:anyray-optimizer Deployment:anyray-proxy StatefulSet:anyray-postgres"
+          # One rendered document, picked by kind and metadata.name.
+          doc() {
+            awk -v kind="$2" -v want="$3" '
+              /^---/ { if (k && hit) printf "%s", buf; buf=""; k=0; hit=0; next }
+              { buf = buf $0 "\n" }
+              $0 == "kind: " kind { k=1 }
+              $0 == "  name: " want { hit=1 }
+              END { if (k && hit) printf "%s", buf }' <<<"$1"
+          }
+          fail=0
+          render="$(helm template t helm "${base[@]}")"
+          for w in $workloads; do
+            d="$(doc "$render" "${w%%:*}" "${w#*:}")"
+            if [ -z "$d" ]; then echo "::error::no ${w} in the default render"; fail=1; continue; fi
+            grep -q 'automountServiceAccountToken: false' <<<"$d" \
+              || { echo "::error::${w} mounts the Kubernetes API token by default"; fail=1; }
+            if [ "${w#*:}" = anyray-gateway ]; then
+              for want in 'runAsNonRoot: true' 'runAsUser: 1000' 'fsGroup: 1000' 'type: RuntimeDefault' \
+                'allowPrivilegeEscalation: false' '- ALL'; do
+                grep -q -- "$want" <<<"$d" || { echo "::error::the gateway lacks '${want}'"; fail=1; }
+              done
+            elif grep -qE 'runAsNonRoot|runAsUser|drop:' <<<"$d"; then
+              echo "::error::${w} runs a root image but is forced non-root by default"; fail=1
+            fi
+          done
+
+          # With its data volume the gateway's entrypoint must start as root to
+          # adopt a volume an older image left root-owned.
+          d="$(doc "$(helm template t helm "${base[@]}" --set gateway.persistence.enabled=true \
+            --set gateway.replicas=1)" Deployment anyray-gateway)"
+          grep -q 'automountServiceAccountToken: false' <<<"$d" || { echo "::error::no gateway rendered with persistence"; fail=1; }
+          if grep -qE 'runAsUser|runAsNonRoot' <<<"$d"; then
+            echo "::error::the gateway pins a user over its data volume"; fail=1
+          fi
+
+          # A global security context still applies to every pod, unchanged, and
+          # wins over the gateway's own.
+          global="$(helm template t helm "${base[@]}" --set podSecurityContext.fsGroup=2000)"
+          for w in $workloads; do
+            d="$(doc "$global" "${w%%:*}" "${w#*:}")"
+            grep -q 'fsGroup: 2000' <<<"$d" || { echo "::error::${w} lost the global podSecurityContext"; fail=1; }
+            if grep -q 'runAsUser: 1000' <<<"$d"; then echo "::error::${w} mixed in a per-component default over the global"; fail=1; fi
+          done
+
+          # Every default is a value: the gateway's contexts switch off, and a
+          # root image takes its own when an operator sets one.
+          custom="$(helm template t helm "${base[@]}" --set gateway.podSecurityContext=null \
+            --set gateway.containerSecurityContext=null --set optimizer.podSecurityContext.runAsUser=1000)"
+          if grep -q 'securityContext' <<<"$(doc "$custom" Deployment anyray-gateway)"; then
+            echo "::error::gateway.podSecurityContext=null did not remove the gateway's security context"; fail=1
+          fi
+          grep -q 'runAsUser: 1000' <<<"$(doc "$custom" Deployment anyray-optimizer)" \
+            || { echo "::error::optimizer.podSecurityContext was not applied"; fail=1; }
+          # proxy.nonRoot is opt-in. Off, the proxy is untouched (checked above);
+          # on, nginx gets its own user, the port sysctl and three writable
+          # emptyDirs, or it cannot start without root.
+          if grep -qE 'sysctls|emptyDir' <<<"$(doc "$render" Deployment anyray-proxy)"; then
+            echo "::error::the default proxy carries the nonRoot settings"; fail=1
+          fi
+          d="$(doc "$(helm template t helm "${base[@]}" --set proxy.nonRoot.enabled=true)" Deployment anyray-proxy)"
+          for want in 'runAsNonRoot: true' 'runAsUser: 101' 'fsGroup: 101' 'type: RuntimeDefault' \
+            'name: net.ipv4.ip_unprivileged_port_start' 'allowPrivilegeEscalation: false' '- ALL' \
+            'mountPath: /etc/nginx/conf.d' 'mountPath: /var/cache/nginx' 'mountPath: /run'; do
+            grep -q -- "$want" <<<"$d" || { echo "::error::proxy.nonRoot.enabled=true lacks '${want}'"; fail=1; }
+          done
+          test "$(grep -c 'emptyDir: {}' <<<"$d")" -eq 3 \
+            || { echo "::error::proxy.nonRoot.enabled=true does not mount exactly three emptyDirs"; fail=1; }
+          on="$(helm template t helm "${base[@]}" --set serviceAccount.automountServiceAccountToken=true)"
+          test "$(grep -c 'automountServiceAccountToken: true' <<<"$on")" -eq 4 \
+            || { echo "::error::serviceAccount.automountServiceAccountToken=true did not reach all four pods"; fail=1; }
+
+          # The autoUpdate job keeps its token: it runs kubectl against the API.
+          cron="$(doc "$(helm template t helm "${base[@]}" --set-string image.tag=policy-stable)" CronJob anyray-autoupdate)"
+          if [ -z "$cron" ]; then echo "::error::no autoUpdate CronJob on the moving tag"; fail=1
+          elif grep -q 'automountServiceAccountToken' <<<"$cron"; then
+            echo "::error::the autoUpdate job lost its API token"; fail=1
+          fi
+          [ "$fail" = 0 ]
+
       - name: One-line opt-in turns the whole feature on
         run: |
           set -euo pipefail

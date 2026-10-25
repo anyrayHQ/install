@@ -217,6 +217,13 @@ back to the global (Go templates treat 0 as empty).
 {{- $terminationGrace = $overrides.terminationGracePeriodSeconds -}}
 {{- end -}}
 serviceAccountName: {{ include "anyray.serviceAccountName" $context }}
+{{- /* No app container calls the Kubernetes API, so none needs the API token
+       mounted into it. A null value leaves the field unset (the service
+       account's own setting applies). */}}
+{{- $automount := $context.Values.serviceAccount.automountServiceAccountToken }}
+{{- if kindIs "bool" $automount }}
+automountServiceAccountToken: {{ $automount }}
+{{- end }}
 {{- if not (kindIs "invalid" $terminationGrace) }}
 terminationGracePeriodSeconds: {{ int $terminationGrace }}
 {{- end }}
@@ -255,25 +262,90 @@ Common pod spec fields including the global podSecurityContext. Accepts the bare
 root context or (dict "component" <name> "context" .) — see podSpecCommonNoSecurity.
 */}}
 {{- define "anyray.podSpecCommon" -}}
-{{- $context := . -}}
-{{- if hasKey . "context" -}}
-{{- $context = .context -}}
-{{- end -}}
 {{- include "anyray.podSpecCommonNoSecurity" . }}
-{{- with $context.Values.podSecurityContext }}
+{{- with (include "anyray.securityContextFor" (dict "key" "podSecurityContext" "args" .) | fromYaml) }}
 securityContext:
   {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- end }}
 
 {{/*
-Common container security context.
+Common container security context. Accepts the bare root context (the global
+value only) or (dict "component" <name> "context" .), like podSpecCommon.
 */}}
 {{- define "anyray.containerSecurityContext" -}}
-{{- with .Values.containerSecurityContext }}
+{{- with (include "anyray.securityContextFor" (dict "key" "containerSecurityContext" "args" .) | fromYaml) }}
 securityContext:
   {{- toYaml . | nindent 2 }}
 {{- end }}
+{{- end }}
+
+{{/*
+The security context a pod or container gets, as YAML (empty for none).
+`key` is podSecurityContext or containerSecurityContext; `args` is what the
+caller received (the root context, or a dict with component + context).
+
+  * A non-empty GLOBAL value applies to every pod exactly as it always has, and
+    wins: an install that already set one sees no change.
+  * Otherwise each component uses its own <component>.<key>. Only the gateway
+    has a default (non-root): its image already drops to uid 1000 (node) at
+    boot, so pinning that user changes nothing it runs as.
+  * Except the gateway WITH its data volume: an older volume can be root-owned,
+    and only the image's root-start entrypoint can adopt it (or stay root when
+    it cannot), so the gateway keeps the global value there.
+  * The proxy with proxy.nonRoot.enabled takes the non-root contexts below,
+    with proxy.<key> merged over them key by key. The global value is ignored
+    there: without the user and the port sysctl nginx cannot start.
+*/}}
+{{- define "anyray.securityContextFor" -}}
+{{- $context := .args -}}
+{{- $component := "" -}}
+{{- if hasKey .args "context" -}}
+{{- $context = .args.context -}}
+{{- $component = toString .args.component -}}
+{{- end -}}
+{{- $chosen := index $context.Values .key | default dict -}}
+{{- $own := dict -}}
+{{- if $component -}}
+{{- $own = index (index $context.Values $component | default dict) .key | default dict -}}
+{{- end -}}
+{{- if and (eq $component "proxy") (include "anyray.proxyNonRoot" $context) -}}
+{{- $chosen = mergeOverwrite (get (include "anyray.proxyNonRootContexts" . | fromYaml) .key) $own -}}
+{{- else if and (not $chosen) $component -}}
+{{- if not (and (eq $component "gateway") $context.Values.gateway.persistence.enabled) -}}
+{{- $chosen = $own -}}
+{{- end -}}
+{{- end -}}
+{{- with $chosen }}{{ toYaml . }}{{ end -}}
+{{- end }}
+
+{{/* "true" when the proxy runs nginx without root (proxy.nonRoot.enabled). */}}
+{{- define "anyray.proxyNonRoot" -}}
+{{- if dig "nonRoot" "enabled" false (.Values.proxy | default dict) }}true{{ end -}}
+{{- end }}
+
+{{/*
+What nginx needs to run without root and pass Pod Security "restricted": the
+image's own nginx user (uid/gid 101), and binding :80 through the namespaced
+`net.ipv4.ip_unprivileged_port_start` sysctl, which is in the safe set every
+kubelet allows and Pod Security accepts. The writable paths come from the
+emptyDirs in proxy.yaml.
+*/}}
+{{- define "anyray.proxyNonRootContexts" -}}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 101
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+  sysctls:
+    - name: net.ipv4.ip_unprivileged_port_start
+      value: "0"
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
 {{- end }}
 
 {{/*

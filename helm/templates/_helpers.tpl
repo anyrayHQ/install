@@ -217,6 +217,15 @@ back to the global (Go templates treat 0 as empty).
 {{- $terminationGrace = $overrides.terminationGracePeriodSeconds -}}
 {{- end -}}
 serviceAccountName: {{ include "anyray.serviceAccountName" $context }}
+{{- /* No app container calls the Kubernetes API, so none needs the API token
+       mounted into it. A null value leaves the field unset (the service
+       account's own setting applies). Not on the bundled Postgres: a change to
+       its pod spec restarts it on upgrade, and while it is down /v1 fails
+       closed. */}}
+{{- $automount := $context.Values.serviceAccount.automountServiceAccountToken }}
+{{- if and (kindIs "bool" $automount) (ne $component "postgres") }}
+automountServiceAccountToken: {{ $automount }}
+{{- end }}
 {{- if not (kindIs "invalid" $terminationGrace) }}
 terminationGracePeriodSeconds: {{ int $terminationGrace }}
 {{- end }}
@@ -255,25 +264,111 @@ Common pod spec fields including the global podSecurityContext. Accepts the bare
 root context or (dict "component" <name> "context" .) — see podSpecCommonNoSecurity.
 */}}
 {{- define "anyray.podSpecCommon" -}}
-{{- $context := . -}}
-{{- if hasKey . "context" -}}
-{{- $context = .context -}}
-{{- end -}}
 {{- include "anyray.podSpecCommonNoSecurity" . }}
-{{- with $context.Values.podSecurityContext }}
+{{- with (include "anyray.securityContextFor" (dict "key" "podSecurityContext" "args" .) | fromYaml) }}
 securityContext:
   {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- end }}
 
 {{/*
-Common container security context.
+Common container security context. Accepts the bare root context (the global
+value only) or (dict "component" <name> "context" .), like podSpecCommon.
 */}}
 {{- define "anyray.containerSecurityContext" -}}
-{{- with .Values.containerSecurityContext }}
+{{- with (include "anyray.securityContextFor" (dict "key" "containerSecurityContext" "args" .) | fromYaml) }}
 securityContext:
   {{- toYaml . | nindent 2 }}
 {{- end }}
+{{- end }}
+
+{{/*
+The security context a pod or container gets, as YAML (empty for none).
+`key` is podSecurityContext or containerSecurityContext; `args` is what the
+caller received (the root context, or a dict with component + context).
+
+  * When EITHER global value is set, both global values apply to every pod
+    exactly as they always have, and no per-component value is mixed in: an
+    install that already set one sees no change. (Mixing them can contradict:
+    a global runAsUser 0 next to the gateway's runAsNonRoot will not start.)
+  * Otherwise each component uses its own <component>.<key>. Only the gateway
+    has a default (non-root): its image already drops to uid 1000 (node) at
+    boot, so pinning that user changes nothing it runs as.
+  * Except where the gateway's root-start entrypoint still has work to do:
+    with its data volume (an older one can be root-owned), or when
+    gateway.extraEnv moves ANYRAY_DATA_DIR or an ANYRAY_*_FILE path (the
+    entrypoint creates and hands over those directories). The gateway then
+    starts as before.
+  * The proxy with proxy.nonRoot.enabled takes the non-root contexts below,
+    with proxy.<key> merged over them key by key. The global value is ignored
+    there: without the user and the port sysctl nginx cannot start.
+*/}}
+{{- define "anyray.securityContextFor" -}}
+{{- $context := .args -}}
+{{- $component := "" -}}
+{{- if hasKey .args "context" -}}
+{{- $context = .args.context -}}
+{{- $component = toString .args.component -}}
+{{- end -}}
+{{- $chosen := index $context.Values .key | default dict -}}
+{{- $globalSet := or $context.Values.podSecurityContext $context.Values.containerSecurityContext -}}
+{{- $own := dict -}}
+{{- if $component -}}
+{{- $own = index (index $context.Values $component | default dict) .key | default dict -}}
+{{- end -}}
+{{- if and (eq $component "proxy") (include "anyray.proxyNonRoot" $context) -}}
+{{- $chosen = mergeOverwrite (get (include "anyray.proxyNonRootContexts" . | fromYaml) .key) $own -}}
+{{- else if and (not $globalSet) $component -}}
+{{- if not (and (eq $component "gateway") (include "anyray.gatewayEntrypointPrepares" $context)) -}}
+{{- $chosen = $own -}}
+{{- end -}}
+{{- end -}}
+{{- with $chosen }}{{ toYaml . }}{{ end -}}
+{{- end }}
+
+{{/*
+"true" when the gateway image's entrypoint must start as root to prepare a
+directory: the data volume, or a data directory or ANYRAY_*_FILE path moved
+through gateway.extraEnv.
+*/}}
+{{- define "anyray.gatewayEntrypointPrepares" -}}
+{{- $prepares := .Values.gateway.persistence.enabled -}}
+{{- range (.Values.gateway.extraEnv | default list) -}}
+{{- $name := toString .name -}}
+{{- if or (eq $name "ANYRAY_DATA_DIR") (regexMatch "^ANYRAY_[A-Z0-9_]+_FILE$" $name) -}}
+{{- $prepares = true -}}
+{{- end -}}
+{{- end -}}
+{{- if $prepares }}true{{ end -}}
+{{- end }}
+
+{{/* "true" when the proxy runs nginx without root (proxy.nonRoot.enabled). */}}
+{{- define "anyray.proxyNonRoot" -}}
+{{- if dig "nonRoot" "enabled" false (.Values.proxy | default dict) }}true{{ end -}}
+{{- end }}
+
+{{/*
+What nginx needs to run without root and pass Pod Security "restricted": the
+image's own nginx user (uid/gid 101), and binding :80 through the namespaced
+`net.ipv4.ip_unprivileged_port_start` sysctl, which is in the safe set every
+kubelet allows and Pod Security accepts. The writable paths come from the
+emptyDirs in proxy.yaml.
+*/}}
+{{- define "anyray.proxyNonRootContexts" -}}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 101
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+  sysctls:
+    - name: net.ipv4.ip_unprivileged_port_start
+      value: "0"
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
 {{- end }}
 
 {{/*

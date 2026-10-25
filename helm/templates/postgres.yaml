@@ -25,7 +25,7 @@ spec:
           {{- with .Values.postgres.maxConnections }}
           args: ["-c", "max_connections={{ int . }}"]
           {{- end }}
-          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
+          {{- include "anyray.containerSecurityContext" (dict "component" "postgres" "context" .) | nindent 10 }}
           env:
             - name: POSTGRES_USER
               value: postgres

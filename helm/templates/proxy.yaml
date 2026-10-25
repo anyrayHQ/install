@@ -32,7 +32,7 @@ spec:
         - name: proxy
           image: {{ include "anyray.image" (dict "component" "proxy" "context" .) }}
           imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "proxy" "context" .) }}
-          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
+          {{- include "anyray.containerSecurityContext" (dict "component" "proxy" "context" .) | nindent 10 }}
           # The proxy image bakes nginx envsubst placeholders for the
           # Docker/Watchtower updater route and status endpoint. The updater is
           # not wired under Kubernetes (upgrades go through `helm upgrade`), but
@@ -105,6 +105,27 @@ spec:
           {{- include "anyray.preStopDrain" (dict "component" "proxy" "context" .) | nindent 10 }}
           resources:
             {{- toYaml .Values.proxy.resources | nindent 12 }}
+          {{- if include "anyray.proxyNonRoot" . }}
+          {{- /* The paths nginx writes as non-root. Nothing baked into the
+                 image is hidden: /etc/nginx/conf.d holds only nginx's stock
+                 default.conf, which the image's 20-envsubst-on-templates.sh
+                 rewrites from /etc/nginx/templates on every start; /run holds
+                 the pid file; /var/cache/nginx starts empty. */}}
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /run
+      volumes:
+        - name: nginx-conf
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+          {{- end }}
 ---
 apiVersion: v1
 kind: Service

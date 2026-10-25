@@ -179,8 +179,9 @@ test('pins when run the way the CronJob runs it: through a ConfigMap symlink', a
       'anyray-proxy': 'public.ecr.aws/anyray/proxy:policy-stable',
     },
   });
-  const mount = await mkdtemp(join(tmpdir(), 'autoupdate-pin-mount-'));
+  let mount;
   try {
+    mount = await mkdtemp(join(tmpdir(), 'autoupdate-pin-mount-'));
     // The layout the kubelet writes for a ConfigMap volume.
     const stamp = '..2026_10_25_12_00_00.000000001';
     await mkdir(join(mount, stamp));
@@ -208,7 +209,7 @@ test('pins when run the way the CronJob runs it: through a ConfigMap symlink', a
     assert.match(res.stdout, /anyray-gateway: .* -> .*@sha256:/, 'it says what it pinned');
   } finally {
     fake.close();
-    await rm(mount, { recursive: true, force: true });
+    if (mount) await rm(mount, { recursive: true, force: true });
   }
 });
 

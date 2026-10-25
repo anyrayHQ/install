@@ -23,7 +23,9 @@
 // token, NODE_EXTRA_CA_CERTS for the cluster CA): the kubectl image is
 // distroless and cannot run a script.
 
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
 const DIGEST = /@(sha256:[0-9a-f]{64})$/;
@@ -99,7 +101,16 @@ async function main() {
   });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// ConfigMap volumes expose the script through symlinks, while Node resolves
+// import.meta.url to the target. Compare real paths to recognize the entry point.
+let isEntryPoint = false;
+try {
+  if (process.argv[1]) {
+    isEntryPoint = realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  }
+} catch {}
+
+if (isEntryPoint) {
   main().catch((err) => {
     console.error(`autoupdate-pin: ${err.message}`);
     process.exit(1);

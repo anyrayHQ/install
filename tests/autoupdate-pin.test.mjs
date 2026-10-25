@@ -3,10 +3,17 @@
 // Job's own pod resolved, nothing is patched unless every digest resolved, and
 // an already-pinned Deployment is left alone (no roll for nothing).
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { copyFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { digestOf, pin, pinnedRef } from '../helm/files/autoupdate-pin.mjs';
+
+const SCRIPT = fileURLToPath(new URL('../helm/files/autoupdate-pin.mjs', import.meta.url));
 
 const D1 = `sha256:${'1'.repeat(64)}`;
 const D2 = `sha256:${'2'.repeat(64)}`;
@@ -116,6 +123,101 @@ test('patches nothing when any digest is unresolved', async () => {
   } finally {
     fake.close();
   }
+});
+
+// Run a node process WITHOUT blocking this one: the fake API server it calls
+// lives in this process's event loop.
+function runNode(args, env) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, args, { env: { PATH: process.env.PATH, ...env } });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    const timer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+// Loaded with --import ahead of the script, in the child only: the in-cluster
+// API address goes to the fake server, and the service-account token file
+// (absent outside a pod) reads as the fake's token. Everything else is the
+// script's own main(), unmodified.
+const IN_CLUSTER_PRELOAD = `data:text/javascript,${encodeURIComponent(`
+  import fsp from 'node:fs/promises';
+  import { syncBuiltinESMExports } from 'node:module';
+  const readFile = fsp.readFile;
+  fsp.readFile = (path, ...rest) =>
+    String(path) === '/var/run/secrets/kubernetes.io/serviceaccount/token'
+      ? Promise.resolve('synthetic-token\\n')
+      : readFile(path, ...rest);
+  syncBuiltinESMExports();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) =>
+    realFetch(String(url).replace('https://k8s.invalid:6443', process.env.FAKE_API), init);
+`)}`;
+
+// THE REGRESSION. The CronJob runs `node /pin/autoupdate-pin.mjs`, and /pin is
+// a ConfigMap volume: the file is a symlink to ..data/, itself a symlink to a
+// timestamped directory. Node resolves the entry module's import.meta.url
+// through those links while process.argv[1] keeps the link path, so a guard
+// comparing the two never matched, main() never ran, and every scheduled roll
+// shipped unpinned without a word in the log.
+test('pins when run the way the CronJob runs it: through a ConfigMap symlink', async () => {
+  const fake = await fakeApi({
+    statuses: {
+      initContainerStatuses: [
+        { name: 'resolve-proxy', imageID: `docker-pullable://public.ecr.aws/anyray/proxy@${D2}` },
+        { name: 'pin', imageID: `public.ecr.aws/anyray/gateway@${D1}` },
+      ],
+    },
+    images: {
+      'anyray-gateway': 'public.ecr.aws/anyray/gateway:policy-stable',
+      'anyray-proxy': 'public.ecr.aws/anyray/proxy:policy-stable',
+    },
+  });
+  const mount = await mkdtemp(join(tmpdir(), 'autoupdate-pin-mount-'));
+  try {
+    // The layout the kubelet writes for a ConfigMap volume.
+    const stamp = '..2026_10_25_12_00_00.000000001';
+    await mkdir(join(mount, stamp));
+    await copyFile(SCRIPT, join(mount, stamp, 'autoupdate-pin.mjs'));
+    await symlink(stamp, join(mount, '..data'));
+    await symlink('..data/autoupdate-pin.mjs', join(mount, 'autoupdate-pin.mjs'));
+
+    const res = await runNode(['--import', IN_CLUSTER_PRELOAD, join(mount, 'autoupdate-pin.mjs')], {
+      KUBERNETES_SERVICE_HOST: 'k8s.invalid',
+      KUBERNETES_SERVICE_PORT: '6443',
+      POD_NAMESPACE: 'ns',
+      POD_NAME: 'job-pod',
+      AUTOUPDATE_PINS: JSON.stringify(PINS),
+      FAKE_API: fake.api,
+    });
+    assert.equal(res.code, 0, `exit ${res.code}: ${res.stderr}`);
+    assert.deepEqual(
+      fake.patches.map((p) => [p.deployment, p.body.spec.template.spec.containers[0].image]),
+      [
+        ['anyray-gateway', `public.ecr.aws/anyray/gateway:policy-stable@${D1}`],
+        ['anyray-proxy', `public.ecr.aws/anyray/proxy:policy-stable@${D2}`],
+      ],
+      'the script ran and pinned both Deployments',
+    );
+    assert.match(res.stdout, /anyray-gateway: .* -> .*@sha256:/, 'it says what it pinned');
+  } finally {
+    fake.close();
+    await rm(mount, { recursive: true, force: true });
+  }
+});
+
+test('importing the module never runs the in-cluster entry point', async () => {
+  // No cluster env: if import ran main(), it would print and exit 1.
+  const res = await runNode(['--input-type=module', '-e', `await import(${JSON.stringify(SCRIPT)});`], {});
+  assert.equal(res.code, 0, res.stderr);
+  assert.equal(res.stderr, '');
+  assert.equal(res.stdout, '');
 });
 
 test('digestOf and pinnedRef', () => {

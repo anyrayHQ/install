@@ -68,7 +68,7 @@ spec:
         - name: gateway
           image: {{ include "anyray.image" (dict "component" "gateway" "context" .) }}
           imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "gateway" "context" .) }}
-          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
+          {{- include "anyray.containerSecurityContext" (dict "component" "gateway" "context" .) | nindent 10 }}
           env:
             {{- include "anyray.observabilityDbEnv" . | nindent 12 }}
             - name: ANYRAY_OPTIMIZER_URL

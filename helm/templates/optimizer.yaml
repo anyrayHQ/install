@@ -64,7 +64,7 @@ spec:
         - name: optimizer
           image: {{ include "anyray.image" (dict "component" "optimizer" "context" .) }}
           imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "optimizer" "context" .) }}
-          {{- include "anyray.containerSecurityContext" . | nindent 10 }}
+          {{- include "anyray.containerSecurityContext" (dict "component" "optimizer" "context" .) | nindent 10 }}
           env:
             - name: PORT
               value: "8088"

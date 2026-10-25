@@ -133,17 +133,19 @@ serviceAccount:
   create: false
   name: ""
   annotations: {}
-  # Mount the Kubernetes API token into the gateway, optimizer, proxy and
-  # Postgres pods? None of them calls the API, so a token there only helps
-  # whoever compromises one. Set true if a sidecar you
-  # inject needs it, or null to leave it to the service account. The autoUpdate
-  # job keeps its own token: it runs kubectl.
+  # Mount the Kubernetes API token into the gateway, optimizer and proxy pods?
+  # None of them calls the API, so a token there only helps whoever
+  # compromises one. Set true if a sidecar you inject needs it, or null to
+  # leave it to the service account. The bundled Postgres pod is left as it was
+  # (changing its spec would restart it on upgrade), and the autoUpdate job
+  # keeps its own token: it runs kubectl.
   automountServiceAccountToken: false
 
 podAnnotations: {}
 podLabels: {}
-# Global security contexts, applied to EVERY pod (Postgres included) and
-# winning over the per-component ones below whenever they are non-empty. Prefer
+# Global security contexts. When either is set, both apply to EVERY pod
+# (Postgres included) as they always have, and the per-component ones below
+# are not used (except the proxy's while proxy.nonRoot is on). Prefer
 # the per-component <component>.podSecurityContext / containerSecurityContext:
 # the bundled Postgres starts as root and drops privileges itself, so a global
 # runAsNonRoot stops it from starting.
@@ -457,9 +459,10 @@ gateway:
   # /data to `node`, then drops to it. With /data an emptyDir there is nothing to
   # hand over, so pinning the user changes nothing the gateway runs as.
   # Not applied while gateway.persistence.enabled=true (an older volume may be
-  # root-owned, and the entrypoint must start as root to adopt it), nor when the
-  # global podSecurityContext / containerSecurityContext above are set, which
-  # win. Set a key to null to drop it, or the whole block to null for none.
+  # root-owned, and the entrypoint must start as root to adopt it), when
+  # gateway.extraEnv sets ANYRAY_DATA_DIR or an ANYRAY_*_FILE path (the
+  # entrypoint creates those directories), or when either global context above
+  # is set. Set a key to null to drop it, or the whole block to null for none.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 1000

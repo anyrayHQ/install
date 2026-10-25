@@ -195,6 +195,8 @@ jobs:
           # as. The gateway image already drops to uid 1000 at boot, so pinning
           # that user is safe; the optimizer, nginx proxy and Postgres images
           # start as root, so forcing them non-root would stop them starting.
+          # The bundled Postgres pod spec must not change at all: any change
+          # restarts it on upgrade, and /v1 fails closed while it is down.
           base=(--set host=anyray.example.com --set postgres.storage=150Gi)
           workloads="Deployment:anyray-gateway Deployment:anyray-optimizer Deployment:anyray-proxy StatefulSet:anyray-postgres"
           # One rendered document, picked by kind and metadata.name.
@@ -211,8 +213,14 @@ jobs:
           for w in $workloads; do
             d="$(doc "$render" "${w%%:*}" "${w#*:}")"
             if [ -z "$d" ]; then echo "::error::no ${w} in the default render"; fail=1; continue; fi
-            grep -q 'automountServiceAccountToken: false' <<<"$d" \
-              || { echo "::error::${w} mounts the Kubernetes API token by default"; fail=1; }
+            if [ "${w#*:}" = anyray-postgres ]; then
+              if grep -q 'automountServiceAccountToken' <<<"$d"; then
+                echo "::error::the bundled Postgres pod spec changed: an upgrade would restart it"; fail=1
+              fi
+            else
+              grep -q 'automountServiceAccountToken: false' <<<"$d" \
+                || { echo "::error::${w} mounts the Kubernetes API token by default"; fail=1; }
+            fi
             if [ "${w#*:}" = anyray-gateway ]; then
               for want in 'runAsNonRoot: true' 'runAsUser: 1000' 'fsGroup: 1000' 'type: RuntimeDefault' \
                 'allowPrivilegeEscalation: false' '- ALL'; do
@@ -228,24 +236,45 @@ jobs:
           d="$(doc "$(helm template t helm "${base[@]}" --set gateway.persistence.enabled=true \
             --set gateway.replicas=1)" Deployment anyray-gateway)"
           grep -q 'automountServiceAccountToken: false' <<<"$d" || { echo "::error::no gateway rendered with persistence"; fail=1; }
-          if grep -qE 'runAsUser|runAsNonRoot' <<<"$d"; then
+          if grep -qE 'runAsUser|runAsNonRoot|drop:' <<<"$d"; then
             echo "::error::the gateway pins a user over its data volume"; fail=1
           fi
 
-          # A global security context still applies to every pod, unchanged, and
-          # wins over the gateway's own.
+          # Either global security context keeps every pod exactly as before:
+          # no per-component value is mixed in (a global runAsUser 0 next to the
+          # gateway's runAsNonRoot would not start; a pod-level global next to
+          # its drop ALL would stop the entrypoint dropping to uid 1000).
           global="$(helm template t helm "${base[@]}" --set podSecurityContext.fsGroup=2000)"
           for w in $workloads; do
             d="$(doc "$global" "${w%%:*}" "${w#*:}")"
             grep -q 'fsGroup: 2000' <<<"$d" || { echo "::error::${w} lost the global podSecurityContext"; fail=1; }
-            if grep -q 'runAsUser: 1000' <<<"$d"; then echo "::error::${w} mixed in a per-component default over the global"; fail=1; fi
+            if grep -qE 'runAsUser: 1000|drop:' <<<"$d"; then echo "::error::${w} mixed a per-component default into a global podSecurityContext"; fail=1; fi
+          done
+          global="$(helm template t helm "${base[@]}" --set containerSecurityContext.runAsUser=0)"
+          for w in $workloads; do
+            d="$(doc "$global" "${w%%:*}" "${w#*:}")"
+            grep -q 'runAsUser: 0' <<<"$d" || { echo "::error::${w} lost the global containerSecurityContext"; fail=1; }
+            if grep -qE 'runAsNonRoot|fsGroup|drop:' <<<"$d"; then echo "::error::${w} mixed a per-component default into a global containerSecurityContext"; fail=1; fi
+          done
+
+          # The gateway's entrypoint prepares a data directory or ANYRAY_*_FILE
+          # path moved through extraEnv, which it can only do starting as root.
+          for name in ANYRAY_DATA_DIR ANYRAY_SPEND_FILE; do
+            d="$(doc "$(helm template t helm "${base[@]}" --set "gateway.extraEnv[0].name=${name}" \
+              --set "gateway.extraEnv[0].value=/var/lib/anyray/x")" Deployment anyray-gateway)"
+            if [ -z "$d" ]; then echo "::error::no gateway rendered with extraEnv ${name}"; fail=1
+            elif grep -qE 'runAsUser|runAsNonRoot|drop:' <<<"$d"; then
+              echo "::error::the gateway pins a user although extraEnv moves ${name}"; fail=1
+            fi
           done
 
           # Every default is a value: the gateway's contexts switch off, and a
           # root image takes its own when an operator sets one.
           custom="$(helm template t helm "${base[@]}" --set gateway.podSecurityContext=null \
             --set gateway.containerSecurityContext=null --set optimizer.podSecurityContext.runAsUser=1000)"
-          if grep -q 'securityContext' <<<"$(doc "$custom" Deployment anyray-gateway)"; then
+          d="$(doc "$custom" Deployment anyray-gateway)"
+          if [ -z "$d" ]; then echo "::error::no gateway rendered with its contexts nulled"; fail=1
+          elif grep -q 'securityContext' <<<"$d"; then
             echo "::error::gateway.podSecurityContext=null did not remove the gateway's security context"; fail=1
           fi
           grep -q 'runAsUser: 1000' <<<"$(doc "$custom" Deployment anyray-optimizer)" \
@@ -253,7 +282,8 @@ jobs:
           # proxy.nonRoot is opt-in. Off, the proxy is untouched (checked above);
           # on, nginx gets its own user, the port sysctl and three writable
           # emptyDirs, or it cannot start without root.
-          if grep -qE 'sysctls|emptyDir' <<<"$(doc "$render" Deployment anyray-proxy)"; then
+          if [ -z "$(doc "$render" Deployment anyray-proxy)" ]; then echo "::error::no proxy in the default render"; fail=1
+          elif grep -qE 'sysctls|emptyDir' <<<"$(doc "$render" Deployment anyray-proxy)"; then
             echo "::error::the default proxy carries the nonRoot settings"; fail=1
           fi
           d="$(doc "$(helm template t helm "${base[@]}" --set proxy.nonRoot.enabled=true)" Deployment anyray-proxy)"
@@ -265,8 +295,8 @@ jobs:
           test "$(grep -c 'emptyDir: {}' <<<"$d")" -eq 3 \
             || { echo "::error::proxy.nonRoot.enabled=true does not mount exactly three emptyDirs"; fail=1; }
           on="$(helm template t helm "${base[@]}" --set serviceAccount.automountServiceAccountToken=true)"
-          test "$(grep -c 'automountServiceAccountToken: true' <<<"$on")" -eq 4 \
-            || { echo "::error::serviceAccount.automountServiceAccountToken=true did not reach all four pods"; fail=1; }
+          test "$(grep -c 'automountServiceAccountToken: true' <<<"$on")" -eq 3 \
+            || { echo "::error::serviceAccount.automountServiceAccountToken=true did not reach the three app pods"; fail=1; }
 
           # The autoUpdate job keeps its token: it runs kubectl against the API.
           cron="$(doc "$(helm template t helm "${base[@]}" --set-string image.tag=policy-stable)" CronJob anyray-autoupdate)"

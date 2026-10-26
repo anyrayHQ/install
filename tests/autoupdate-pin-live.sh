@@ -95,7 +95,18 @@ for d in anyray-gateway anyray-optimizer anyray-proxy; do
   check "$d pinned to policy-stable@sha256" yes "$pinned"
   k -n "$NS" rollout status "deployment/$d" --timeout=900s >/dev/null \
     || { echo "FAIL  $d did not settle"; FAILS=$((FAILS + 1)); }
-  running="$(k -n "$NS" get pods -l "app.kubernetes.io/component=${d#anyray-}" \
+  # rollout status returns once the new pods are available, while the old ones
+  # may still be draining (gateway and optimizer: up to 120s). Wait for them to
+  # go, so an old pod is never read as the new state.
+  selector="app.kubernetes.io/component=${d#anyray-}"
+  for _ in $(seq 1 60); do
+    terminating="$(k -n "$NS" get pods -l "$selector" \
+      -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{"\n"}{end}' | grep -c . || true)"
+    [ "$terminating" = 0 ] && break
+    sleep 5
+  done
+  check "$d old pods gone after the roll" 0 "$terminating"
+  running="$(k -n "$NS" get pods -l "$selector" \
     -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}' | sort -u)"
   check "$d running pods all on the pinned image" "$img" "$running"
 done

@@ -593,6 +593,7 @@ jobs:
           sparse-checkout: |
             .github/actions
             scripts/artifact-digest.sh
+            scripts/staple-notarized.sh
           sparse-checkout-cone-mode: false
       - name: Pin Xcode (GitHub-hosted macOS only)
         if: needs.provision-mac.outputs.mac_runner == 'github'
@@ -1015,8 +1016,7 @@ jobs:
             echo "::error::notarization failed for anyray-connect.pkg (status: $status)"
             exit 1
           fi
-          xcrun stapler staple "$pkg"
-          xcrun stapler validate "$pkg"
+          ./scripts/staple-notarized.sh "$pkg"
           spctl -a -vvv -t install "$pkg"
 
       - name: Delete the throwaway keychain

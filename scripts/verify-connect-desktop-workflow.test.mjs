@@ -769,7 +769,7 @@ test('ships a signed, notarized uninstaller pkg inside the desktop PKG payload',
   assert.match(uninstaller, /productbuild \\\n\s+--distribution "\$distribution_xml"/);
   assert.match(uninstaller, /productsign --sign "\$INSTALLER_IDENTITY"/);
   assert.match(uninstaller, /xcrun notarytool submit "\$uninstaller"/);
-  assert.match(uninstaller, /xcrun stapler staple "\$uninstaller"/);
+  assert.match(uninstaller, /\.\/scripts\/staple-notarized\.sh "\$uninstaller"/);
   assert.match(uninstaller, /spctl -a -vvv -t install "\$uninstaller"/);
   // A second pkg under out/ would be published and break the one-PKG asset contract.
   assert.doesNotMatch(uninstaller, /(^|[\s"'=])out\//);

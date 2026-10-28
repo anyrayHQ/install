@@ -579,6 +579,7 @@ jobs:
             .github/actions
             scripts/artifact-digest.sh
             scripts/safe-unzip.sh
+            scripts/staple-notarized.sh
           sparse-checkout-cone-mode: false
       - name: Pin Xcode (GitHub-hosted macOS only)
         if: needs.provision-mac.outputs.mac_runner == 'github'
@@ -689,8 +690,7 @@ jobs:
             --issuer "$APPLE_NOTARY_ISSUER_ID" \
             --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
           [ "$status" = Accepted ] || { echo "::error::app notarization failed: $status"; exit 1; }
-          xcrun stapler staple "$app"
-          xcrun stapler validate "$app"
+          ./scripts/staple-notarized.sh "$app"
           spctl -a -vvv -t exec "$app"
 
       - name: Package the updater bundle
@@ -792,8 +792,7 @@ jobs:
             --issuer "$APPLE_NOTARY_ISSUER_ID" \
             --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
           [ "$status" = Accepted ] || { echo "::error::uninstaller PKG notarization failed: $status"; exit 1; }
-          xcrun stapler staple "$uninstaller"
-          xcrun stapler validate "$uninstaller"
+          ./scripts/staple-notarized.sh "$uninstaller"
           spctl -a -vvv -t install "$uninstaller"
 
       - name: Build and sign the macOS installer (Developer ID Installer)
@@ -914,8 +913,7 @@ jobs:
             --issuer "$APPLE_NOTARY_ISSUER_ID" \
             --wait --timeout 30m --output-format json | jq -r '.status // "unknown"')"
           [ "$status" = Accepted ] || { echo "::error::PKG notarization failed: $status"; exit 1; }
-          xcrun stapler staple "$pkg"
-          xcrun stapler validate "$pkg"
+          ./scripts/staple-notarized.sh "$pkg"
           spctl -a -vvv -t install "$pkg"
 
       - name: Delete the throwaway Apple signing material

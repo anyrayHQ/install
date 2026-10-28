@@ -377,7 +377,7 @@ del os.environ['CLUSTER']
 print('== the schedule passes RollStale; the updater does not ==')
 rule = src[src.index('  DbUrlRefreshRule:'):src.index('  DbUrlRefreshPermission:')]
 check('DbUrlRefreshRule asks for the restart', '"RollStale": true' in rule, 'flag missing')
-upd = src[src.index('  UpdaterFn:'):src.index('  UpdaterUrl:')]
+upd = src[src.index('  UpdaterFn:'):src.index('  UpdaterApi:')]
 check("the updater's pre-roll refresh does not", 'RollStale' not in upd, 'flag present')
 fn = src[src.index('  SecretFn:'):src.index('      Code:', src.index('  SecretFn:'))]
 check('SecretFn knows its cluster', 'CLUSTER: !Ref Cluster' in fn, 'env missing')

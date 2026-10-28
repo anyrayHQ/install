@@ -276,7 +276,7 @@ finally:
     os.environ['SECRET_FN_ARN'], os.environ['REFRESH_PAYLOAD'] = saved
 
 print('== an internal failure tells the CALLER nothing about the deployment ==')
-# This endpoint is public (AuthType NONE) and the catch-all also covers
+# This endpoint is public (no authorizer) and the catch-all also covers
 # authorised(), so a missing/denied secret must not echo its ARN back.
 ARN = os.environ['TOKEN_SECRET_ARN']
 del os.environ['TOKEN_SECRET_ARN']
@@ -289,6 +289,23 @@ try:
     check('still a 500 with a pointer to the logs', c == 500, '%s %s' % (c, b))
 finally:
     os.environ['TOKEN_SECRET_ARN'] = ARN
+
+print('== the front door deploys in every region ==')
+# CloudFormation has no AWS::Lambda::Url in il-central-1, me-central-1,
+# ca-west-1 or ap-southeast-5, and an unknown type fails validation before
+# Conditions run, so one such resource fails the whole stack there.
+check('no Lambda Function URL resource', 'Type: AWS::Lambda::Url' not in src,
+      'AWS::Lambda::Url is not deployable in every region')
+api_at = src.find('  UpdaterApi:')
+api = src[api_at:src.index('  GatewayLogGroup:')] if api_at >= 0 else ''
+check('the HTTP API hands the handler the event it parses',
+      "PayloadFormatVersion: '2.0'" in api, 'payload format 2.0 missing')
+check('only the updater API may invoke the function',
+      "Principal: '*'" not in api and 'Principal: apigateway.amazonaws.com' in api
+      and 'SourceArn:' in api, 'invoke grant not scoped to the API')
+check('the gateway posts to the API endpoint',
+      'ANYRAY_UPDATER_URL, Value: !GetAtt UpdaterApi.ApiEndpoint' in src,
+      'ANYRAY_UPDATER_URL not wired to UpdaterApi')
 
 print()
 print('FAILED: %d' % len(fails) if fails else 'ALL PASS')

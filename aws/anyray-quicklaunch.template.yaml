@@ -1356,7 +1356,7 @@ Resources:
               hdrs = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
               parts = (hdrs.get('authorization') or '').split(None, 1)
               # Check the header's SHAPE before spending a GetSecretValue. This
-              # URL is public by design (AuthType NONE), so without this every
+              # endpoint is public by design (no authorizer), so without this every
               # unauthenticated request bills a Secrets Manager call. Matching
               # the scheme properly also closes a slice that assumed the prefix:
               # the old code took everything past 7 characters, so any 7-byte
@@ -1572,46 +1572,69 @@ Resources:
                                      'message': 'internal error; see the updater '
                                                 'function log group'})
 
-  # AuthType NONE because the caller is the gateway container, which has no AWS
-  # credentials to sign with — the bearer check above is the gate, exactly as
-  # Watchtower's HTTP API works on compose.
-  UpdaterUrl:
-    Type: AWS::Lambda::Url
-    Condition: AutoUpdate
-    Properties:
-      TargetFunctionArn: !GetAtt UpdaterFn.Arn
-      AuthType: NONE
-
-  UpdaterUrlPermission:
-    Type: AWS::Lambda::Permission
-    Condition: AutoUpdate
-    Properties:
-      FunctionName: !GetAtt UpdaterFn.Arn
-      Action: lambda:InvokeFunctionUrl
-      Principal: '*'
-      FunctionUrlAuthType: NONE
-
-  # BOTH grants are required. Lambda's URL front door now authorises
-  # `lambda:InvokeFunction` as well as `lambda:InvokeFunctionUrl`, so with only
-  # the statement above EVERY caller gets a service-layer 403 ("Forbidden",
-  # from the front door) before the function's own bearer check ever runs — the
-  # gateway's auto-update trigger then fails on every attempt, and logs it
-  # misleadingly as a token mismatch. Verified against a live Function URL:
-  # InvokeFunctionUrl alone → 403, both → 200.
+  # The updater's front door is an API Gateway HTTP API, not a Lambda Function
+  # URL. CloudFormation has no AWS::Lambda::Url in il-central-1, me-central-1,
+  # ca-west-1 or ap-southeast-5, and an unrecognised type fails template
+  # validation before any Condition is evaluated, so the whole quicklaunch
+  # failed there ("Unrecognized resource types: [AWS::Lambda::Url]") even with
+  # EnableAutoUpdate=false.
   #
-  # This one carries no FunctionUrlAuthType condition — Lambda rejects the
-  # property outright on any action other than InvokeFunctionUrl ("only
-  # supported for lambda:InvokeFunctionUrl"), which fails the stack. It widens
-  # nothing in practice: the URL above is already AuthType NONE, so the
-  # endpoint is public by design and the handler's bearer check against the
-  # admin token is the actual gate, on both paths.
-  UpdaterInvokePermission:
+  # No authorizer because the caller is the gateway container, which has no AWS
+  # credentials to sign with. The bearer check above is the gate, exactly as
+  # Watchtower's HTTP API works on compose.
+  UpdaterApi:
+    Type: AWS::ApiGatewayV2::Api
+    Condition: AutoUpdate
+    Properties:
+      Name: !Sub '${AWS::StackName}-updater'
+      ProtocolType: HTTP
+
+  # Payload format 2.0 is the event a Function URL delivered (lowercased
+  # headers, body, isBase64Encoded) and the reply it read (statusCode, headers,
+  # body), so the handler above is unchanged. 30s is the HTTP API ceiling and
+  # also the gateway's own trigger timeout (TRIGGER_TIMEOUT_MS), which already
+  # counts an abort as triggered; the function keeps its 120s so a slow roll
+  # still completes after the front door has answered.
+  UpdaterIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: AutoUpdate
+    Properties:
+      ApiId: !Ref UpdaterApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt UpdaterFn.Arn
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 30000
+
+  # $default, not `POST /`: the Function URL answered every method and path,
+  # and the handler is what decides.
+  UpdaterRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: AutoUpdate
+    Properties:
+      ApiId: !Ref UpdaterApi
+      RouteKey: $default
+      Target: !Sub 'integrations/${UpdaterIntegration}'
+
+  # The $default stage serves at the API's root endpoint with no stage prefix,
+  # so ApiEndpoint is the whole URL the gateway posts to.
+  UpdaterStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Condition: AutoUpdate
+    Properties:
+      ApiId: !Ref UpdaterApi
+      StageName: $default
+      AutoDeploy: true
+
+  # Only this API may invoke the function. The Function URL needed two
+  # Principal '*' grants; neither survives.
+  UpdaterApiPermission:
     Type: AWS::Lambda::Permission
     Condition: AutoUpdate
     Properties:
       FunctionName: !GetAtt UpdaterFn.Arn
       Action: lambda:InvokeFunction
-      Principal: '*'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${UpdaterApi}/*'
 
   GatewayLogGroup:
     Type: AWS::Logs::LogGroup
@@ -1875,7 +1898,7 @@ Resources:
             # stays notify-only, exactly like Kubernetes and Railway.
             - !If
               - AutoUpdate
-              - { Name: ANYRAY_UPDATER_URL, Value: !GetAtt UpdaterUrl.FunctionUrl }
+              - { Name: ANYRAY_UPDATER_URL, Value: !GetAtt UpdaterApi.ApiEndpoint }
               - !Ref 'AWS::NoValue'
             - { Name: ANYRAY_DEFAULT_MODEL, Value: !Ref DefaultModel }
             - { Name: ANYRAY_ALLOW_PLAINTEXT, Value: !Ref AllowPlaintext }

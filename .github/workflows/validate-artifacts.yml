@@ -407,10 +407,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      # The extra regions are the ones that get resource types last (E3006).
+      # AWS::Lambda::Url broke the whole stack in 12 of them, il-central-1
+      # included, while a us-east-1-only lint stayed green. About 1s.
       - name: cfn-lint the AWS quick-launch template
         run: |
           pipx install cfn-lint
-          cfn-lint aws/anyray-quicklaunch.template.yaml
+          cfn-lint --regions us-east-1 il-central-1 me-central-1 me-south-1 \
+            ca-west-1 mx-central-1 ap-south-2 ap-southeast-4 ap-southeast-5 \
+            ap-southeast-6 ap-southeast-7 ap-east-2 eu-central-2 eu-south-2 \
+            af-south-1 -- aws/anyray-quicklaunch.template.yaml
       # Drives the template's inline updater Lambda against stubbed AWS clients.
       # No interpolation, no untrusted input: a fixed script path only.
       - name: Updater Lambda contract (version format, forward-only, input validation)

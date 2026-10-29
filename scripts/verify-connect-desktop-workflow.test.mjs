@@ -786,7 +786,7 @@ test('ships a signed, notarized uninstaller pkg inside the desktop PKG payload',
   const verify = job('verify-macos-signed');
   assert.match(verify, /uninstaller='\/usr\/local\/lib\/anyray-connect\/Uninstall Anyray Connect\.pkg'/);
   assert.match(verify, /pkgutil --check-signature "\$payload_uninstaller"/);
-  assert.match(verify, /xcrun stapler validate "\$payload_uninstaller"/);
+  assert.match(verify, /\.\/scripts\/staple-notarized\.sh --validate-only "\$payload_uninstaller"/);
   assert.match(verify, /spctl -a -vvv -t install "\$payload_uninstaller"/);
   // The engine opens it only when root owns it and nobody else can write it.
   assert.match(verify, /stat -f '%u %g %Lp' "\$uninstaller"\)" = '0 0 644'/);

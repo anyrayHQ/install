@@ -1026,7 +1026,7 @@ jobs:
           test -s "$pkg" || { echo '::error::signed macOS installer is missing'; exit 1; }
           pkgutil --check-signature "$pkg"
           xar -tf "$pkg" | grep -qx 'Distribution'
-          xcrun stapler validate "$pkg"
+          ./scripts/staple-notarized.sh --validate-only "$pkg"
           spctl -a -vvv -t install "$pkg"
           payload_files="$(pkgutil --payload-files "$pkg")"
           printf '%s\n' "$payload_files" \
@@ -1062,7 +1062,7 @@ jobs:
           payload_uninstaller="$(find "$expanded_pkg" -type f -name 'Uninstall Anyray Connect.pkg' -print -quit)"
           [ -n "$payload_uninstaller" ] || { echo '::error::PKG payload contains no uninstaller pkg'; exit 1; }
           pkgutil --check-signature "$payload_uninstaller"
-          xcrun stapler validate "$payload_uninstaller"
+          ./scripts/staple-notarized.sh --validate-only "$payload_uninstaller"
           spctl -a -vvv -t install "$payload_uninstaller"
           expanded_uninstaller="$RUNNER_TEMP/connect-desktop-expanded-uninstaller"
           pkgutil --expand-full "$payload_uninstaller" "$expanded_uninstaller"

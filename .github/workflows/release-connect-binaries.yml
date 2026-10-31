@@ -424,22 +424,32 @@ jobs:
           # and the whole binaries lane failed while npm already had the version
           # (0.11.231, v1.10.400), stranding releases/latest a version behind.
           #
-          # `npm install --force --os --cpu` is what overrides that gating: --os/--cpu
-          # alone still refuse with `notsup`, and --force without them ignores the
-          # request. Installed into the same node_modules Bun resolves from; the
+          # Each package is fetched with `npm pack` and unpacked into node_modules
+          # by hand. An earlier `npm install --force --no-save --os --cpu` per
+          # platform let npm reconcile the tree on every call, and from 2026-10-30
+          # each call removed the platform the one before had added, leaving only
+          # the last (every binaries run from 0.11.521 failed here). Unpacking
+          # needs no reconcile, so nothing an earlier step put there is touched;
+          # the os/cpu gating never applies because nothing is "installed". A
+          # package Bun already placed (this runner's own) is left as it is. The
           # per-target binary still embeds only the addon its own code path imports.
-          for spec in \
-            "darwin arm64 @koromix/koffi-darwin-arm64" \
-            "darwin x64   @koromix/koffi-darwin-x64" \
-            "linux  arm64 @koromix/koffi-linux-arm64" \
-            "linux  x64   @koromix/koffi-linux-x64" \
-            "win32  arm64 @koromix/koffi-win32-arm64" \
-            "win32  x64   @koromix/koffi-win32-x64"; do
-            set -- $spec
+          for name in \
+            @koromix/koffi-darwin-arm64 \
+            @koromix/koffi-darwin-x64 \
+            @koromix/koffi-linux-arm64 \
+            @koromix/koffi-linux-x64 \
+            @koromix/koffi-win32-arm64 \
+            @koromix/koffi-win32-x64; do
+            dest="node_modules/$name"
+            [ -f "$dest/package.json" ] && continue
             # Version comes from the published package's own optionalDependencies,
             # never a hardcoded pin here, so this cannot drift from what connect ships.
-            want=$(node -p "require('./package.json').optionalDependencies['$3']")
-            npm install --force --no-save --ignore-scripts --os="$1" --cpu="$2" "$3@$want"
+            want=$(node -p "require('./package.json').optionalDependencies['$name']")
+            tgz=$(../scripts/retry-npm.sh npm pack --silent "$name@$want" | tail -n 1)
+            mkdir -p "$dest"
+            # --no-same-owner: the runner is root, and tar would keep the packer's uid.
+            tar -xzf "$tgz" -C "$dest" --strip-components=1 --no-same-owner
+            rm -f "$tgz"
           done
 
           # Fail here, not 40 lines later inside a minified bundle, if any is missing.

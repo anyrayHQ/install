@@ -41,12 +41,28 @@ spec:
     {{- toYaml . | nindent 4 }}
   {{- end }}
   rules:
+    {{- /* Paths come from files/edgeRoutes.json, generated from the gateway's route
+    labels (monorepo scripts/generate-edge-routes.mjs); edit the generator, not this
+    list. Ordered most specific first, so in-order controllers (the AWS LB
+    controller) and longest-match ones (ingress-nginx) route alike. /admin and
+    unmatched paths go to the console proxy, whose auth gate turns the console's
+    cookie into the admin Bearer; /admin/v1/regions/sync skips it because the proxy
+    strips the region token's Authorization header. A path holding a "." is
+    ImplementationSpecific: ingress-nginx's strict path validation rejects it under
+    any other pathType and then refuses the whole Ingress. */ -}}
+    {{- $edge := .Files.Get "files/edgeRoutes.json" | fromJson }}
+    {{- $proxy := printf "%s-proxy" (include "anyray.fullname" .) }}
     {{- $hosts := .Values.ingress.hosts }}
     {{- if not $hosts }}
-    {{- $hosts = list (dict "host" .Values.host "paths" (dict "console" "/" "gateway" "/v1" "connect" "/connect" "admin" "/admin")) }}
+    {{- $hosts = list (dict "host" .Values.host) }}
     {{- end }}
+    {{- $legacyPaths := dict "console" "/" "gateway" "/v1" "connect" "/connect" "admin" "/admin" }}
     {{- range $entry := $hosts }}
-    {{- $paths := default dict $entry.paths }}
+    {{- range $name, $path := (default dict $entry.paths) }}
+    {{- if ne $path (get $legacyPaths $name) }}
+    {{- fail (printf "ingress.hosts[].paths.%s=%s is no longer supported: the chart routes every gateway path itself. Remove ingress.hosts[].paths." $name $path) }}
+    {{- end }}
+    {{- end }}
     {{- $host := default $.Values.host $entry.host }}
     {{- if not $host }}
     {{- fail "ingress.enabled=true requires host or ingress.hosts[].host" }}
@@ -54,104 +70,15 @@ spec:
     - host: {{ $host }}
       http:
         paths:
-          - path: {{ default "/" $paths.console }}
-            pathType: Prefix
+          {{- range $rule := $edge.ingress }}
+          {{- $console := eq $rule.target "console" }}
+          - path: {{ $rule.path }}
+            pathType: {{ $rule.pathType }}
             backend:
               service:
-                name: {{ include "anyray.fullname" $ }}-proxy
+                name: {{ ternary $proxy "gateway" $console }}
                 port:
-                  number: 3000
-          - path: {{ default "/v1" $paths.gateway }}
-            pathType: Prefix
-            backend:
-              service:
-                name: gateway
-                port:
-                  number: 8787
-          # /connect/* is the developer enrollment + policy lane the connect CLI
-          # uses (/connect/verify, /connect/policy, /connect/savings,
-          # /connect/fallback-config). It authenticates with the developer's OWN key
-          # as a Bearer — or is unauthenticated, for /connect/verify — and is served
-          # in-process by the gateway, so it must go STRAIGHT to the gateway like
-          # /v1, NOT through the proxy. Routed to the proxy it hits the console's
-          # admin-cookie auth gate + catch-all and 302s to /console/, which the CLI
-          # then can't parse ("the gateway returned a malformed response") — which
-          # breaks BOTH SSO and enrollment-link developer enrollment.
-          - path: {{ default "/connect" $paths.connect }}
-            pathType: Prefix
-            backend:
-              service:
-                name: gateway
-                port:
-                  number: 8787
-          # /admin/* MUST go through the proxy, NOT straight to the gateway. The
-          # browser console authenticates with the `anyray_key` cookie, which only
-          # the proxy understands: it runs the auth_request gate and injects the
-          # admin key as a `Bearer` from that cookie. Routed to the gateway directly,
-          # the console's /admin/* calls (and the /admin/auth login probe) carry no
-          # Bearer the gateway accepts, so login 401s behind an ingress/ALB even
-          # though it works via `kubectl port-forward` to the proxy.
-          - path: {{ default "/admin" $paths.admin }}
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ include "anyray.fullname" $ }}-proxy
-                port:
-                  number: 3000
-          # /livez is the GATEWAY's liveness route, and the one the docs tell
-          # operators to point external monitoring at. It needs a rule of its
-          # own: the only other route that matches it is the proxy `/`
-          # catch-all, whose nginx answers `302 /console/` — a monitor reading
-          # that as "up" would be measuring the console, and would stay green
-          # through a gateway outage. Unlike compose (Caddy's catch-all IS the
-          # gateway) and the quicklaunch ALB (its listener default is the
-          # gateway target group), the Kubernetes edge has a console-shaped
-          # catch-all, so the route has to be explicit here.
-          - path: /livez
-            pathType: Prefix
-            backend:
-              service:
-                name: gateway
-                port:
-                  number: 8787
-          # /mcp is the gateway's remote MCP server (/mcp = anyray_retrieve and
-          # the built-in tools, /mcp/org = the org's connectors), and the two
-          # /.well-known/oauth-* documents are its OAuth discovery for clients
-          # that cannot send the key header. Hosted MCP clients (the OpenAI
-          # Responses `mcp` tool, ChatGPT connectors) call these from the
-          # vendor's cloud. Without these rules they fall through to the proxy
-          # "/" catch-all, get `302 /console/`, and fail to list tools (OpenAI
-          # reports it as 424 Failed Dependency). Compose (Caddy) and the AWS
-          # ALB default to the gateway, so only this console-shaped edge needs
-          # them spelled out.
-          #
-          # The two /.well-known paths are ImplementationSpecific, not Prefix or
-          # Exact: ingress-nginx's strict-validate-path-type (on by default from
-          # 1.12) rejects any path holding a "." under every other pathType, and
-          # its admission webhook then refuses the WHOLE Ingress, / and /v1
-          # included. The gateway serves only these exact paths, so the
-          # controller's own matching (prefix on nginx and Traefik, exact on
-          # GKE and the AWS LB controller) routes them either way.
-          - path: /mcp
-            pathType: Prefix
-            backend:
-              service:
-                name: gateway
-                port:
-                  number: 8787
-          - path: /.well-known/oauth-protected-resource
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: gateway
-                port:
-                  number: 8787
-          - path: /.well-known/oauth-authorization-server
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: gateway
-                port:
-                  number: 8787
+                  number: {{ ternary 3000 8787 $console }}
+          {{- end }}
     {{- end }}
 {{- end }}

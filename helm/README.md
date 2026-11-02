@@ -389,7 +389,7 @@ short. `ingress.streamingDefaults` (default `true`) therefore adds `proxy-read-t
 `proxy-send-timeout` `3600`, `proxy-body-size` `32m`, and `proxy-buffering` `off`. Anything you set
 in `ingress.annotations` wins over these key by key; set `streamingDefaults: false` to drop them
 entirely. On the Gateway API path, `httpRoute.streamingDefaults` (default `true`) disables the
-request timeout on the `/v1` and `/connect` rules, because an unset Gateway API request timeout is
+request timeout on every rule that reaches the gateway, because an unset Gateway API request timeout is
 implementation-specific and some implementations apply a value far below one completion.
 
 For TLS / Ingress installs, set the gateway and console public URLs explicitly so
@@ -401,7 +401,7 @@ gateway:
   consolePublicUrl: https://anyray.example.com
 ```
 
-If you need multiple Ingress hosts or non-default paths, use `ingress.hosts`:
+If you need multiple Ingress hosts, use `ingress.hosts`:
 
 ```yaml
 ingress:
@@ -409,11 +409,11 @@ ingress:
   className: nginx
   hosts:
     - host: anyray.example.com
-      paths:
-        console: /
-        gateway: /v1
-        admin: /admin
 ```
+
+The chart routes every path itself, from `helm/files/edgeRoutes.json`: gateway paths go to the
+gateway, `/admin` and the console go to the console proxy. That file is generated; don't edit it.
+`ingress.hosts[].paths` is no longer supported, and the chart refuses a value other than the old default.
 
 ## Signing gateway → optimizer requests
 

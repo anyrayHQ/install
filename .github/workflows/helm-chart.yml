@@ -123,6 +123,30 @@ jobs:
             --set gateway.contentMode=off --set image.tag=v1.10.380
           assert_replicas "v1.10.400" optimizer 1 --set image.tag=v1.10.400
 
+      - name: Edge routes send gateway paths past the console proxy
+        run: |
+          set -euo pipefail
+          base=(--set host=anyray.example.com --set postgres.storage=150Gi)
+          # Region tokens need the gateway (the proxy strips Authorization); /k/ keys need it on a single install.
+          ingress="$(helm template t helm "${base[@]}" --set ingress.enabled=true -s templates/ingress.yaml)"
+          route="$(helm template t helm "${base[@]}" --set httpRoute.enabled=true \
+            --set 'httpRoute.parentRefs[0].name=gw' -s templates/httproute.yaml)"
+          for path in /admin/v1/regions/sync /k /v1 /scim; do
+            backend="$(printf '%s\n' "$ingress" | awk -v p="$path" '$0 == "          - path: " p { hit=1 } hit && /name:/ { print $2; exit }')"
+            [ "$backend" = gateway ] || { echo "::error::Ingress $path goes to ${backend:-nothing}, expected gateway"; exit 1; }
+            printf '%s\n' "$route" | awk -v p="$path" '
+              /- matches:/ { inrule=1; found=0 }
+              $0 == "            value: " p { found=1 }
+              /backendRefs:/ { getline; if (found) { print $3; exit } }' | grep -qx gateway \
+              || { echo "::error::HTTPRoute $path does not reach gateway"; exit 1; }
+          done
+          if helm template t helm "${base[@]}" --set ingress.enabled=true \
+            --set 'ingress.hosts[0].host=a.example.com' --set 'ingress.hosts[0].paths.gateway=/api' >/dev/null 2>&1; then
+            echo "::error::a non-default ingress.hosts[].paths override must fail to render"; exit 1
+          fi
+          helm template t helm "${base[@]}" --set ingress.enabled=true \
+            --set 'ingress.hosts[0].host=a.example.com' --set 'ingress.hosts[0].paths.gateway=/v1' >/dev/null
+
       - name: appVersion must be a pinned vX.Y.Z (never a moving tag)
         run: |
           set -euo pipefail

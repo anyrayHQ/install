@@ -336,16 +336,27 @@ jobs:
           # template AND on the backend, because the regression that motivated
           # it was a /livez rule pointing at the wrong service, not a missing
           # one.
+          # The backend of the rule holding the path, so a grouped HTTPRoute
+          # rule with many matches is read the same as a one-path Ingress item.
+          backend_of() {
+            case "$1" in
+              ingress) awk -v want="- path: $3" '
+                $1 == "-" && $2 == "path:" { hit = ($0 ~ "- path: " && substr($0, index($0, "- path: ")) == want) ; next }
+                hit && $1 == "name:" { print $2; exit }' <<<"$2" ;;
+              httproute) awk -v want="value: $3" '
+                /- matches:/ { found = 0 }
+                substr($0, index($0, "value: ")) == want { found = 1 }
+                /backendRefs:/ && found { getline; print $3; exit }' <<<"$2" ;;
+            esac
+          }
           for edge in ingress httproute; do
             case "$edge" in
-              ingress)   flags=(--set ingress.enabled=true); svc='name: gateway' ;;
-              httproute) flags=(--set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw'); svc='- name: gateway' ;;
+              ingress)   flags=(--set ingress.enabled=true) ;;
+              httproute) flags=(--set httpRoute.enabled=true --set 'httpRoute.parentRefs[0].name=gw') ;;
             esac
             edge_render="$(helm template t helm --set host=anyray.example.com --set postgres.storage=150Gi \
               "${flags[@]}" -s "templates/${edge}.yaml")"
-            # `-F --` because the HTTPRoute backend line starts with "- ",
-            # which grep would otherwise parse as an option bundle.
-            if ! grep -A4 -E '(value|path): /livez' <<<"$edge_render" | grep -qF -- "$svc"; then
+            if [ "$(backend_of "$edge" "$edge_render" /livez)" != gateway ]; then
               echo "::error::${edge}.yaml does not route /livez to the gateway — external liveness would hit the console proxy's 302"
               echo "$edge_render"
               exit 1
@@ -354,7 +365,7 @@ jobs:
             # hosted MCP clients (OpenAI's `mcp` tool) that land on the
             # catch-all get the console's 302 and fail with 424.
             for mcp_path in /mcp /.well-known/oauth-protected-resource /.well-known/oauth-authorization-server; do
-              if ! grep -A10 -E "(value|path): ${mcp_path}\$" <<<"$edge_render" | grep -qF -- "$svc"; then
+              if [ "$(backend_of "$edge" "$edge_render" "$mcp_path")" != gateway ]; then
                 echo "::error::${edge}.yaml does not route ${mcp_path} to the gateway — hosted MCP clients would hit the console proxy's 302"
                 echo "$edge_render"
                 exit 1

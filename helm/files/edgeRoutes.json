@@ -1,0 +1,337 @@
+{
+  "_generated": "node scripts/generate-edge-routes.mjs --install-dir <path>",
+  "default": "console",
+  "ingress": [
+    {
+      "path": "/.well-known/oauth-protected-resource/mcp/admin",
+      "pathType": "ImplementationSpecific",
+      "target": "management"
+    },
+    {
+      "path": "/.well-known/oauth-authorization-server",
+      "pathType": "ImplementationSpecific",
+      "target": "management"
+    },
+    {
+      "path": "/.well-known/oauth-protected-resource",
+      "pathType": "ImplementationSpecific",
+      "target": "management"
+    },
+    {
+      "path": "/connect/claude-desktop/websearch",
+      "pathType": "Exact",
+      "target": "inference"
+    },
+    {
+      "path": "/connect/optimize-output",
+      "pathType": "Exact",
+      "target": "inference"
+    },
+    {
+      "path": "/admin/v1/regions/sync",
+      "pathType": "Prefix",
+      "target": "management"
+    },
+    {
+      "path": "/connect/hook-savings",
+      "pathType": "Exact",
+      "target": "inference"
+    },
+    {
+      "path": "/connect/retrieve",
+      "pathType": "Exact",
+      "target": "inference"
+    },
+    {
+      "path": "/connect/recall",
+      "pathType": "Exact",
+      "target": "inference"
+    },
+    {
+      "path": "/connect/ready",
+      "pathType": "Exact",
+      "target": "inference"
+    },
+    {
+      "path": "/openapi.json",
+      "pathType": "ImplementationSpecific",
+      "target": "inference"
+    },
+    {
+      "path": "/v1/me/limits",
+      "pathType": "Exact",
+      "target": "management"
+    },
+    {
+      "path": "/v1/me/usage",
+      "pathType": "Exact",
+      "target": "management"
+    },
+    {
+      "path": "/connect",
+      "pathType": "Prefix",
+      "target": "management"
+    },
+    {
+      "path": "/public",
+      "pathType": "Prefix",
+      "target": "management"
+    },
+    {
+      "path": "/v1/me",
+      "pathType": "Exact",
+      "target": "management"
+    },
+    {
+      "path": "/admin",
+      "pathType": "Prefix",
+      "target": "console"
+    },
+    {
+      "path": "/livez",
+      "pathType": "Prefix",
+      "target": "inference"
+    },
+    {
+      "path": "/docs",
+      "pathType": "Prefix",
+      "target": "inference"
+    },
+    {
+      "path": "/otel",
+      "pathType": "Prefix",
+      "target": "management"
+    },
+    {
+      "path": "/scim",
+      "pathType": "Prefix",
+      "target": "management"
+    },
+    {
+      "path": "/mcp",
+      "pathType": "Exact",
+      "target": "inference"
+    },
+    {
+      "path": "/log",
+      "pathType": "Prefix",
+      "target": "management"
+    },
+    {
+      "path": "/mcp",
+      "pathType": "Prefix",
+      "target": "management"
+    },
+    {
+      "path": "/sso",
+      "pathType": "Prefix",
+      "target": "management"
+    },
+    {
+      "path": "/v1",
+      "pathType": "Prefix",
+      "target": "inference"
+    },
+    {
+      "path": "/k",
+      "pathType": "Prefix",
+      "target": "inference"
+    },
+    {
+      "path": "/",
+      "pathType": "Prefix",
+      "target": "console"
+    }
+  ],
+  "httpRoute": [
+    {
+      "matches": [
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/.well-known/oauth-protected-resource/mcp/admin"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/.well-known/oauth-authorization-server"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/.well-known/oauth-protected-resource"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/admin/v1/regions/sync"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/v1/me/limits"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/v1/me/usage"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/connect"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/public"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/v1/me"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/otel"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/scim"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/log"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/mcp"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/sso"
+          }
+        }
+      ],
+      "target": "management",
+      "timeouts": {
+        "request": "0s"
+      }
+    },
+    {
+      "matches": [
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/connect/claude-desktop/websearch"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/connect/optimize-output"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/connect/hook-savings"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/connect/retrieve"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/connect/recall"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/connect/ready"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/openapi.json"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/livez"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/docs"
+          }
+        },
+        {
+          "path": {
+            "type": "Exact",
+            "value": "/mcp"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/v1"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/k"
+          }
+        }
+      ],
+      "target": "inference",
+      "timeouts": {
+        "request": "0s"
+      }
+    },
+    {
+      "matches": [
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/admin"
+          }
+        },
+        {
+          "path": {
+            "type": "PathPrefix",
+            "value": "/"
+          }
+        }
+      ],
+      "target": "console"
+    }
+  ]
+}

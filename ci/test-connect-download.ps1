@@ -68,6 +68,9 @@ try {
   $threw = $false
   try { Get-AnyrayPointerTag -Mirror "$base/bad" | Out-Null } catch { $threw = $true }
   if (-not $threw) { throw 'ps hosts pointer: a malformed pointer was accepted' }
+  foreach ($foreign in "$base/spa", "$base/htmlptr", "$base/noschema", "$base/array", "$base/fragment") {
+    if (Get-AnyrayPointerTag -Mirror $foreign) { throw "ps hosts pointer: a non-pointer answer ($foreign) named a release" }
+  }
 
   $order = @(Get-AnyrayBases -Tag 'connect-v1.2.3' -Mirror 'https://mirror.invalid/dl' -GithubDownload 'https://github.invalid/releases/download' -Repo 'owner/repo')
   if (($order -join ' ') -ne 'https://mirror.invalid/dl/connect-v1.2.3 https://github.invalid/releases/download/connect-v1.2.3') {
@@ -100,11 +103,16 @@ try {
   if ($from -ne "$base/t/connect-v1.2.3") { throw "ps hosts tamper: fell back to $from" }
   if ((Get-Asked '/g/') -ne 0) { throw 'ps hosts tamper: altered bytes sent the installer to GitHub' }
 
+  Clear-Asked
+  $from = Get-AnyrayRelease -Bases "$base/spa/connect-v1.2.3", "$base/g/connect-v1.2.3" -Mirror "$base/spa" -Asset $asset -OutFile $dl -SumsFile $sums
+  if ($from -ne "$base/g/connect-v1.2.3") { throw "ps hosts spa: installed from $from" }
+  Assert-Release 'spa'
+
   $threw = $false
   try { Get-AnyrayRelease -Bases "$closed/connect-v1.2.3", "$closed/github" -Mirror $closed -Asset $asset -OutFile $dl -SumsFile $sums | Out-Null } catch { $threw = $true }
   if (-not $threw) { throw 'ps hosts none: reported success with no host answering' }
 
-  Write-Host 'connect.ps1 release hosts: 7/7 cases OK'
+  Write-Host 'connect.ps1 release hosts: 9/9 cases OK'
 }
 finally {
   Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue

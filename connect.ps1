@@ -29,10 +29,13 @@ $mirror = 'https://app.anyray.ai/connect/dl'
 $githubDownload = "https://github.com/$repo/releases/download"
 
 # The current release, from the mirror's pointer (latest.json). Returns its tag,
-# or '' when the mirror does not answer, which means GitHub's `latest`. A
-# pointer the mirror DOES serve must name a release, or this throws: the mirror
-# answering with nonsense is not a reason to go elsewhere. The short timeout
-# keeps a blackholed host from stalling the install.
+# or '' when the mirror is not serving, which means GitHub's `latest`: no
+# answer, an HTTP error, or an answer that is not a pointer at all (not
+# application/json, not a JSON object, no schemaVersion; for example the
+# console's HTML page before /connect/dl/ is routed). A pointer the mirror DOES
+# serve must name a release, or this throws: a broken pointer is not a reason
+# to go elsewhere. The short timeout keeps a blackholed host from stalling the
+# install.
 function Get-AnyrayPointerTag {
   param([Parameter(Mandatory = $true)][string] $Mirror)
   try {
@@ -42,12 +45,19 @@ function Get-AnyrayPointerTag {
     $request.ReadWriteTimeout = 20000
     $response = $request.GetResponse()
     try {
+      $contentType = [string]$response.ContentType
       $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
       try { $body = $reader.ReadToEnd() } finally { $reader.Dispose() }
     } finally { $response.Close() }
   } catch {
     return ''
   }
+  if ($contentType -notmatch '^\s*application/json\s*(;|$)') { return '' }
+  # A JSON object carrying schemaVersion, checked on the text exactly as
+  # connect.sh does (it has no JSON parser), so the two scripts agree.
+  $flat = $body -replace '\s', ''
+  if (-not ($flat.StartsWith('{') -and $flat.EndsWith('}'))) { return '' }
+  if (-not $flat.Contains('"schemaVersion":')) { return '' }
   # Anchored by both quotes, so `connect-v1.2.3/../x` cannot match.
   $found = [regex]::Match($body, '"tag"\s*:\s*"(connect-v[0-9]+\.[0-9]+\.[0-9]+)"')
   if (-not $found.Success) {
@@ -102,7 +112,10 @@ function Get-AnyrayDownload {
     [Parameter(Mandatory = $true)][string] $Uri,
     [Parameter(Mandatory = $true)][string] $OutFile,
     [int] $Attempts = 4,
-    [int] $TimeoutMs = 60000
+    [int] $TimeoutMs = 60000,
+    # The mirror answers an HTML page where it does not serve a file (the
+    # console before /connect/dl/ is routed): that host has no release here.
+    [switch] $RejectHtml
   )
   $lastError = $null
   for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
@@ -124,6 +137,10 @@ function Get-AnyrayDownload {
         if ($_.Exception.Response) { $status = $_.Exception.Response.StatusCode }
         if ($have -gt 0 -and $status -eq [System.Net.HttpStatusCode]::RequestedRangeNotSatisfiable) { return }
         throw
+      }
+      if ($RejectHtml -and ([string]$response.ContentType) -match '^\s*text/html') {
+        $response.Close()
+        throw "$Uri is an HTML page, not a release file"
       }
       try {
         # A host that ignores Range answers 200 with the WHOLE body; appending
@@ -177,7 +194,7 @@ function Get-AnyrayRelease {
     Remove-Item -LiteralPath $OutFile, $SumsFile -Force -ErrorAction SilentlyContinue
     try {
       if ($candidate.StartsWith("$Mirror/", [System.StringComparison]::Ordinal)) {
-        Get-AnyrayDownload -Uri "$candidate/SHA256SUMS" -OutFile $SumsFile -Attempts 2 -TimeoutMs 5000
+        Get-AnyrayDownload -Uri "$candidate/SHA256SUMS" -OutFile $SumsFile -Attempts 2 -TimeoutMs 5000 -RejectHtml
       } else {
         Get-AnyrayDownload -Uri "$candidate/SHA256SUMS" -OutFile $SumsFile -Attempts 3
       }

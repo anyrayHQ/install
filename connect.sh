@@ -96,12 +96,23 @@ tag_ok() {
 }
 
 # The current release, from the mirror's pointer (latest.json). Prints its tag,
-# or nothing when the mirror does not answer, which means GitHub's `latest`.
-# A pointer the mirror DOES serve must name a release, or this fails: the
-# mirror answering with nonsense is not a reason to go elsewhere. The short
-# connect timeout keeps a blackholed host from stalling the install.
+# or nothing when the mirror is not serving, which means GitHub's `latest`:
+# no answer, an HTTP error, or an answer that is not a pointer at all (not
+# application/json, not a JSON object, no schemaVersion; for example the
+# console's HTML page before /connect/dl/ is routed). A pointer the mirror DOES
+# serve must name a release, or this fails: a broken pointer is not a reason to
+# go elsewhere. The short connect timeout keeps a blackholed host from
+# stalling the install.
 pointer_tag() {
-  _pointer="$(curl -fsSL --proto '=https' --connect-timeout 5 --max-time 20 "${MIRROR}/latest.json" 2>/dev/null)" || return 0
+  _resp="$(curl -fsSL --proto '=https' --connect-timeout 5 --max-time 20 \
+    -w '\n%{content_type}' "${MIRROR}/latest.json" 2>/dev/null)" || return 0
+  _ctype="$(printf '%s\n' "$_resp" | tail -n 1 | tr '[:upper:]' '[:lower:]')"
+  _pointer="$(printf '%s\n' "$_resp" | sed '$d')"
+  case "$_ctype" in application/json|application/json\;*) ;; *) return 0 ;; esac
+  # A JSON object carrying schemaVersion; anything else is not a pointer.
+  _flat="$(printf '%s' "$_pointer" | tr -d '[:space:]')"
+  case "$_flat" in \{*\}) ;; *) return 0 ;; esac
+  case "$_flat" in *'"schemaVersion":'*) ;; *) return 0 ;; esac
   _tag="$(printf '%s\n' "$_pointer" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
   case "$_tag" in connect-v*) ;; *) return 1 ;; esac
   tag_ok "$_tag" || return 1
@@ -183,13 +194,20 @@ download_resumable() {
 # One host: its SHA256SUMS, then the asset, both from this base, so the
 # checksum below always describes bytes from the host that published them (the
 # hosts can briefly disagree about a release). Returns 1 when the host did not
-# answer (a network error or an HTTP error) so the next host is tried. It never
-# looks at a checksum, so a mismatch can never send the download elsewhere.
+# answer (a network error or an HTTP error, or an HTML page from the mirror in
+# place of SHA256SUMS: that host does not serve the release) so the next host
+# is tried. It never looks at a checksum, so a mismatch can never send the
+# download elsewhere.
 fetch_from() {
   _base="$1"; _connect="$2"; _retries="$3"
   rm -f "${tmp}/SHA256SUMS" "$dl"
-  curl -fsSL --proto '=https' --connect-timeout "$_connect" --retry "$_retries" --retry-delay 1 \
-    "${_base}/SHA256SUMS" -o "${tmp}/SHA256SUMS" || return 1
+  _sums_type="$(curl -fsSL --proto '=https' --connect-timeout "$_connect" --retry "$_retries" --retry-delay 1 \
+    -w '%{content_type}' "${_base}/SHA256SUMS" -o "${tmp}/SHA256SUMS")" || return 1
+  case "$_base" in
+    "$MIRROR"/*)
+      case "$(printf '%s' "$_sums_type" | tr '[:upper:]' '[:lower:]')" in text/html*) return 1 ;; esac
+      ;;
+  esac
   echo "anyray-connect: downloading ${ASSET}…" >&2
   download_resumable "${_base}/${ASSET}" "$dl" 4 || return 1
 }

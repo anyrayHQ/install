@@ -60,6 +60,8 @@ state = {}
 
 # Two release hosts on one stub: /m is the mirror, /g is GitHub, /t a mirror
 # serving altered bytes, /n a mirror missing the asset, /up and /bad pointers.
+# /spa/<anything> is what app.anyray.ai answers before nginx routes
+# /connect/dl/: the console's single-page-app shell, 200 text/html.
 RELEASE_ASSET = b'synthetic-connect-binary\n'
 RELEASE_SUMS = (hashlib.sha256(RELEASE_ASSET).hexdigest() + '  anyray-connect-test\n').encode()
 RELEASE = {
@@ -72,6 +74,21 @@ RELEASE = {
     '/t/connect-v1.2.3/SHA256SUMS': RELEASE_SUMS,
     '/t/connect-v1.2.3/anyray-connect-test': b'tampered-connect-binary\n',
     '/n/connect-v1.2.3/SHA256SUMS': RELEASE_SUMS,
+    '/noschema/latest.json': b'{"version":"1.2.3","tag":"connect-v1.2.3"}',
+    '/htmlptr/latest.json': b'{"schemaVersion":1,"version":"1.2.3","tag":"connect-v1.2.3"}',
+    '/array/latest.json': b'[{"schemaVersion":1,"version":"1.2.3","tag":"connect-v1.2.3"}]',
+    '/fragment/latest.json': b'"schemaVersion":1,"tag":"connect-v1.2.3"',
+}
+SPA = (b'<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n'
+       b'  </head>\n  <body><div id="root"></div></body>\n</html>\n')
+# The types the mirror's publisher sets: .json as application/json.
+CTYPE = {
+    '/up/latest.json': 'application/json',
+    '/bad/latest.json': 'application/json',
+    '/noschema/latest.json': 'application/json',
+    '/htmlptr/latest.json': 'text/html',
+    '/array/latest.json': 'application/json',
+    '/fragment/latest.json': 'application/json',
 }
 open('release.sha', 'w').write(hashlib.sha256(RELEASE_ASSET).hexdigest())
 
@@ -103,9 +120,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         with open('requests.log', 'a') as log:
             log.write('%s\n' % self.path)
-        if self.path in RELEASE or self.path.startswith(('/missing/', '/n/')):
+        if self.path.startswith('/spa/'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self._send(SPA, len(SPA))
+        elif self.path in RELEASE or self.path.startswith(('/missing/', '/n/')):
             payload = RELEASE.get(self.path)
             self.send_response(200 if payload is not None else 404)
+            self.send_header('Content-Type', CTYPE.get(self.path, 'application/octet-stream'))
             self._send(payload or b'', len(payload or b''))
         elif self.path == '/ranged':
             # Honors Range; dies at 40% on the first two attempts, then completes.
@@ -221,6 +243,19 @@ for MIRROR in "$closed" "$h/missing"; do
 done
 MIRROR="$h/bad"
 if pointer_tag >/dev/null 2>&1; then fail "hosts pointer: a malformed pointer was accepted"; fi
+# Not a pointer at all: the mirror is not serving here, so GitHub's latest.
+for MIRROR in "$h/spa" "$h/htmlptr" "$h/noschema" "$h/array" "$h/fragment"; do
+  out="$(pointer_tag 2>/dev/null)" || fail "hosts pointer: a non-pointer answer (${MIRROR}) stopped the install"
+  [ -z "$out" ] || fail "hosts pointer: a non-pointer answer (${MIRROR}) named a release"
+done
+
+# A pinned tag while the mirror answers the HTML shell: both files from GitHub.
+: > requests.log
+MIRROR="$h/spa"
+fetch_release "$h/spa/connect-v1.2.3 $h/g/connect-v1.2.3" 2>/dev/null || fail "hosts spa: no fallback"
+# shellcheck disable=SC2153  # BASE is set by the lifted fetch_release
+[ "$BASE" = "$h/g/connect-v1.2.3" ] || fail "hosts spa: installed from ${BASE}"
+[ "$(sha "$dl")" = "$release_want" ] || fail "hosts spa: wrong bytes"
 
 MIRROR="https://mirror.invalid/dl"
 GITHUB_DOWNLOAD="https://github.invalid/releases/download"
@@ -265,7 +300,7 @@ if fetch_release "$closed/connect-v1.2.3 $closed/github" 2>/dev/null; then
   fail "hosts none: reported success with no host answering"
 fi
 unset -f curl
-echo "connect.sh release hosts: 7/7 cases OK"
+echo "connect.sh release hosts: 9/9 cases OK"
 
 # --- connect.ps1 ------------------------------------------------------------
 if ! command -v pwsh >/dev/null 2>&1; then

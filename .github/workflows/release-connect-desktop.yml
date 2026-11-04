@@ -2992,6 +2992,8 @@ jobs:
       REPO: ${{ github.repository }}
       LINUX_SIGNING_GPG_KEY: ${{ secrets.LINUX_SIGNING_GPG_KEY }}
       LINUX_SIGNING_GPG_PASSPHRASE: ${{ secrets.LINUX_SIGNING_GPG_PASSPHRASE }}
+      MODE: ${{ inputs.mode }}
+      STORED_OSES: ${{ inputs.present }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Authenticate for the S3 artifact handoff

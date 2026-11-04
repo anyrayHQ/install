@@ -10,6 +10,8 @@
 #        DRY_RUN=true builds the consolidated assets/ (checksums, signed manifest) from the given
 #        dirs and makes no GitHub release or feed call.
 #        LINUX_SIGNING_GPG_KEY LINUX_SIGNING_GPG_PASSPHRASE
+#        MODE (the workflow mode) and STORED_OSES (publish: the OSes the stored set holds) let
+#        --require-all say why an OS is missing and whether a re-dispatch can add it.
 # Run from the repository root (it calls scripts/ siblings).
 
 set -euo pipefail
@@ -204,6 +206,22 @@ else
 fi
 
 if [ "$require_all" -eq 1 ] && [ "${#missing[@]}" -gt 0 ]; then
-  echo "::error::desktop release ${VERSION} is missing: ${missing[*]}. The CLI and the other OSes are published; a rebuild re-signs to new bytes, so release a new version, or re-dispatch mode=publish with the same version and set_sums_sha256 to add the missing files from the stored set."
+  echo "::error::desktop release ${VERSION} is missing: ${missing[*]}. The CLI and the other OSes are published."
+  # Only an OS the stored set holds can be added by re-publishing that set; one it lacks failed
+  # verification at prepare time and needs a rebuild, which re-signs to new bytes.
+  read -r -a stored <<< "${STORED_OSES:-}"
+  for os in "${missing[@]}"; do
+    in_set=0
+    for name in ${stored[@]+"${stored[@]}"}; do
+      if [ "$name" = "$os" ]; then in_set=1; fi
+    done
+    if [ "${MODE:-}" != publish ]; then
+      echo "::error::${os} did not verify or upload in this run; a rebuild re-signs to new bytes, so release a new version."
+    elif [ "$in_set" -eq 1 ]; then
+      echo "::error::${os} is in the stored desktop set for ${VERSION} but its upload to ${TAG} failed; re-dispatch mode=publish with the same version and set_sums_sha256 to add it from the stored set."
+    else
+      echo "::error::the stored desktop set for ${VERSION} has no ${os} files: ${os} failed verification when the set was prepared, so it was never stored; a re-dispatch with the same set cannot add them; release a new version."
+    fi
+  done
   exit 1
 fi

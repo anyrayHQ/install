@@ -112,6 +112,59 @@ describe('desktop per-OS publication', { skip: !tools && 'needs bash, jq and sha
     assert.deepEqual(s.manifest().artifacts.some(({ name }) => name.endsWith('-linux-x64.deb')), true);
   });
 
+  // A publish run ships a stored set. An OS the set never had failed verification at prepare time,
+  // so re-dispatching the same set cannot add it; only an OS the set has but whose upload failed can.
+  const reconcileWithout = (t, os, env) => {
+    const s = sandbox(t);
+    for (const other of ['macos', 'windows', 'linux'].filter((name) => name !== os)) {
+      assert.equal(s.run([s.signed(other)]).status, 0);
+    }
+    return s.run(['--require-all'], env);
+  };
+
+  test('publish: an OS absent from the stored set says the set never had it and offers no re-dispatch', (t) => {
+    const result = reconcileWithout(t, 'windows', { MODE: 'publish', STORED_OSES: 'macos linux' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /missing: windows/);
+    assert.match(result.stdout, /the stored desktop set for 1\.2\.3 has no windows files/);
+    assert.match(result.stdout, /failed verification when the set was prepared/);
+    assert.match(result.stdout, /a re-dispatch with the same set cannot add them; release a new version/);
+    assert.doesNotMatch(result.stdout, /re-dispatch mode=publish/);
+  });
+
+  test('publish: an OS in the stored set whose upload failed offers the same-set re-dispatch', (t) => {
+    const result = reconcileWithout(t, 'windows', { MODE: 'publish', STORED_OSES: 'macos windows linux' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /missing: windows/);
+    assert.match(result.stdout, /windows is in the stored desktop set for 1\.2\.3 but its upload to connect-desktop-v1\.2\.3-aaaaaaaaaaaa failed/);
+    assert.match(result.stdout, /re-dispatch mode=publish with the same version and set_sums_sha256 to add it from the stored set/);
+    assert.doesNotMatch(result.stdout, /has no windows files/);
+  });
+
+  test('publish: the stored list is matched by whole OS name, not substring', (t) => {
+    const result = reconcileWithout(t, 'linux', { MODE: 'publish', STORED_OSES: 'macos windows linux-arm64' });
+    assert.match(result.stdout, /the stored desktop set for 1\.2\.3 has no linux files/);
+    assert.doesNotMatch(result.stdout, /re-dispatch mode=publish/);
+  });
+
+  test('publish: each missing OS gets its own cause', (t) => {
+    const s = sandbox(t);
+    assert.equal(s.run([s.signed('linux')]).status, 0);
+    const result = s.run(['--require-all'], { MODE: 'publish', STORED_OSES: 'macos linux' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /missing: macos windows/);
+    assert.match(result.stdout, /macos is in the stored desktop set for 1\.2\.3 but its upload/);
+    assert.match(result.stdout, /the stored desktop set for 1\.2\.3 has no windows files/);
+  });
+
+  test('release mode never offers a re-dispatch: there is no stored set to re-publish', (t) => {
+    const result = reconcileWithout(t, 'windows', { MODE: 'release', STORED_OSES: '' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /missing: windows/);
+    assert.match(result.stdout, /windows did not verify or upload in this run; a rebuild re-signs to new bytes, so release a new version/);
+    assert.doesNotMatch(result.stdout, /re-dispatch/);
+  });
+
   test('minVersion appears only once every OS is on the release', (t) => {
     const s = sandbox(t);
     for (const os of ['macos', 'linux']) assert.equal(s.run([s.signed(os)]).status, 0);

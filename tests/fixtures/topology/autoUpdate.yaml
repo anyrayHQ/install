@@ -1,0 +1,1028 @@
+---
+# Source: anyray/templates/podDisruptionBudget.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: anyray-gateway
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: gateway
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anyray
+      app.kubernetes.io/component: gateway
+      app.kubernetes.io/instance: topology-test
+---
+# Source: anyray/templates/podDisruptionBudget.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: anyray-optimizer
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: optimizer
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anyray
+      app.kubernetes.io/component: optimizer
+      app.kubernetes.io/instance: topology-test
+---
+# Source: anyray/templates/podDisruptionBudget.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: anyray-proxy
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: proxy
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anyray
+      app.kubernetes.io/component: proxy
+      app.kubernetes.io/instance: topology-test
+
+---
+# Source: anyray/templates/autoUpdate.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: anyray-updater
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: updater
+---
+# Source: anyray/templates/autoUpdate.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: anyray-autoupdate-pin
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: updater
+data:
+  autoupdate-pin.mjs: |
+    // Pin every app Deployment to ONE resolved digest before the nightly roll.
+    //
+    // WHY. With a moving tag (policy-stable) and imagePullPolicy: Always, each pod
+    // resolves the tag when IT starts. The roll moves every pod together, but any
+    // later start (a reschedule, a node drain, an eviction, an autoscale) pulls
+    // whatever the channel points at by then, so replicas split across builds
+    // until the next roll. Across proxy replicas that blanked the console (a page
+    // from one build, its hashed assets requested from the other). Across
+    // optimizer replicas it flips a warm session's prompt bytes each time a turn
+    // lands on the other build, and every flip rewrites the provider's prompt
+    // cache. Pinning `<repo>:<tag>@sha256:…` makes every later start pull the
+    // build the roll chose.
+    //
+    // HOW. The init containers of this Job pod run each app image at the moving
+    // tag with pullPolicy Always, so the kubelet resolves each digest with the
+    // cluster's own pull secrets and mirrors (no registry client, no credentials
+    // here). This script reads those digests from its own pod's status and patches
+    // each Deployment's container image. The kubectl container that runs next does
+    // the same `rollout restart` as before, so the roll lands on the pinned build.
+    // A `helm upgrade` renders the plain tag again; the next scheduled run pins it.
+    //
+    // Talks to the API server directly (Node's fetch, the mounted service-account
+    // token, NODE_EXTRA_CA_CERTS for the cluster CA): the kubectl image is
+    // distroless and cannot run a script.
+    
+    import { realpathSync } from 'node:fs';
+    import { readFile } from 'node:fs/promises';
+    import { fileURLToPath } from 'node:url';
+    
+    const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
+    const DIGEST = /@(sha256:[0-9a-f]{64})$/;
+    
+    export function digestOf(imageID) {
+      const match = DIGEST.exec(String(imageID ?? ''));
+      return match ? match[1] : null;
+    }
+    
+    // `repo:tag` -> `repo:tag@sha256:…`. An already-pinned ref keeps its tag part
+    // and takes the new digest, so a rerun never stacks two `@sha256` suffixes.
+    export function pinnedRef(image, digest) {
+      const at = image.indexOf('@');
+      return `${at < 0 ? image : image.slice(0, at)}@${digest}`;
+    }
+    
+    export async function pin({ api, token, namespace, podName, pins, log = console.log }) {
+      const call = async (method, path, body, contentType) => {
+        const res = await fetch(`${api}${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json',
+            ...(body ? { 'Content-Type': contentType } : {}),
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        if (!res.ok) throw new Error(`${method} ${path} -> HTTP ${res.status}`);
+        return res.json();
+      };
+    
+      const pod = await call('GET', `/api/v1/namespaces/${namespace}/pods/${podName}`);
+      const statuses = [...(pod.status?.initContainerStatuses ?? []), ...(pod.status?.containerStatuses ?? [])];
+      const imageIdOf = new Map(statuses.map((s) => [s.name, s.imageID]));
+    
+      // Resolve every digest before patching anything: a half-pinned release is
+      // exactly the split this exists to prevent.
+      const plan = pins.map((p) => {
+        const digest = digestOf(imageIdOf.get(p.resolvedBy));
+        if (!digest) throw new Error(`no digest for ${p.resolvedBy} (imageID ${JSON.stringify(imageIdOf.get(p.resolvedBy) ?? null)})`);
+        return { ...p, target: pinnedRef(p.image, digest) };
+      });
+    
+      for (const p of plan) {
+        const path = `/apis/apps/v1/namespaces/${namespace}/deployments/${p.deployment}`;
+        const current = await call('GET', path);
+        const container = current.spec?.template?.spec?.containers?.find((c) => c.name === p.container);
+        if (!container) throw new Error(`deployment ${p.deployment} has no container ${p.container}`);
+        if (container.image === p.target) {
+          log(`${p.deployment}: already ${p.target}`);
+          continue;
+        }
+        await call(
+          'PATCH',
+          path,
+          { spec: { template: { spec: { containers: [{ name: p.container, image: p.target }] } } } },
+          'application/strategic-merge-patch+json',
+        );
+        log(`${p.deployment}: ${container.image} -> ${p.target}`);
+      }
+    }
+    
+    async function main() {
+      const host = process.env.KUBERNETES_SERVICE_HOST;
+      const port = process.env.KUBERNETES_SERVICE_PORT;
+      if (!host || !port) throw new Error('not running in a cluster (KUBERNETES_SERVICE_HOST unset)');
+      await pin({
+        api: `https://${host.includes(':') ? `[${host}]` : host}:${port}`,
+        token: (await readFile(`${SA}/token`, 'utf8')).trim(),
+        namespace: process.env.POD_NAMESPACE,
+        podName: process.env.POD_NAME,
+        pins: JSON.parse(process.env.AUTOUPDATE_PINS),
+      });
+    }
+    
+    // ConfigMap volumes expose the script through symlinks, while Node resolves
+    // import.meta.url to the target. Compare real paths to recognize the entry point.
+    let isEntryPoint = false;
+    try {
+      if (process.argv[1]) {
+        isEntryPoint = realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+      }
+    } catch {}
+    
+    if (isEntryPoint) {
+      main().catch((err) => {
+        console.error(`autoupdate-pin: ${err.message}`);
+        process.exit(1);
+      });
+    }
+---
+# Source: anyray/templates/autoUpdate.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: anyray-updater
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: updater
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+---
+# Source: anyray/templates/autoUpdate.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: anyray-updater
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: updater
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: anyray-updater
+subjects:
+  - kind: ServiceAccount
+    name: anyray-updater
+    namespace: topology-test
+---
+# Source: anyray/templates/gateway.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  # Bare name: nginx in the proxy image hardcodes the upstream `gateway:8787`.
+  name: gateway
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: anyray
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/instance: topology-test
+  ports:
+    - port: 8787
+      targetPort: 8787
+
+---
+# Source: anyray/templates/optimizer.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  # Bare name: nginx in the proxy image hardcodes the upstream `optimizer:8088`.
+  name: optimizer
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: optimizer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: anyray
+    app.kubernetes.io/component: optimizer
+    app.kubernetes.io/instance: topology-test
+  ports:
+    - port: 8088
+      targetPort: 8088
+
+---
+# Source: anyray/templates/postgres.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: anyray-postgres
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: anyray
+    app.kubernetes.io/component: postgres
+    app.kubernetes.io/instance: topology-test
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+# Source: anyray/templates/proxy.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: anyray-proxy
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: proxy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: anyray
+    app.kubernetes.io/component: proxy
+    app.kubernetes.io/instance: topology-test
+  ports:
+    - port: 3000
+      targetPort: 80
+
+---
+# Source: anyray/templates/gateway.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anyray-gateway
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 2
+  # No RWO volume to detach, so a replacement can run alongside the outgoing pod:
+  # surge one new pod, wait for it to pass the readinessProbe, then retire an old
+  # one. Holding maxUnavailable at zero is the part that matters — it keeps the
+  # Service endpoint list non-empty for the whole rollout, even at one replica.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  minReadySeconds: 10
+  
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anyray
+      app.kubernetes.io/component: gateway
+      app.kubernetes.io/instance: topology-test
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: anyray
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/instance: topology-test
+    spec:
+      serviceAccountName: default
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: anyray
+                    app.kubernetes.io/component: gateway
+                    app.kubernetes.io/instance: topology-test
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: anyray
+                    app.kubernetes.io/component: gateway
+                    app.kubernetes.io/instance: topology-test
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: public.ecr.aws/anyray/gateway:policy-stable
+          imagePullPolicy: Always
+          
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+          env:
+            
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: POSTGRES_PASSWORD
+            - name: ANYRAY_OBSERVABILITY_DB_URL
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@anyray-postgres:5432/postgres"
+            - name: ANYRAY_SPEND_DB_URL
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@anyray-postgres:5432/postgres"
+            - name: ANYRAY_OPTIMIZER_URL
+              value: "http://optimizer:8088"
+            - name: ANYRAY_OPTIMIZER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: ANYRAY_OPTIMIZER_TOKEN
+            # What `anyray-default` routes to when a request names no model;
+            # without it the gateway falls back to a stale alias and 404s.
+            - name: ANYRAY_DEFAULT_MODEL
+              value: "anthropic/claude-sonnet-5-5"
+            - name: ANYRAY_CONTENT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: ANYRAY_CONTENT_KEY
+            - name: ANYRAY_ALLOW_PLAINTEXT
+              value: "false"
+            - name: ANYRAY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: ANYRAY_ADMIN_TOKEN
+            # All runtime-state files (settings, spend, provider/client keys,
+            # routing, user caps, audit logs, GDPR log, entitlement lease) live
+            # under one directory on the volume; the gateway derives every path
+            # from ANYRAY_DATA_DIR. Override an individual file with its
+            # ANYRAY_*_FILE var only if you need to (the per-file var wins).
+            - name: ANYRAY_DATA_DIR
+              value: /data
+            # Billing is required. setup.sh writes the token and local salt to
+            # the Secret; the image pins the Billing URL and verification key.
+            # Kubernetes requires both Secret keys before starting this pod.
+            - name: ANYRAY_METERING_ENABLED
+              value: "true"
+            - name: ANYRAY_DEPLOYMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: ANYRAY_DEPLOYMENT_TOKEN
+            - name: ANYRAY_PSEUDONYM_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: ANYRAY_PSEUDONYM_SALT
+            - name: ANYRAY_METERING_INTERVAL_MS
+              value: "900000"
+            - name: ANYRAY_ENTITLEMENT_GRACE_MS
+              value: "86400000"
+            - name: ANYRAY_GATEWAY_PUBLIC_URL
+              value: "https://anyray.example.com"
+            - name: ANYRAY_TRUST_PROXY
+              value: "true"
+          ports:
+            - containerPort: 8787
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8787
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: 8787
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8787
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          # Runs BEFORE SIGTERM, so the pod is still serving while its removal
+          # from the Service endpoints propagates. Once SIGTERM lands the gateway
+          # marks itself down on `/` (503) and drains in-flight requests for
+          # ANYRAY_SHUTDOWN_DRAIN_MS; terminationGracePeriodSeconds has to cover
+          # this pause plus that drain, or the kubelet kills it mid-stream.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+            requests:
+              cpu: 250m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+# Source: anyray/templates/optimizer.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anyray-optimizer
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: optimizer
+spec:
+  replicas: 2
+  # No RWO volume to detach: surge a replacement, let it pass /health, then retire
+  # the outgoing pod. Holding maxUnavailable at zero keeps an optimizer reachable
+  # throughout, so no request has to take the fail-open path during an upgrade.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  minReadySeconds: 10
+  
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anyray
+      app.kubernetes.io/component: optimizer
+      app.kubernetes.io/instance: topology-test
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: anyray
+        app.kubernetes.io/component: optimizer
+        app.kubernetes.io/instance: topology-test
+    spec:
+      serviceAccountName: default
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: anyray
+                    app.kubernetes.io/component: optimizer
+                    app.kubernetes.io/instance: topology-test
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: anyray
+                    app.kubernetes.io/component: optimizer
+                    app.kubernetes.io/instance: topology-test
+      containers:
+        - name: optimizer
+          image: public.ecr.aws/anyray/optimizer:policy-stable
+          imagePullPolicy: Always
+          
+          env:
+            - name: PORT
+              value: "8088"
+            - name: ANYRAY_OPTIMIZER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: ANYRAY_OPTIMIZER_TOKEN
+            - name: ANYRAY_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: ANYRAY_ADMIN_TOKEN
+            # Runtime config + audit log under ANYRAY_DATA_DIR; the runtime
+            # config starts empty and is seeded from the image-baked
+            # optimizer.config.json until the first admin edit writes here.
+            - name: ANYRAY_DATA_DIR
+              value: /data
+            # Durable CCR stash tier (same Postgres as the gateway): stashed
+            # originals persist as AES-256-GCM ciphertext, so retrieval handles
+            # survive optimizer restarts and resolve from any replica.
+            
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: POSTGRES_PASSWORD
+            - name: ANYRAY_SPEND_DB_URL
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@anyray-postgres:5432/postgres"
+            - name: ANYRAY_CONTENT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: ANYRAY_CONTENT_KEY
+            # Governs ONLY the paths that run without a gateway — BYO
+            # /v1/record writes and attach mode, both in the optimizer process.
+            # The gateway's own mode is console-set and stored in the DB, and it
+            # pushes that mode here on every optimize call. The value key keeps
+            # its gateway.* name so existing my-values.yaml files keep working.
+            - name: ANYRAY_CONTENT_MODE
+              value: "encrypted"
+            - name: ANYRAY_ALLOW_PLAINTEXT
+              value: "false"
+          ports:
+            - containerPort: 8088
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8088
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: 8088
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8088
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          # Holds the pod open, still answering /v1/optimize, until its removal
+          # from the Service endpoints has reached the gateway — without it an
+          # upgrade produces a burst of fail-open (cache-busting) requests.
+          #
+          # It pairs with, and does not replace, the optimizer's own SIGTERM
+          # drain (15s, optimizer/src/index.ts): this pause covers requests the
+          # gateway has not yet stopped SENDING, the drain covers the ones
+          # already in flight when the signal lands. Both are charged against
+          # terminationGracePeriodSeconds by the render guard in preStopDrain.
+          # Nothing here is user-visible even when it fails — the gateway fails
+          # open on an unreachable optimizer — but each cut call forwards the
+          # ORIGINAL request and busts that session's prompt cache, which is
+          # money.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+            requests:
+              cpu: 1000m
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+# Source: anyray/templates/proxy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anyray-proxy
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: proxy
+spec:
+  replicas: 2
+  # The proxy holds no volume, so it can always roll seamlessly. Made explicit
+  # rather than left to the Kubernetes default of 25%/25%, which rounds
+  # maxUnavailable up to 1 as soon as an operator raises replicas past 3 and would
+  # then drop part of the fleet mid-roll.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  minReadySeconds: 10
+  
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anyray
+      app.kubernetes.io/component: proxy
+      app.kubernetes.io/instance: topology-test
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: anyray
+        app.kubernetes.io/component: proxy
+        app.kubernetes.io/instance: topology-test
+    spec:
+      serviceAccountName: default
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: anyray
+                    app.kubernetes.io/component: proxy
+                    app.kubernetes.io/instance: topology-test
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: anyray
+                    app.kubernetes.io/component: proxy
+                    app.kubernetes.io/instance: topology-test
+      containers:
+        - name: proxy
+          image: public.ecr.aws/anyray/proxy:policy-stable
+          imagePullPolicy: Always
+          
+          # The proxy image bakes nginx envsubst placeholders for the
+          # Docker/Watchtower updater route and status endpoint. The updater is
+          # not wired under Kubernetes (upgrades go through `helm upgrade`), but
+          # these vars must still be present so the baked template renders and
+          # nginx can start.
+          env:
+            - name: ANYRAY_UPDATER_ENABLED
+              value: "false"
+            - name: ANYRAY_UPDATER_PERIODIC_POLLS
+              value: "false"
+            - name: ANYRAY_UPDATER_POLL_INTERVAL
+              value: "0"
+            - name: ANYRAY_UPDATER_TOKEN
+              value: ""
+            # Point nginx at the gateway Service by FQDN. The proxy resolves
+            # upstreams at request time via nginx's `resolver`, which — unlike
+            # libc/Node — does NOT apply the cluster's DNS search domains. So the
+            # image default (bare `gateway`, fine on Docker Compose) resolves to
+            # NXDOMAIN here, and every gated route (/console/, /admin/*) 500s
+            # when the /__auth subrequest can't reach the gateway ("gateway could
+            # not be resolved (3: Host not found)"). The Service is named
+            # `gateway` (see gateway.yaml).
+            #
+            # ANYRAY_OPTIMIZER_HOST used to sit here too and was dead: the console
+            # image has no optimizer upstream any more. /admin/optimizer/* rides
+            # the gateway passthrough on purpose, so the gateway's capability
+            # checks apply — proxying straight to the optimizer let any
+            # authenticated session, down to `viewer`, rewrite optimizer config.
+            # Removed so the manifest cannot be read as a second caller of :8088
+            # (see networkPolicy.yaml, which allows the gateway alone).
+            # Listed before extraEnv so an operator override still wins (last
+            # duplicate env entry is the one kubelet keeps).
+            - name: ANYRAY_GATEWAY_HOST
+              value: "gateway.topology-test.svc.cluster.local"
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /anyray-login
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          startupProbe:
+            httpGet:
+              path: /anyray-login
+              port: 80
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /anyray-login
+              port: 80
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          # nginx proxies the streaming response bodies, so it needs the same
+          # endpoint-drain pause as the gateway behind it. The image re-declares
+          # STOPSIGNAL SIGQUIT (its `FROM scratch` final stage inherits no config
+          # from the nginx base), which is what makes the signal that follows a
+          # graceful worker drain rather than nginx's default fast shutdown.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+---
+# Source: anyray/templates/postgres.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: anyray-postgres
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: anyray-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anyray
+      app.kubernetes.io/component: postgres
+      app.kubernetes.io/instance: topology-test
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: anyray
+        app.kubernetes.io/component: postgres
+        app.kubernetes.io/instance: topology-test
+    spec:
+      serviceAccountName: default
+      terminationGracePeriodSeconds: 120
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: anyray
+                    app.kubernetes.io/component: postgres
+                    app.kubernetes.io/instance: topology-test
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: topology.kubernetes.io/zone
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: anyray
+                    app.kubernetes.io/component: postgres
+                    app.kubernetes.io/instance: topology-test
+      containers:
+        - name: postgres
+          image: docker.io/postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "max_connections=300"]
+          
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_DB
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: POSTGRES_PASSWORD
+            - name: TZ
+              value: UTC
+            - name: PGTZ
+              value: UTC
+            # Initialize into a subdirectory of the mount, not its root. A
+            # directly mounted volume (e.g. an AWS EBS PVC, ext4) has a
+            # lost+found at its root, and initdb refuses any non-empty data
+            # directory. See helm/README.md → Troubleshooting.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 8
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 150Gi
+---
+# Source: anyray/templates/autoUpdate.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: anyray-autoupdate
+  labels:
+    helm.sh/chart: anyray-CHART_VERSION
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: updater
+spec:
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        helm.sh/chart: anyray-CHART_VERSION
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/instance: topology-test
+        app.kubernetes.io/component: updater
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: anyray
+            app.kubernetes.io/component: updater
+            app.kubernetes.io/instance: topology-test
+        spec:
+          serviceAccountName: anyray-updater
+          restartPolicy: OnFailure
+          volumes:
+            - name: pin-script
+              configMap:
+                name: anyray-autoupdate-pin
+          initContainers:
+            - name: resolve-optimizer
+              image: public.ecr.aws/anyray/optimizer:policy-stable
+              imagePullPolicy: Always
+              command: ["/nodejs/bin/node","-e",""]
+              resources:
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+            - name: resolve-proxy
+              image: public.ecr.aws/anyray/proxy:policy-stable
+              imagePullPolicy: Always
+              command: ["nginx","-v"]
+              resources:
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+            - name: pin
+              image: public.ecr.aws/anyray/gateway:policy-stable
+              imagePullPolicy: Always
+              command: ["node", "/pin/autoupdate-pin.mjs"]
+              env:
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: NODE_EXTRA_CA_CERTS
+                  value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                - name: AUTOUPDATE_PINS
+                  value: "[{\"container\":\"gateway\",\"deployment\":\"anyray-gateway\",\"image\":\"public.ecr.aws/anyray/gateway:policy-stable\",\"resolvedBy\":\"pin\"},{\"container\":\"optimizer\",\"deployment\":\"anyray-optimizer\",\"image\":\"public.ecr.aws/anyray/optimizer:policy-stable\",\"resolvedBy\":\"resolve-optimizer\"},{\"container\":\"proxy\",\"deployment\":\"anyray-proxy\",\"image\":\"public.ecr.aws/anyray/proxy:policy-stable\",\"resolvedBy\":\"resolve-proxy\"}]"
+              volumeMounts:
+                - name: pin-script
+                  mountPath: /pin
+                  readOnly: true
+              resources:
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+          containers:
+            - name: kubectl
+              image: registry.k8s.io/kubectl:v1.33.0
+              imagePullPolicy: IfNotPresent
+              args:
+                - rollout
+                - restart
+                - deployment
+                - --namespace
+                - topology-test
+                - --selector
+                - app.kubernetes.io/instance=topology-test
+              resources:
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+                requests:
+                  cpu: 10m
+                  memory: 32Mi

@@ -182,13 +182,17 @@ test('a failure after arming prints the line and runs the diagnostics with the r
   const dir = tree(t);
   // The diagnostics failing too must not change how the step fails.
   writeFileSync(join(dir, 'bin', 'sudo'), `#!/bin/bash\nprintf '%s\\n' "$*" > "${join(dir, 'sudo-args')}"\nexit 7\n`);
+  // BSD stat's size of the install log; GNU stat reads `-f` differently, so it is stubbed.
+  writeFileSync(join(dir, 'bin', 'stat'), '#!/bin/bash\n[ "$*" = "-f %z /var/log/install.log" ] && echo 4242\n');
   chmodSync(join(dir, 'bin', 'sudo'), 0o755);
-  const script = `set -euo pipefail\n${run.slice(from, to)}\nsh -c 'exit 3'\necho unreachable\n`;
+  chmodSync(join(dir, 'bin', 'stat'), 0o755);
+  const block = run.slice(from, to).replaceAll('/usr/bin/stat ', `${join(dir, 'bin', 'stat')} `);
+  const script = `set -euo pipefail\n${block}\nsh -c 'exit 3'\necho unreachable\n`;
   const result = spawnSync(bash, ['-c', script], {
     cwd: dir, encoding: 'utf8', timeout: 10_000, env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}` },
   });
   assert.equal(result.status, 3, result.stdout + result.stderr);
   assert.match(result.stdout, /::error::macOS verification failed at script line \d+/);
   assert.doesNotMatch(result.stdout, /unreachable/);
-  assert.match(readFileSync(join(dir, 'sudo-args'), 'utf8'), /^\.\/scripts\/pkg-diagnostics\.sh \/var\/log\/install\.log \d+ \/Users\n$/);
+  assert.equal(readFileSync(join(dir, 'sudo-args'), 'utf8'), './scripts/pkg-diagnostics.sh /var/log/install.log 4242 /Users\n');
 });

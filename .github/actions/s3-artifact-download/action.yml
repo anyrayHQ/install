@@ -72,7 +72,7 @@ runs:
           done
         }
         list_failed() {
-          echo "::error::Could not list $1: the AWS CLI failed ${list_attempts} times (last exit ${LIST_RC}: ${LIST_ERROR//%/%25}). This is a CI or AWS fault, not a missing upload; re-run the job."
+          echo "::error::Could not list $1: the AWS CLI failed ${list_attempts} times (last exit ${LIST_RC}: ${LIST_ERROR//%/%25}). This is a CI or AWS fault, not a missing upload. Re-dispatch the whole workflow (same inputs)."
           exit 1
         }
 

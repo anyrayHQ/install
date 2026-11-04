@@ -95,6 +95,8 @@ test('a CLI that keeps failing is reported as a CLI failure, never as a missing 
   assert.doesNotMatch(r.log, /did not run or wrote nothing/);
   // The annotation itself carries the CLI's last error line, so the run summary names the fault.
   assert.match(r.log, /::error::Could not list s3:\/\/ci-bucket\/install\/777-1\/inner-signed[^\n]*exit 254: An error occurred \(ExpiredToken\)/);
+  // Keys are attempt-scoped, so re-running only the failed job reads an empty attempt.
+  assert.match(r.log, /::error::Could not list [^\n]*Re-dispatch the whole workflow \(same inputs\)\./);
 });
 
 test('an empty prefix is the CLI answering, so it fails at once with the missing-upload message', (t) => {

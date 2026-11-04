@@ -1446,24 +1446,21 @@ the real uninstall:
   developer account. The same manual pass covers the UI Quit action, a real
   logout/login, enrollment, key renewal, and an EDR policy;
 - Windows first plants an unsigned foreign engine at
-  `C:\Program Files\Anyray\anyray-connect.exe`, requires the MSI to refuse it
-  with exit 1603 and a failed `SweepMachineState` action without changing it,
-  then plants a stale managed credential
-  shim and installs cleanly into that fixed directory. The smoke verifies the
+  `C:\Program Files\Anyray\anyray-connect.exe` and a stale managed credential
+  shim, then installs into that fixed directory. The MSI runs no scripts
+  (monorepo #5342): Windows Installer replaces an unowned engine in place and
+  rollback restores it, so the install must succeed and leave the signed engine
+  where the foreign one was. The smoke verifies the
   installed engine's Authenticode signature, both regenerated managed shims and
   their engine target, the machine `PATH` entry, `uninstall.ps1`, and the
   `ai.anyray.connect-tray` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; MSI uninstall must
   remove both shims and the machine `PATH` entry. On failure, the job prints
-  context around MSI failure markers. Full refusal, install, and uninstall
-  logs (whichever were created) are uploaded even when the smoke fails as
+  context around MSI failure markers. Full install and uninstall logs
+  (whichever were created) are uploaded even when the smoke fails as
   `connect-desktop-windows-msi-logs`. The job summary links the S3 URI; download
   them with `aws s3 cp <uri>/ ./msi-logs/ --recursive` before the bucket's
-  seven-day retention expires. A generic 1603 is not proof that the refusal
-  action ran. The refusal *cause* is only checked against engines that print the
-  `ANYRAY-CA-ERROR` stdout marker (monorepo #2839); an older engine warns instead,
-  because a redirected PowerShell error stream reaches the MSI log as a bare
-  CLIXML header and never carries the message;
+  seven-day retention expires;
 - Ubuntu runs as a fixed `tester` account it creates and removes each run. It
   installs synthetic legacy CLI (from `ci/nfpm.yaml`) and `fleet-osquery`
   (from its own YAML) deb/rpm packages, both built with the same pinned nfpm

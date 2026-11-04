@@ -2013,9 +2013,7 @@ jobs:
           $bootstrapShim = Join-Path $installDir 'anyray-bootstrap-headers-helper.cmd'
           $uninstallScript = Join-Path $installDir 'uninstall.ps1'
           $helperMarker = 'Managed by anyray-connect desktop helper; do not edit.'
-          . ./scripts/msi-diagnostics.ps1
           $log = Join-Path $logDir.FullName 'connect-desktop-msi.log'
-          $foreignLog = Join-Path $logDir.FullName 'connect-desktop-msi-foreign.log'
           $uninstallLog = Join-Path $logDir.FullName 'connect-desktop-msi-uninstall.log'
           $installed = $false
           $smokeFailure = $null
@@ -2049,29 +2047,15 @@ jobs:
             }
             New-Item -ItemType Directory -Path $installDir | Out-Null
             $createdInstallDir = $true
+            # The MSI runs no scripts since monorepo #5342 (ANY-2021): Windows Installer replaces
+            # an unowned engine in place and rollback restores it. The install below runs over
+            # this unsigned fixture and must leave the signed engine in its place.
             Set-Content -NoNewline -LiteralPath $installedEnginePath -Value 'foreign-engine-sentinel'
             $foreignSignature = Get-AuthenticodeSignature -LiteralPath $installedEnginePath
             if ($foreignSignature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
               throw "foreign engine fixture is not Authenticode-unsigned: $($foreignSignature.Status)"
             }
             $foreignHash = (Get-FileHash -LiteralPath $installedEnginePath -Algorithm SHA256).Hash
-            $foreignInstallArgs = @(
-              '/i', "`"$msi`"", '/qn', '/norestart', '/L*v', "`"$foreignLog`""
-            )
-            $foreignInstall = Start-Process -FilePath 'msiexec.exe' -Wait -PassThru `
-              -ArgumentList $foreignInstallArgs
-            if ($foreignInstall.ExitCode -in 0,3010) { $installed = $true }
-            if ($foreignInstall.ExitCode -ne 1603) {
-              throw "MSI foreign-engine refusal returned exit $($foreignInstall.ExitCode), expected 1603"
-            }
-            if (-not (Test-Path -LiteralPath $installedEnginePath -PathType Leaf)) {
-              throw 'MSI foreign-engine refusal removed the foreign engine'
-            }
-            if ((Get-FileHash -LiteralPath $installedEnginePath -Algorithm SHA256).Hash -ne $foreignHash) {
-              throw 'MSI foreign-engine refusal changed the foreign engine'
-            }
-            Assert-MsiForeignEngineRefusal -Path $foreignLog
-            Remove-Item -LiteralPath $installedEnginePath
             Set-Content -LiteralPath $credentialShim -Value @(
               '@echo off'
               "REM $helperMarker"
@@ -2105,6 +2089,9 @@ jobs:
             $installedMain = Get-Item -LiteralPath $installedMainPath -ErrorAction SilentlyContinue
             if ($null -eq $installedEngine) { throw "installed MSI has no engine at $installedEnginePath" }
             if ($null -eq $installedMain) { throw "installed MSI has no tray at $installedMainPath" }
+            if ((Get-FileHash -LiteralPath $installedEnginePath -Algorithm SHA256).Hash -eq $foreignHash) {
+              throw 'MSI left the foreign engine in place instead of replacing it'
+            }
             # Compare the actual MSI payload, not just Tauri's restored input.
             foreach ($pair in @(
               @($installedMain.FullName, 'inner/anyray-connect-tray-windows-x64.exe'),
@@ -2313,7 +2300,7 @@ jobs:
         shell: pwsh
         run: |
           . ./scripts/msi-diagnostics.ps1
-          foreach ($name in @('connect-desktop-msi-foreign.log', 'connect-desktop-msi.log', 'connect-desktop-msi-uninstall.log')) {
+          foreach ($name in @('connect-desktop-msi.log', 'connect-desktop-msi-uninstall.log')) {
             Write-Host "::group::$name"
             try { Show-MsiFailureContext -Path (Join-Path 'connect-desktop-msi-logs' $name) }
             finally { Write-Host '::endgroup::' }

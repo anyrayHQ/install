@@ -272,7 +272,7 @@ describe('desktop release workflow safety contract', () => {
     assert.match(job('verify-windows-signatures'), /MSI changed signed payload/);
   });
 
-  test('exercises Windows foreign-engine refusal, managed layout, and uninstall cleanup', () => {
+  test('installs over a foreign, unsigned engine, replaces it, and checks layout and uninstall cleanup', () => {
     const windows = job('verify-windows-signatures');
     assert.match(windows, /\$installDir = Join-Path \$env:ProgramFiles 'Anyray'/);
     assert.doesNotMatch(windows, /INSTALLDIR=/);
@@ -280,22 +280,23 @@ describe('desktop release workflow safety contract', () => {
     assert.match(windows, /Set-Content -NoNewline -LiteralPath \$installedEnginePath -Value 'foreign-engine-sentinel'/);
     assert.match(windows, /Get-AuthenticodeSignature -LiteralPath \$installedEnginePath/);
     assert.match(windows, /SignatureStatus\]::Valid/);
-    assert.match(windows, /\$foreignInstallArgs = @\(/);
-    assert.match(windows, /-ArgumentList \$foreignInstallArgs/);
-    assert.match(windows, /\$foreignInstall\.ExitCode -ne 1603/);
-    assert.match(windows, /MSI foreign-engine refusal removed the foreign engine/);
-    assert.match(windows, /MSI foreign-engine refusal changed the foreign engine/);
+    // Since monorepo #5342 (ANY-2021) the MSI runs no scripts: Windows Installer replaces an
+    // unowned engine in place and rollback restores it. The scripted SweepMachineState refusal
+    // (exit 1603) is gone, and a smoke that still demands it drops Windows from every release.
+    assert.doesNotMatch(windows, /1603|SweepMachineState|Assert-MsiForeignEngineRefusal|\$foreignInstall|\$foreignLog/);
 
-    const refusalCheck = windows.indexOf('$foreignInstall.ExitCode -ne 1603');
-    const refusalReason = windows.indexOf('Assert-MsiForeignEngineRefusal -Path $foreignLog');
-    const integrityCheck = windows.indexOf("throw 'MSI foreign-engine refusal changed the foreign engine'");
-    const engineRemoved = windows.indexOf('Remove-Item -LiteralPath $installedEnginePath');
+    const plant = windows.indexOf("-Value 'foreign-engine-sentinel'");
     const staleShim = windows.indexOf("'echo stale-helper-sentinel'");
     const cleanInstall = windows.indexOf('$installArgs = @(');
-    assert.ok(refusalCheck > 0 && refusalCheck < engineRemoved);
-    assert.ok(integrityCheck > refusalCheck && refusalReason > integrityCheck && refusalReason < engineRemoved);
-    assert.ok(engineRemoved > 0 && engineRemoved < staleShim);
-    assert.ok(staleShim > 0 && staleShim < cleanInstall);
+    const replacedCheck = windows.indexOf(
+      '(Get-FileHash -LiteralPath $installedEnginePath -Algorithm SHA256).Hash -eq $foreignHash'
+    );
+    const replacedThrow = windows.indexOf("throw 'MSI left the foreign engine in place instead of replacing it'");
+    const payloadCheck = windows.indexOf('throw "MSI changed signed payload');
+    assert.ok(plant > 0 && plant < staleShim && staleShim < cleanInstall);
+    // The install must run over the planted fixture, so nothing removes it first.
+    assert.equal(windows.slice(plant, cleanInstall).indexOf('Remove-Item -LiteralPath $installedEnginePath'), -1);
+    assert.ok(replacedCheck > cleanInstall && replacedThrow > replacedCheck && replacedThrow < payloadCheck);
     assert.match(windows, /anyray-credential-helper\.cmd/);
     assert.match(windows, /anyray-bootstrap-headers-helper\.cmd/);
     assert.match(windows, /Managed by anyray-connect desktop helper; do not edit\./);
@@ -333,6 +334,8 @@ describe('desktop release workflow safety contract', () => {
     const reporting = windows.slice(windows.indexOf('      - name: Show MSI failure context'));
     assert.match(reporting, /failure\(\) && steps.windows-msi-smoke.outcome == 'failure'/);
     assert.match(reporting, /Show-MsiFailureContext/);
+    // Only the install and uninstall logs exist now; a foreign-refusal log is never written.
+    assert.match(reporting, /@\('connect-desktop-msi\.log', 'connect-desktop-msi-uninstall\.log'\)/);
     assert.match(reporting, /always\(\) && steps.windows-msi-smoke.outcome != 'skipped'/);
     assert.match(reporting, /uses: \.\/\.github\/actions\/s3-artifact-upload/);
     assert.match(reporting, /path: connect-desktop-msi-logs\/\*\.log/);

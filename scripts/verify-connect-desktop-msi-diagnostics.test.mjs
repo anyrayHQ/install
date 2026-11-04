@@ -9,10 +9,11 @@ import { test } from 'node:test';
 const helper = fileURLToPath(new URL('./msi-diagnostics.ps1', import.meta.url));
 const pwshProbe = spawnSync('pwsh', ['-NoProfile', '-Command', 'exit 0'], { encoding: 'utf8' });
 assert.equal(pwshProbe.status, 0, 'MSI diagnostic tests require working PowerShell (pwsh) on PATH; refusing to skip coverage.');
+// A failing custom action as it reaches a verbose MSI log.
 const refusal = 'WixQuietExec64:  ANYRAY-CA-ERROR: A foreign, unsigned binary occupies C:\\Program Files\\Anyray\\anyray-connect.exe. Remove it, then re-run the install.';
 const failedAction = 'Action ended 19:06:10: SweepMachineState. Return value 3.';
 
-function run(t, text, action = 'Assert-MsiForeignEngineRefusal', encoding = 'utf8') {
+function run(t, text, action, encoding = 'utf8') {
   const dir = mkdtempSync(join(tmpdir(), 'msi-diagnostics-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const log = join(dir, 'install.log');
@@ -21,47 +22,6 @@ function run(t, text, action = 'Assert-MsiForeignEngineRefusal', encoding = 'utf
     `$ErrorActionPreference = 'Stop'; . $env:MSI_TEST_HELPER; ${action} -Path $env:MSI_TEST_LOG`,
   ], { encoding: 'utf8', env: { ...process.env, MSI_TEST_HELPER: helper, MSI_TEST_LOG: log } });
 }
-
-for (const encoding of ['utf8', 'utf16le']) {
-  test(`accepts the specific refusal and failed action in ${encoding}`, (t) => {
-    const result = run(t, `\uFEFF${refusal}\r\n${failedAction}\r\n`, undefined, encoding);
-    assert.equal(result.status, 0, result.stderr);
-  });
-}
-
-for (const [name, log] of [
-  ['generic 1603', 'MainEngineThread is returning 1603'],
-  ['unrelated action failure', `${refusal}\nAction ended 19:06:10: InstallFiles. Return value 3.`],
-  ['a marker reporting a different cause', `WixQuietExec64:  ANYRAY-CA-ERROR: The Orbit service remains installed.\n${failedAction}`],
-  ['missing log', null],
-]) {
-  test(`rejects ${name}`, (t) => {
-    assert.notEqual(run(t, log).status, 0);
-  });
-}
-
-// Engines before monorepo #2839 print nothing but a CLIXML header: Windows
-// PowerShell serializes its error stream once stderr is redirected, so the
-// cause never reaches the log. That is an old engine, not a wrong cause.
-test('accepts a pre-marker engine with only the failed action, and says so', (t) => {
-  const log = `WixQuietExec64:  #< CLIXML\nWixQuietExec64:  Error 0x80070001: Command line returned an error.\n${failedAction}`;
-  const result = run(t, log);
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /::warning::MSI predates the custom-action failure marker/);
-});
-
-test('a marker outside WixQuietExec output does not count as reported', (t) => {
-  const log = `Property(S): Script = ANYRAY-CA-ERROR: A foreign, unsigned binary occupies\n${failedAction}`;
-  const result = run(t, log);
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /::warning::MSI predates the custom-action failure marker/);
-});
-
-test('accepts a deferred failure after successful action scheduling', (t) => {
-  const log = `Action ended 19:06:09: SweepMachineState. Return value 1.\n${refusal}\nCustomAction SweepMachineState returned actual error code 1603 (note this may not be 100% accurate if translation happened inside sandbox)`;
-  const result = run(t, log);
-  assert.equal(result.status, 0, result.stderr);
-});
 
 test('shows the original failure before a long property dump, with bounded output', (t) => {
   const log = ['Action start 19:06:10: SweepMachineState.', refusal, failedAction,

@@ -43,18 +43,13 @@ if (process.argv.includes('--record-single')) {
       assert.ok(i, 'inference Deployment');
       assert.match(g, /replicas: 2/);
       assert.ok(doc(s, 'PodDisruptionBudget', 'anyray-gateway'));
-      assert.equal(i.match(/          image: (.*)/)?.[1], g.match(/          image: (.*)/)?.[1]);
-      for (const probe of ['readiness', 'startup', 'liveness']) {
-        const pattern = new RegExp(`          ${probe}Probe:([\\s\\S]*?)(?=          [a-zA-Z#]|$)`);
-        assert.equal(i.match(pattern)?.[1], g.match(pattern)?.[1]);
-      }
       assert.match(i, /args: \["node", "build\/start-server.js", "--inference-only"\]/);
       const env = d => d.match(/          env:([\s\S]*?)          ports:/)?.[1];
       assert.equal(env(i), env(g));
       for (const name of readFileSync('ci/critical-gateway-env.txt', 'utf8').split('\n').map(v => v.trim()).filter(v => v && !v.startsWith('#'))) {
         assert.ok(env(i).includes(`name: ${name}\n`), name);
       }
-      assert.doesNotMatch(i, /volumeMounts:|volumes:/);
+      assert.doesNotMatch(i, /persistentVolumeClaim/);
       assert.match(i, /terminationGracePeriodSeconds: 120/);
       assert.match(i, /preStop:/);
       assert.ok(doc(s, 'PodDisruptionBudget', 'anyray-inference'));
@@ -66,6 +61,16 @@ if (process.argv.includes('--record-single')) {
     const r = spawnSync('helm', [...base, ...args([...split, 'inference.terminationGracePeriodSeconds=90'])], { encoding: 'utf8' });
     assert.notEqual(r.status, 0, 'inference must budget the 90 second gateway drain');
     assert.match(r.stderr, /drain/);
+  });
+  test('split inference pod matches the gateway pod apart from identity, args and replicas', () => {
+    const volumes = ['gateway.extraVolumes[0].name=ca', 'gateway.extraVolumes[0].secret.secretName=ca', 'gateway.extraVolumeMounts[0].name=ca', 'gateway.extraVolumeMounts[0].mountPath=/etc/anyray/ca'];
+    const strip = d => d.split('\n').filter(l => !/^\s*#/.test(l) && !/^  replicas: /.test(l) && !l.includes('args: ["node", "build/start-server.js", "--inference-only"]')).join('\n')
+      .replaceAll('anyray-inference', 'anyray-gateway').replaceAll('component: inference', 'component: gateway').replace('        - name: inference\n', '        - name: gateway\n');
+    for (const extra of [[], optional, volumes]) {
+      const s = render([...split, ...extra]);
+      assert.equal(strip(doc(s, 'Deployment', 'anyray-inference')), strip(doc(s, 'Deployment', 'anyray-gateway')), extra.join(' '));
+    }
+    assert.match(doc(render(split), 'HorizontalPodAutoscaler', 'anyray-inference'), /minReplicas: 2/);
   });
   test('split routes', () => {
     const edge = JSON.parse(readFileSync('helm/files/edgeRoutes.json', 'utf8'));
@@ -93,6 +98,12 @@ if (process.argv.includes('--record-single')) {
         if (r.timeouts) assert.match(b, /request: 0s/);
       }
     }
+  });
+  test('split inference HTTPRoute sends unmatched paths to inference', () => {
+    const h = render(['topology=split', 'inference.host=inference.anyray.example.com', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway']);
+    const last = doc(h, 'HTTPRoute', 'anyray-inference').split('    - matches:').at(-1);
+    assert.match(last, /type: PathPrefix\n\s+value: \/\n/);
+    assert.match(last, /name: gateway-inference\n/);
   });
   test('split updater pins inference using gateway resolver', () => {
     const s = render([...split, 'image.tag=policy-stable']);

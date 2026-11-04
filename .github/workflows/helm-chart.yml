@@ -30,6 +30,12 @@ on:
       - 'tests/fixtures/topology/**'
       - '.github/workflows/helm-chart.yml'
   pull_request:
+    paths:
+      - 'helm/**'
+      - 'tests/autoupdate-pin.test.mjs'
+      - 'tests/helm-topology.test.mjs'
+      - 'tests/fixtures/topology/**'
+      - '.github/workflows/helm-chart.yml'
   workflow_dispatch:
 
 # Read-only: the chart job only checks out the repo and runs helm lint/template.

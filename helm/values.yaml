@@ -4,7 +4,7 @@ inference:
   host: ""
   replicas: 2
   autoscaling:
-    enabled: false
+    enabled: true
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
@@ -28,8 +28,6 @@ inference:
   # livenessProbe: {enabled: true, periodSeconds: 10, failureThreshold: 6}
   # preStopDrainSeconds: 15
   # terminationGracePeriodSeconds: 120
-  podSecurityContext: {}
-  containerSecurityContext: {}
 
 # Anyray Helm chart values.
 # Run setup.sh --k8s --connect <adt_token> to generate the Secret and a starter

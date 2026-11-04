@@ -24,12 +24,17 @@ spec:
     metadata:
       {{- include "anyray.podMetadata" (dict "component" "inference" "context" .) | nindent 6 }}
     spec:
-      {{- include "anyray.podSpecCommon" (dict "component" "inference" "context" .) | nindent 6 }}
+      {{- /* Security follows the gateway: same image, same entrypoint, same env. */}}
+      {{- include "anyray.podSpecCommonNoSecurity" (dict "component" "inference" "context" .) | nindent 6 }}
+      {{- with (include "anyray.securityContextFor" (dict "key" "podSecurityContext" "args" (dict "component" "gateway" "context" .)) | fromYaml) }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: inference
           image: {{ include "anyray.image" (dict "component" "gateway" "context" .) }}
           imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "gateway" "context" .) }}
-          {{- include "anyray.containerSecurityContext" (dict "component" "inference" "context" .) | nindent 10 }}
+          {{- include "anyray.containerSecurityContext" (dict "component" "gateway" "context" .) | nindent 10 }}
           args: ["node", "build/start-server.js", "--inference-only"]
           env:
             {{- include "anyray.gatewayEnv" . | trimPrefix "\n" | nindent 12 }}
@@ -47,6 +52,18 @@ spec:
           {{- include "anyray.preStopDrain" (dict "component" "inference" "context" .) | nindent 10 }}
           resources:
             {{- toYaml .Values.inference.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- with .Values.gateway.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        {{- with .Values.gateway.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        - name: data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

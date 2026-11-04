@@ -94,5 +94,13 @@ spec:
           port: 8787
     {{- end }}
     {{- end }}
+    {{- $fallback := last (last $edge.httpRoute).matches }}
+    - matches:
+        - path:
+            type: {{ $fallback.path.type }}
+            value: {{ $fallback.path.value }}
+      backendRefs:
+        - name: gateway-inference
+          port: 8787
 {{- end }}
 {{- end }}

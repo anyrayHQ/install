@@ -1409,7 +1409,10 @@ source or GitHub App credential:
   leaves a separately installed and loaded foreign Fleet agent, receipt, and
   `/usr/local/bin/orbit` symlink untouched; it then exercises the real desktop
   install, GUI migration smoke, symlink/helpers, and uninstall. Teardown
-  follows the signed smoke with `always()`.
+  follows the signed smoke with `always()`. Installer writes pkg script output
+  only to `/var/log/install.log`, so when the root smoke fails the job prints
+  the scripts' lines from that run, each account's last per-user uninstall
+  result and the Anyray processes still running (`scripts/pkg-diagnostics.sh`).
   The Mac host is reused inside its paid 24h window, so the signing job
   deletes its keychain and key files in an `always()` step and the build
   never sees a secret.

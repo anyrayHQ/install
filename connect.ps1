@@ -12,33 +12,77 @@
     irm https://app.anyray.ai/connect.ps1 | iex
 
   Downloads the standalone `anyray-connect.exe` (no Node, nothing to install)
-  from the public install repo's latest release, verifies its checksum, and runs
-  it — pointing Claude Code / Codex at the Anyray gateway. Flags after the URL
-  pass straight through (e.g. --subscription, --user, --dry-run).
+  from the latest release, verifies its checksum, and runs it — pointing
+  Claude Code / Codex at the Anyray gateway. Flags after the URL pass straight
+  through (e.g. --subscription, --user, --dry-run).
 #>
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repo  = 'anyrayHQ/install'
-# Which release to install from. Unset — every customer — is `latest`, exactly
-# as before. $env:ANYRAY_CONNECT_TAG pins a specific release so a staging build
-# (published --latest=false, so `latest` can never reach it) is testable through
-# the same command a developer actually runs. See connect.sh for the full
-# rationale; the two must stay in step.
+# Where releases come from, in order. Anyray's mirror first, so a network that
+# blocks GitHub can still install; it serves every GitHub release byte for byte
+# under the same <tag>/<asset> key. GitHub is tried only when the mirror does
+# not answer. Both are fixed here: nothing in the environment can point the
+# download at another host. See connect.sh; the two must stay in step.
+$mirror = 'https://app.anyray.ai/connect/dl'
+$githubDownload = "https://github.com/$repo/releases/download"
+
+# The current release, from the mirror's pointer (latest.json). Returns its tag,
+# or '' when the mirror is not serving, which means GitHub's `latest`: no
+# answer, an HTTP error, or an answer that is not a pointer at all (not
+# application/json, not a JSON object, no schemaVersion; for example the
+# console's HTML page before /connect/dl/ is routed). A pointer the mirror DOES
+# serve must name a release, or this throws: a broken pointer is not a reason
+# to go elsewhere. The short timeout keeps a blackholed host from stalling the
+# install.
+function Get-AnyrayPointerTag {
+  param([Parameter(Mandatory = $true)][string] $Mirror)
+  try {
+    $request = [System.Net.WebRequest]::Create("$Mirror/latest.json")
+    $request.UserAgent = 'anyray-connect-installer'
+    $request.Timeout = 10000
+    $request.ReadWriteTimeout = 20000
+    $response = $request.GetResponse()
+    try {
+      $contentType = [string]$response.ContentType
+      $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+      try { $body = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally { $response.Close() }
+  } catch {
+    return ''
+  }
+  if ($contentType -notmatch '^\s*application/json\s*(;|$)') { return '' }
+  # A JSON object carrying schemaVersion, checked on the text exactly as
+  # connect.sh does (it has no JSON parser), so the two scripts agree.
+  $flat = $body -replace '\s', ''
+  if (-not ($flat.StartsWith('{') -and $flat.EndsWith('}'))) { return '' }
+  if (-not $flat.Contains('"schemaVersion":')) { return '' }
+  # Anchored by both quotes, so `connect-v1.2.3/../x` cannot match.
+  $found = [regex]::Match($body, '"tag"\s*:\s*"(connect-v[0-9]+\.[0-9]+\.[0-9]+)"')
+  if (-not $found.Success) {
+    throw "the release pointer $Mirror/latest.json names no release - retry, or use: npx anyray-connect <url>"
+  }
+  return $found.Groups[1].Value
+}
+
+# Which release to install from. Unset — every customer — is the current
+# release: the one the mirror's pointer names, or GitHub's `latest` when the
+# mirror does not answer. $env:ANYRAY_CONNECT_TAG pins a specific release so a
+# staging build (published --latest=false, so `latest` can never reach it) is
+# testable through the same command a developer actually runs. See connect.sh
+# for the full rationale; the two must stay in step.
 #
-# Selects a release, never relaxes verification: $repo is fixed, so the download
-# cannot be pointed at another host, and the checksum block below is unchanged.
-# The value is regex-anchored because it lands in a URL path — an unvalidated
-# tag containing `../` would walk out of /releases/download.
+# Selects a release, never relaxes verification: the hosts are fixed, so the
+# download cannot be pointed elsewhere, and the checksum block below is
+# unchanged. The value is regex-anchored because it lands in a URL path — an
+# unvalidated tag containing `../` would walk out of /releases/download.
 $tag = $env:ANYRAY_CONNECT_TAG
 if ($tag) {
   if ($tag -notmatch '^connect(-staging)?-v[0-9]+\.[0-9]+\.[0-9]+$') {
     Write-Error "invalid ANYRAY_CONNECT_TAG '$tag' - expected connect-v<x.y.z> or connect-staging-v<x.y.z>"
   }
-  $base = "https://github.com/$repo/releases/download/$tag"
   Write-Host "anyray-connect: pinned to release $tag (not latest)"
-} else {
-  $base = "https://github.com/$repo/releases/latest/download"
 }
 $asset = 'anyray-connect-windows-x64.exe'  # Bun compiles a single x64 Windows target
 
@@ -57,7 +101,7 @@ if ($connectArgs.Count -eq 0 -and $env:ANYRAY_CONNECT) {
 # one shot: a proxy, a VPN or a flaky link that drops the connection mid-transfer
 # ends enrollment with "The request was aborted: The connection was closed
 # unexpectedly" and keeps none of what already arrived, so a retry pays for the
-# whole file again and can lose the same way. GitHub's release-asset host answers
+# whole file again and can lose the same way. Both release hosts answer
 # `accept-ranges: bytes`, so each attempt below resumes from the bytes on disk.
 # Resuming is safe only because the SHA-256 check further down is unconditional:
 # a spliced or truncated file fails closed there, exactly like a corrupt
@@ -67,7 +111,11 @@ function Get-AnyrayDownload {
   param(
     [Parameter(Mandatory = $true)][string] $Uri,
     [Parameter(Mandatory = $true)][string] $OutFile,
-    [int] $Attempts = 4
+    [int] $Attempts = 4,
+    [int] $TimeoutMs = 60000,
+    # The mirror answers an HTML page where it does not serve a file (the
+    # console before /connect/dl/ is routed): that host has no release here.
+    [switch] $RejectHtml
   )
   $lastError = $null
   for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
@@ -75,7 +123,7 @@ function Get-AnyrayDownload {
     try {
       $request = [System.Net.WebRequest]::Create($Uri)
       $request.UserAgent = 'anyray-connect-installer'
-      $request.Timeout = 60000
+      $request.Timeout = $TimeoutMs
       $request.ReadWriteTimeout = 300000
       if ($have -gt 0) { $request.AddRange($have) }
       try {
@@ -89,6 +137,10 @@ function Get-AnyrayDownload {
         if ($_.Exception.Response) { $status = $_.Exception.Response.StatusCode }
         if ($have -gt 0 -and $status -eq [System.Net.HttpStatusCode]::RequestedRangeNotSatisfiable) { return }
         throw
+      }
+      if ($RejectHtml -and ([string]$response.ContentType) -match '^\s*text/html') {
+        $response.Close()
+        throw "$Uri is an HTML page, not a release file"
       }
       try {
         # A host that ignores Range answers 200 with the WHOLE body; appending
@@ -108,6 +160,52 @@ function Get-AnyrayDownload {
     }
   }
   throw $lastError
+}
+
+# The bases to try for a tag, in order: the mirror, then GitHub. No tag (the
+# mirror did not answer) leaves GitHub's `latest` alone.
+function Get-AnyrayBases {
+  param(
+    [string] $Tag,
+    [Parameter(Mandatory = $true)][string] $Mirror,
+    [Parameter(Mandatory = $true)][string] $GithubDownload,
+    [Parameter(Mandatory = $true)][string] $Repo
+  )
+  if ($Tag) { return @("$Mirror/$Tag", "$GithubDownload/$Tag") }
+  Write-Host "anyray-connect: $Mirror did not answer; using github.com" -ForegroundColor Yellow
+  return @("https://github.com/$Repo/releases/latest/download")
+}
+
+# One host at a time: its SHA256SUMS, then the asset, both from that base, so
+# the checksum below always describes bytes from the host that published them
+# (the hosts can briefly disagree about a release). A host that does not answer
+# (a network error or an HTTP error) hands over to the next. Nothing here looks
+# at a checksum, so a mismatch can never send the download elsewhere. Returns
+# the base both files came from.
+function Get-AnyrayRelease {
+  param(
+    [Parameter(Mandatory = $true)][string[]] $Bases,
+    [Parameter(Mandatory = $true)][string] $Mirror,
+    [Parameter(Mandatory = $true)][string] $Asset,
+    [Parameter(Mandatory = $true)][string] $OutFile,
+    [Parameter(Mandatory = $true)][string] $SumsFile
+  )
+  foreach ($candidate in $Bases) {
+    Remove-Item -LiteralPath $OutFile, $SumsFile -Force -ErrorAction SilentlyContinue
+    try {
+      if ($candidate.StartsWith("$Mirror/", [System.StringComparison]::Ordinal)) {
+        Get-AnyrayDownload -Uri "$candidate/SHA256SUMS" -OutFile $SumsFile -Attempts 2 -TimeoutMs 5000 -RejectHtml
+      } else {
+        Get-AnyrayDownload -Uri "$candidate/SHA256SUMS" -OutFile $SumsFile -Attempts 3
+      }
+      Write-Host "anyray-connect: downloading $Asset..." -ForegroundColor Cyan
+      Get-AnyrayDownload -Uri "$candidate/$Asset" -OutFile $OutFile
+      return $candidate
+    } catch {
+      Write-Host "anyray-connect: could not download from $candidate" -ForegroundColor Yellow
+    }
+  }
+  throw "download failed from every release host - check your connection or use: npx anyray-connect <url>"
 }
 
 # Put the downloaded exe at the stable path, even when the copy already there is
@@ -195,24 +293,19 @@ New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 $dl = Join-Path $tmp 'anyray-connect.exe'
 
 try {
-  Write-Host "anyray-connect: downloading $asset..." -ForegroundColor Cyan
-  Get-AnyrayDownload -Uri "$base/$asset" -OutFile $dl
-
-  # Verify the checksum from the same release. Every step here fails CLOSED, with
-  # no bypass flag or env var: the exe below installs a Claude Code PostToolUse
-  # hook that then runs on every tool call, so an unverified download is a
-  # persistent code-execution foothold, not a one-off. Skipping verification when
-  # something is merely *missing* hands that foothold to anyone who can make one
-  # request fail. The SHA256SUMS download stays in a catch-all only because the
-  # error type differs by host (pwsh's HttpResponseException vs Windows
-  # PowerShell's WebException); it now RETHROWS instead of continuing. A genuine
-  # checksum MISMATCH is still thrown OUTSIDE any catch.
+  if (-not $tag) { $tag = Get-AnyrayPointerTag -Mirror $mirror }
+  $bases = Get-AnyrayBases -Tag $tag -Mirror $mirror -GithubDownload $githubDownload -Repo $repo
   $sumsPath = Join-Path $tmp 'SHA256SUMS'
-  try {
-    Get-AnyrayDownload -Uri "$base/SHA256SUMS" -OutFile $sumsPath -Attempts 3
-  } catch {
-    throw "could not fetch the checksums ($base/SHA256SUMS) - refusing to run an unverified $asset; retry, or use: npx anyray-connect <url>"
-  }
+  $base = Get-AnyrayRelease -Bases $bases -Mirror $mirror -Asset $asset -OutFile $dl -SumsFile $sumsPath
+
+  # Verify the checksum from the same release and host. Every step here fails
+  # CLOSED, with no bypass flag or env var: the exe below installs a Claude Code
+  # PostToolUse hook that then runs on every tool call, so an unverified download
+  # is a persistent code-execution foothold, not a one-off. Skipping verification
+  # when something is merely *missing* hands that foothold to anyone who can make
+  # one request fail: a host whose SHA256SUMS cannot be fetched is a host that did
+  # not answer, and no host answering is an error above. A genuine checksum
+  # MISMATCH is thrown OUTSIDE any catch and never tries the other host.
   $want = (Get-Content $sumsPath | ForEach-Object {
     $p = $_ -split '\s+'
     if ($p.Length -ge 2 -and ($p[1].TrimStart('*') -eq $asset)) { $p[0] }
@@ -222,7 +315,7 @@ try {
   # fall through: an unusable hash is an error, never a skipped check.
   $got = (Get-FileHash -Algorithm SHA256 -Path $dl).Hash
   if (-not $got) { throw "could not compute the SHA-256 of $asset - refusing to run an unverified binary; use: npx anyray-connect <url>" }
-  if ($got.ToLower() -ne $want.ToLower()) { throw "checksum mismatch for $asset - refusing to run" }
+  if ($got.ToLower() -ne $want.ToLower()) { throw "checksum mismatch for $asset from $base - refusing to run" }
 
   # Install to a PERSISTENT location, then run from there. anyray-connect installs
   # a Claude Code PostToolUse hook that references this exe by absolute path on

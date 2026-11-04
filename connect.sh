@@ -5,13 +5,21 @@
 #   curl -fsSL https://app.anyray.ai/connect.sh | sh -s -- --managed
 #
 # Downloads the standalone `anyray-connect` binary (no Node, nothing to install)
-# for your OS/arch from the public install repo's latest release, verifies its
-# checksum, and runs it — pointing your local AI coding tools (Claude Code,
-# Codex, …) at the Anyray gateway. All flags after the URL pass straight through
-# to anyray-connect (e.g. --subscription, --user, --dry-run).
+# for your OS/arch from the latest release, verifies its checksum, and runs it —
+# pointing your local AI coding tools (Claude Code, Codex, …) at the Anyray
+# gateway. All flags after the URL pass straight through to anyray-connect
+# (e.g. --subscription, --user, --dry-run).
 set -eu
 
 REPO="anyrayHQ/install"
+# Where releases come from, in order. Anyray's mirror first, so a network that
+# blocks GitHub can still install; it serves every GitHub release byte for byte
+# under the same <tag>/<asset> key. GitHub is tried only when the mirror does
+# not answer. Both are fixed here: nothing in the environment can point the
+# download at another host.
+MIRROR="https://app.anyray.ai/connect/dl"
+GITHUB_DOWNLOAD="https://github.com/${REPO}/releases/download"
+
 MANAGED_INSTALL=0
 if [ "${1:-}" = "--managed" ]; then
   MANAGED_INSTALL=1
@@ -20,8 +28,11 @@ fi
 
 err() { echo "anyray-connect: $*" >&2; exit 1; }
 
+command -v curl >/dev/null 2>&1 || err "curl is required"
+
 # Which release to install from. Unset — the only thing a customer ever hits —
-# is `latest`, byte-for-byte the behaviour this script has always had.
+# is the current release: the one the mirror's pointer names, or GitHub's
+# `latest` when the mirror does not answer.
 #
 # $ANYRAY_CONNECT_TAG pins a specific release instead, which is what makes a
 # staging build reachable through the SAME command a developer really runs:
@@ -58,36 +69,76 @@ _tag_bad() {
   err "invalid ANYRAY_CONNECT_TAG '${ANYRAY_CONNECT_TAG}' — expected connect-v<x.y.z> or connect-staging-v<x.y.z>"
 }
 _digits_only() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac; }
-if [ -n "${ANYRAY_CONNECT_TAG:-}" ]; then
-  case "$ANYRAY_CONNECT_TAG" in
-    connect-staging-v*) _ver="${ANYRAY_CONNECT_TAG#connect-staging-v}" ;;
-    connect-v*)         _ver="${ANYRAY_CONNECT_TAG#connect-v}" ;;
-    *) _tag_bad ;;
+tag_ok() {
+  case "$1" in
+    connect-staging-v*) _ver="${1#connect-staging-v}" ;;
+    connect-v*)         _ver="${1#connect-v}" ;;
+    *) return 1 ;;
   esac
   # Exactly two dots: `*.*.*` needs at least two, excluding `*.*.*.*` caps it.
   case "$_ver" in
-    *.*.*.*) _tag_bad ;;
+    *.*.*.*) return 1 ;;
     *.*.*) ;;
-    *) _tag_bad ;;
+    *) return 1 ;;
   esac
   _major="${_ver%%.*}"; _tail="${_ver#*.}"
   _minor="${_tail%%.*}"; _patch="${_tail#*.}"
   for _part in "$_major" "$_minor" "$_patch"; do
-    _digits_only "$_part" || _tag_bad
+    _digits_only "$_part" || return 1
   done
   # Belt and braces. All-digit components make `..`, `/` and shell
   # metacharacters structurally impossible above, so this is redundant TODAY —
   # kept because it is two lines, this string is pasted into a URL that a
   # `curl | sh` then executes from, and the check must survive a future edit
   # that loosens the parse without thinking about traversal.
-  case "$ANYRAY_CONNECT_TAG" in *..*|*/*) _tag_bad ;; esac
-  BASE="https://github.com/${REPO}/releases/download/${ANYRAY_CONNECT_TAG}"
-  echo "anyray-connect: pinned to release ${ANYRAY_CONNECT_TAG} (not latest)" >&2
-else
-  BASE="https://github.com/${REPO}/releases/latest/download"
-fi
+  case "$1" in *..*|*/*) return 1 ;; esac
+  return 0
+}
 
-command -v curl >/dev/null 2>&1 || err "curl is required"
+# The current release, from the mirror's pointer (latest.json). Prints its tag,
+# or nothing when the mirror is not serving, which means GitHub's `latest`:
+# no answer, an HTTP error, or an answer that is not a pointer at all (not
+# application/json, not a JSON object, no schemaVersion; for example the
+# console's HTML page before /connect/dl/ is routed). A pointer the mirror DOES
+# serve must name a release, or this fails: a broken pointer is not a reason to
+# go elsewhere. The short connect timeout keeps a blackholed host from
+# stalling the install.
+pointer_tag() {
+  _resp="$(curl -fsSL --proto '=https' --connect-timeout 5 --max-time 20 \
+    -w '\n%{content_type}' "${MIRROR}/latest.json" 2>/dev/null)" || return 0
+  _ctype="$(printf '%s\n' "$_resp" | tail -n 1 | tr '[:upper:]' '[:lower:]')"
+  _pointer="$(printf '%s\n' "$_resp" | sed '$d')"
+  case "$_ctype" in application/json|application/json\;*) ;; *) return 0 ;; esac
+  # A JSON object carrying schemaVersion; anything else is not a pointer.
+  _flat="$(printf '%s' "$_pointer" | tr -d '[:space:]')"
+  case "$_flat" in \{*\}) ;; *) return 0 ;; esac
+  case "$_flat" in *'"schemaVersion":'*) ;; *) return 0 ;; esac
+  _tag="$(printf '%s\n' "$_pointer" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  case "$_tag" in connect-v*) ;; *) return 1 ;; esac
+  tag_ok "$_tag" || return 1
+  printf '%s\n' "$_tag"
+}
+
+# The bases to try for a tag, in order: the mirror, then GitHub. No tag (the
+# mirror did not answer) leaves GitHub's `latest` alone.
+release_bases() {
+  if [ -n "$1" ]; then
+    printf '%s\n' "${MIRROR}/$1 ${GITHUB_DOWNLOAD}/$1"
+  else
+    echo "anyray-connect: ${MIRROR} did not answer; using github.com" >&2
+    printf '%s\n' "https://github.com/${REPO}/releases/latest/download"
+  fi
+}
+
+if [ -n "${ANYRAY_CONNECT_TAG:-}" ]; then
+  tag_ok "$ANYRAY_CONNECT_TAG" || _tag_bad
+  TAG="$ANYRAY_CONNECT_TAG"
+  echo "anyray-connect: pinned to release ${TAG} (not latest)" >&2
+else
+  TAG="$(pointer_tag)" \
+    || err "the release pointer ${MIRROR}/latest.json names no release — retry, or use: npx anyray-connect <url>"
+fi
+BASES="$(release_bases "$TAG")"
 
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -116,11 +167,11 @@ dl="${tmp}/anyray-connect"
 # Resume, don't restart. The binary is ~100 MB, and a proxy, VPN or flaky link
 # that drops the connection mid-transfer ends enrollment outright: curl reports
 # error 18 (transfer closed with N bytes remaining) and does NOT retry that even
-# under --retry, so one bad minute costs the whole download. GitHub's
-# release-asset host answers `accept-ranges: bytes`, so `--continue-at -` picks
-# up from the bytes already on disk. Resuming is safe only because the SHA-256
-# check below is unconditional: a spliced or truncated file fails closed there,
-# exactly like a corrupt single-shot download.
+# under --retry, so one bad minute costs the whole download. Both release hosts
+# answer `accept-ranges: bytes`, so `--continue-at -` picks up from the bytes
+# already on disk. Resuming is safe only because the SHA-256 check below is
+# unconditional: a spliced or truncated file fails closed there, exactly like a
+# corrupt single-shot download.
 #
 # Every branch is a full if/then: under `set -e` a bare `[ x ] && cmd` that tests
 # false is a failing last command, which would exit the installer outright.
@@ -140,20 +191,57 @@ download_resumable() {
   done
 }
 
-echo "anyray-connect: downloading ${ASSET}…" >&2
-download_resumable "${BASE}/${ASSET}" "$dl" 4 \
-  || err "download failed (${BASE}/${ASSET}) — check your connection or use: npx anyray-connect <url>"
+# One host: its SHA256SUMS, then the asset, both from this base, so the
+# checksum below always describes bytes from the host that published them (the
+# hosts can briefly disagree about a release). Returns 1 when the host did not
+# answer (a network error or an HTTP error, or an HTML page from the mirror in
+# place of SHA256SUMS: that host does not serve the release) so the next host
+# is tried. It never looks at a checksum, so a mismatch can never send the
+# download elsewhere.
+fetch_from() {
+  _base="$1"; _connect="$2"; _retries="$3"
+  rm -f "${tmp}/SHA256SUMS" "$dl"
+  _sums_type="$(curl -fsSL --proto '=https' --connect-timeout "$_connect" --retry "$_retries" --retry-delay 1 \
+    -w '%{content_type}' "${_base}/SHA256SUMS" -o "${tmp}/SHA256SUMS")" || return 1
+  case "$_base" in
+    "$MIRROR"/*)
+      case "$(printf '%s' "$_sums_type" | tr '[:upper:]' '[:lower:]')" in text/html*) return 1 ;; esac
+      ;;
+  esac
+  echo "anyray-connect: downloading ${ASSET}…" >&2
+  download_resumable "${_base}/${ASSET}" "$dl" 4 || return 1
+}
 
-# Verify the checksum from the same release. Every step here fails CLOSED, with
-# no bypass flag or env var: the binary below installs a Claude Code PostToolUse
-# hook that then runs on every tool call, so an unverified download is a
-# persistent code-execution foothold, not a one-off. Skipping verification when
-# something is merely *missing* hands that foothold to anyone who can make one
-# request fail — dropping just the SHA256SUMS fetch used to disable the check
-# entirely. A missing sums file, a missing entry, or a missing hash tool are all
-# hard errors; npm (npx) is the fallback, and it verifies via the registry.
-curl -fsSL --proto '=https' --retry 3 --retry-delay 1 "${BASE}/SHA256SUMS" -o "${tmp}/SHA256SUMS" \
-  || err "could not fetch the checksums (${BASE}/SHA256SUMS) — refusing to run an unverified ${ASSET}; retry, or use: npx anyray-connect <url>"
+# Try each base in order; sets BASE to the one that answered.
+fetch_release() {
+  BASE=""
+  for _candidate in $1; do
+    case "$_candidate" in
+      "$MIRROR"/*) _ct=5; _rt=1 ;;
+      *) _ct=30; _rt=3 ;;
+    esac
+    if fetch_from "$_candidate" "$_ct" "$_rt"; then
+      BASE="$_candidate"
+      return 0
+    fi
+    echo "anyray-connect: could not download from ${_candidate}" >&2
+  done
+  return 1
+}
+
+fetch_release "$BASES" \
+  || err "download failed from every release host — check your connection or use: npx anyray-connect <url>"
+
+# Verify the checksum from the same release and host. Every step here fails
+# CLOSED, with no bypass flag or env var: the binary below installs a Claude
+# Code PostToolUse hook that then runs on every tool call, so an unverified
+# download is a persistent code-execution foothold, not a one-off. Skipping
+# verification when something is merely *missing* hands that foothold to anyone
+# who can make one request fail — dropping just the SHA256SUMS fetch used to
+# disable the check entirely. A missing sums file, a missing entry, or a missing
+# hash tool are all hard errors; npm (npx) is the fallback, and it verifies via
+# the registry. A mismatch never tries the other host: different bytes from
+# somewhere else would not make these right.
 
 want="$(awk -v a="$ASSET" '$2==a || $2=="*"a {print $1}' "${tmp}/SHA256SUMS" | head -n1)"
 [ -n "$want" ] || err "no SHA256SUMS entry for ${ASSET} — refusing to run an unverified binary; use: npx anyray-connect <url>"
@@ -166,7 +254,7 @@ else
   err "no SHA-256 tool found (install coreutils for sha256sum, or perl for shasum) — cannot verify ${ASSET}; use: npx anyray-connect <url>"
 fi
 [ -n "$got" ] || err "could not compute the SHA-256 of ${ASSET} — refusing to run an unverified binary; use: npx anyray-connect <url>"
-[ "$got" = "$want" ] || err "checksum mismatch for ${ASSET} — refusing to run"
+[ "$got" = "$want" ] || err "checksum mismatch for ${ASSET} from ${BASE} — refusing to run"
 
 # Install to a PERSISTENT location, then run from there. anyray-connect installs
 # a Claude Code PostToolUse hook that references this binary by absolute path on

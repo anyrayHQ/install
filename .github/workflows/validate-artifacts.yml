@@ -434,6 +434,9 @@ jobs:
         run: python3 ci/test-quicklaunch-updater.py
       - name: SecretFn db-url contract (follows the RDS master rotation)
         run: python3 ci/test-quicklaunch-dburl.py
+      # Runs the drain script under node (preinstalled on ubuntu-latest).
+      - name: Stop drain contract (Cloud Map callers survive a roll)
+        run: python3 ci/test-quicklaunch-drain.py
       - name: Template stays within CloudFormation size limits
         run: |
           set -euo pipefail

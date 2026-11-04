@@ -1849,6 +1849,48 @@ Resources:
               awslogs-group: !Ref OptimizerLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: optimizer
+        # Stop drain (ANY-2048). ECS drops a stopping task from Cloud Map and
+        # signals it in the same moment, with no drain of its own (an ALB target
+        # group has one; Cloud Map does not). Callers keep the old IP until their
+        # DNS cache expires: record TTL 10s, plus the proxy's nginx
+        # `resolver valid=10s`. The app stops listening on SIGTERM, so every
+        # roll used to fail those calls: gateway -> optimizer-dns fell open
+        # (and busted that session's prompt cache), proxy -> gateway-dns
+        # answered 502. This container depends on the app container, and ECS
+        # stops containers in reverse dependency order, so it takes the stop
+        # signal first and holds the task for drainMs while the app keeps
+        # serving. Only then does the app get SIGTERM and run its own drain.
+        # Same image as the app, so the updater moves both tags together and
+        # nothing extra is pulled; `node` is on PATH in both images (the
+        # optimizer image has no shell to run a sleep). Non-essential: if it
+        # ever exits early, the task keeps running, just without the drain.
+        # ci/test-quicklaunch-drain.py holds drainMs above the DNS window and
+        # StopTimeout above drainMs.
+        - Name: drain
+          Image: !Sub 'public.ecr.aws/anyray/optimizer:${ImageTag}'
+          Essential: false
+          DependsOn:
+            - { ContainerName: optimizer, Condition: START }
+          StopTimeout: 45
+          EntryPoint: [node, -e]
+          Command:
+            - |
+              const drainMs = 30000;
+              let timer;
+              for (const signal of ['SIGTERM', 'SIGINT', 'SIGQUIT']) {
+                process.on(signal, () => {
+                  if (timer) return;
+                  console.log(`stop signal ${signal}: holding the task ${drainMs / 1000}s for Cloud Map callers`);
+                  timer = setTimeout(() => process.exit(0), drainMs);
+                });
+              }
+              setInterval(() => {}, 1 << 30);
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref OptimizerLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: drain
 
   GatewayTask:
     Type: AWS::ECS::TaskDefinition
@@ -1949,6 +1991,34 @@ Resources:
               awslogs-group: !Ref GatewayLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: gateway
+        # Stop drain (ANY-2048): see OptimizerTask's drain container. This one
+        # covers the console proxy, which reaches the gateway through
+        # gateway-dns.
+        - Name: drain
+          Image: !Sub 'public.ecr.aws/anyray/gateway:${ImageTag}'
+          Essential: false
+          DependsOn:
+            - { ContainerName: gateway, Condition: START }
+          StopTimeout: 45
+          EntryPoint: [node, -e]
+          Command:
+            - |
+              const drainMs = 30000;
+              let timer;
+              for (const signal of ['SIGTERM', 'SIGINT', 'SIGQUIT']) {
+                process.on(signal, () => {
+                  if (timer) return;
+                  console.log(`stop signal ${signal}: holding the task ${drainMs / 1000}s for Cloud Map callers`);
+                  timer = setTimeout(() => process.exit(0), drainMs);
+                });
+              }
+              setInterval(() => {}, 1 << 30);
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref GatewayLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: drain
 
   ProxyTask:
     Type: AWS::ECS::TaskDefinition

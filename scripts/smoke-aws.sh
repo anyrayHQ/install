@@ -24,8 +24,10 @@
 #
 # Probes (per round):
 #   1. GET :3000/console/ unauthenticated → 200 sign-in page, NOT an nginx 500.
-#   2. GET :3000/console/ with the admin cookie → 200 (console SPA).
-#   3. GET :3000/admin/health through the proxy → 200 (proxy→gateway seam).
+#   2. POST :3000/admin/auth/login with the admin key → an anyray_admin_session
+#      cookie, then GET :3000/console/ with it → 200 (console SPA).
+#   3. GET :3000/admin/health through the proxy with that session → 200
+#      (proxy→gateway seam).
 #   4. scripts/verify-deploy.sh against :8787 (deep per-leg health).
 #
 # Required env: TEMPLATE, LANE, VPC_ID, SUBNET_A, SUBNET_B, DEPLOYMENT_TOKEN
@@ -120,12 +122,26 @@ probe() {
   printf '%s' "$body" | grep -qi 'sign in' || {
     echo "::error::[${round}] /console/ is 200 but is not the sign-in page."; return 1; }
 
+  # The console takes the admin key once, at POST /admin/auth/login (JSON
+  # only), and answers with an HttpOnly anyray_admin_session cookie. Since
+  # monorepo #4923 (2026-10-27) the proxy no longer turns an `anyray_key`
+  # cookie into a bearer token, so sending the raw key as a cookie gets a 401.
+  # The key goes in on stdin, never on a command line.
+  local session
+  session="$(jq -Rc '{admin_token: .}' <<<"$token" \
+    | curl -s -o /dev/null -D - --max-time 15 -H 'content-type: application/json' \
+        --data-binary @- "${console}/admin/auth/login" \
+    | tr -d '\r' \
+    | sed -n 's/^[Ss]et-[Cc]ookie: \(anyray_admin_session=[^;]*\).*/\1/p' | head -n 1)"
+  [ -n "$session" ] || {
+    echo "::error::[${round}] POST /admin/auth/login set no anyray_admin_session cookie"; return 1; }
+
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-    -H "Cookie: anyray_key=${token}" "${console}/console/")"
+    -H "Cookie: ${session}" "${console}/console/")"
   [ "$code" = 200 ] || { echo "::error::[${round}] authenticated /console/ → ${code}"; return 1; }
 
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
-    -H "Cookie: anyray_key=${token}" "${console}/admin/health")"
+    -H "Cookie: ${session}" "${console}/admin/health")"
   [ "$code" = 200 ] || { echo "::error::[${round}] /admin/health via proxy → ${code}"; return 1; }
 
   "${HERE}/verify-deploy.sh" "$gateway" "$token"

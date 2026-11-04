@@ -18,9 +18,16 @@ completing the node upgrade. Since chart 0.8.0 every workload defaults to two
 replicas, so all three are covered out of the box.
 */}}
 {{- if .Values.podDisruptionBudget.enabled }}
-{{- range $component := list "gateway" "optimizer" "proxy" }}
+{{- $components := list "gateway" "optimizer" "proxy" }}
+{{- if eq .Values.topology "split" }}
+{{- $components = append $components "inference" }}
+{{- end }}
+{{- range $component := $components }}
 {{- $cfg := index $.Values $component }}
 {{- $fixed := ternary (int (include "anyray.optimizerReplicas" $)) (int $cfg.replicas) (eq $component "optimizer") }}
+{{- if eq $component "gateway" }}
+{{- $fixed = int (include "anyray.gatewayReplicas" $) }}
+{{- end }}
 {{- $floor := ternary (int $cfg.autoscaling.minReplicas) $fixed $cfg.autoscaling.enabled }}
 {{- if gt $floor 1 }}
 {{- /* A budget that permits evicting the whole floor is not a budget: the

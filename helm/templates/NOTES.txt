@@ -33,11 +33,11 @@ Image updates:
 
 Availability of this release:
 {{- if .Values.gateway.persistence.enabled }}
-  gateway    replicas {{ .Values.gateway.replicas }}, Recreate rollout (the ReadWriteOnce data
+  gateway    replicas {{ include "anyray.gatewayReplicas" . }}, Recreate rollout (the ReadWriteOnce data
              volume is enabled, so upgrades have a downtime window and replicas
              cannot go above 1)
 {{- else }}
-  gateway    replicas {{ if .Values.gateway.autoscaling.enabled }}{{ .Values.gateway.autoscaling.minReplicas }}-{{ .Values.gateway.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.gateway.replicas }}{{ end }}, rolling update with maxUnavailable 0
+  gateway    replicas {{ if .Values.gateway.autoscaling.enabled }}{{ .Values.gateway.autoscaling.minReplicas }}-{{ .Values.gateway.autoscaling.maxReplicas }} (HPA){{ else }}{{ include "anyray.gatewayReplicas" . }}{{ end }}, rolling update with maxUnavailable 0
 {{- end }}
   optimizer  replicas {{ if .Values.optimizer.autoscaling.enabled }}{{ .Values.optimizer.autoscaling.minReplicas }}-{{ .Values.optimizer.autoscaling.maxReplicas }} (HPA){{ else }}{{ include "anyray.optimizerReplicas" . }}{{ end }}{{ if .Values.optimizer.persistence.enabled }}, Recreate rollout{{ end }}
   proxy      replicas {{ if .Values.proxy.autoscaling.enabled }}{{ .Values.proxy.autoscaling.minReplicas }}-{{ .Values.proxy.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.proxy.replicas }}{{ end }}
@@ -53,3 +53,8 @@ Availability of this release:
 {{- end }}
 
 Docs: https://docs.anyray.ai
+
+{{- if eq .Values.topology "split" }}
+Inference: https://{{ .Values.inference.host }}/v1
+Management: 2 gateway replicas.
+{{- end }}

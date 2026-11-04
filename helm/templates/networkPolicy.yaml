@@ -66,6 +66,11 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 14 }}
+        {{- if eq .Values.topology "split" }}
+        - podSelector:
+            matchLabels:
+              {{- include "anyray.selectorLabels" (dict "component" "inference" "context" .) | nindent 14 }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: 8088

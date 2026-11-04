@@ -1,0 +1,65 @@
+{{- if eq .Values.topology "split" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anyray.fullname" . }}-inference
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inference
+spec:
+  {{- if not .Values.inference.autoscaling.enabled }}
+  replicas: {{ .Values.inference.replicas }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  {{- include "anyray.minReadySeconds" (dict "component" "inference" "context" .) | nindent 2 }}
+  {{- include "anyray.rolloutMeta" (dict "component" "inference" "context" .) | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "inference" "context" .) | nindent 6 }}
+  template:
+    metadata:
+      {{- include "anyray.podMetadata" (dict "component" "inference" "context" .) | nindent 6 }}
+    spec:
+      {{- include "anyray.podSpecCommon" (dict "component" "inference" "context" .) | nindent 6 }}
+      containers:
+        - name: inference
+          image: {{ include "anyray.image" (dict "component" "gateway" "context" .) }}
+          imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "gateway" "context" .) }}
+          {{- include "anyray.containerSecurityContext" (dict "component" "inference" "context" .) | nindent 10 }}
+          args: ["node", "build/start-server.js", "--inference-only"]
+          env:
+            {{- include "anyray.gatewayEnv" . | trimPrefix "\n" | nindent 12 }}
+          ports:
+            - containerPort: 8787
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8787
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          {{- include "anyray.startupProbe" (dict "component" "inference" "port" 8787 "context" .) | nindent 10 }}
+          {{- include "anyray.livenessProbe" (dict "component" "inference" "port" 8787 "context" .) | nindent 10 }}
+          {{- include "anyray.preStopDrain" (dict "component" "inference" "context" .) | nindent 10 }}
+          resources:
+            {{- toYaml .Values.inference.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-inference
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: inference
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "anyray.selectorLabels" (dict "component" "inference" "context" .) | nindent 4 }}
+  ports:
+    - port: 8787
+      targetPort: 8787
+{{- end }}

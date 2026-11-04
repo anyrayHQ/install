@@ -26,12 +26,10 @@ on:
     paths:
       - 'helm/**'
       - 'tests/autoupdate-pin.test.mjs'
+      - 'tests/helm-topology.test.mjs'
+      - 'tests/fixtures/topology/**'
       - '.github/workflows/helm-chart.yml'
   pull_request:
-    paths:
-      - 'helm/**'
-      - 'tests/autoupdate-pin.test.mjs'
-      - '.github/workflows/helm-chart.yml'
   workflow_dispatch:
 
 # Read-only: the chart job only checks out the repo and runs helm lint/template.
@@ -47,6 +45,9 @@ jobs:
         with:
           version: v3.16.3
           token: ${{ github.token }}
+
+      - name: Single and split topology render checks
+        run: node --test tests/helm-topology.test.mjs
 
       - name: Lint
         run: helm lint helm --set host=anyray.example.com --set postgres.storage=150Gi

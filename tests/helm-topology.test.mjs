@@ -14,6 +14,7 @@ if (process.argv.includes('--record-single')) {
   for (const [name, values] of Object.entries(cases)) writeFileSync(`tests/fixtures/topology/${name}.yaml`, normalize(render(values)));
 } else {
   for (const [name, values] of Object.entries(cases)) test(`single golden: ${name}`, () => {
+    assert.match(execFileSync('helm', ['version', '--short'], { encoding: 'utf8' }), /^v3\.16\.3\+/, 'goldens are rendered with the Helm version helm-chart.yml pins');
     assert.equal(normalize(render(['topology=single', ...values])), readFileSync(`tests/fixtures/topology/${name}.yaml`, 'utf8'));
   });
   const split = ['topology=split', 'inference.host=inference.anyray.example.com', 'ingress.enabled=true'];

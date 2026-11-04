@@ -55,7 +55,6 @@ spec:
       app.kubernetes.io/name: anyray
       app.kubernetes.io/component: proxy
       app.kubernetes.io/instance: topology-test
-
 ---
 # Source: anyray/templates/autoUpdate.yaml
 apiVersion: v1
@@ -256,7 +255,6 @@ spec:
   ports:
     - port: 8787
       targetPort: 8787
-
 ---
 # Source: anyray/templates/optimizer.yaml
 apiVersion: v1
@@ -278,7 +276,6 @@ spec:
   ports:
     - port: 8088
       targetPort: 8088
-
 ---
 # Source: anyray/templates/postgres.yaml
 apiVersion: v1
@@ -300,7 +297,6 @@ spec:
   ports:
     - port: 5432
       targetPort: 5432
-
 ---
 # Source: anyray/templates/proxy.yaml
 apiVersion: v1
@@ -321,7 +317,6 @@ spec:
   ports:
     - port: 3000
       targetPort: 80
-
 ---
 # Source: anyray/templates/gateway.yaml
 apiVersion: apps/v1

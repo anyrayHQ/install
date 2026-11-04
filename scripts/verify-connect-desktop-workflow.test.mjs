@@ -694,6 +694,9 @@ describe('desktop release workflow safety contract', () => {
     assert.match(reconcile, /needs\.validate-source\.result == 'success'/);
     assert.match(reconcile, /!inputs\.dry_run/);
     assert.match(reconcile, /publish-desktop-release\.sh --require-all/);
+    // The reconcile names why an OS is missing only if it knows the mode and what the stored set holds.
+    assert.match(reconcile, /\n      MODE: \$\{\{ inputs\.mode \}\}\n/);
+    assert.match(reconcile, /\n      STORED_OSES: \$\{\{ inputs\.present \}\}\n/);
     assert.doesNotMatch(workflow, /connect-update\.json|npm publish|gen-winget|gen-homebrew/);
   });
 

@@ -283,7 +283,11 @@ describe('desktop release workflow safety contract', () => {
     // Since monorepo #5342 (ANY-2021) the MSI runs no scripts: Windows Installer replaces an
     // unowned engine in place and rollback restores it. The scripted SweepMachineState refusal
     // (exit 1603) is gone, and a smoke that still demands it drops Windows from every release.
-    assert.doesNotMatch(windows, /1603|SweepMachineState|Assert-MsiForeignEngineRefusal|\$foreignInstall|\$foreignLog/);
+    assert.doesNotMatch(windows, /1603|Assert-MsiForeignEngineRefusal|\$foreignInstall|\$foreignLog/);
+    // The retired action is named once: in the install-log pattern that must match nothing.
+    const sweepMentions = windows.split('SweepMachineState');
+    assert.equal(sweepMentions.length, 2);
+    assert.match(sweepMentions[0].slice(sweepMentions[0].lastIndexOf('\n')), /\$scripted = @\(\$msiLines \| Select-String -Pattern '/);
 
     const plant = windows.indexOf("-Value 'foreign-engine-sentinel'");
     const staleShim = windows.indexOf("'echo stale-helper-sentinel'");
@@ -322,6 +326,75 @@ describe('desktop release workflow safety contract', () => {
     assert.match(windows, /MSI uninstall left the uninstall script behind/);
     assert.match(windows, /MSI uninstall left the install directory in machine PATH/);
     assert.doesNotMatch(windows, /Invoke-Expression/);
+  });
+
+  test('names the step for what it now proves: an install over foreign files, not a refusal', () => {
+    const windows = job('verify-windows-signatures');
+    assert.match(
+      windows,
+      /- name: Verify install over foreign files, layout, execute, and uninstall without touching CLI state\n        id: windows-msi-smoke\n/
+    );
+    assert.doesNotMatch(windows, /Verify refusal/);
+  });
+
+  test('installs over a foreign helper .cmd, leaves it byte for byte, and still writes the credential helper', () => {
+    const windows = job('verify-windows-signatures');
+    // Since monorepo #5342 the installed engine writes the helpers as a Return=ignore step and
+    // never replaces a file it does not own. It writes the credential helper first and stops at
+    // the first foreign file, so the foreign fixture sits at the bootstrap-headers path: there
+    // the install still succeeds AND the other helper is written.
+    const plant = windows.indexOf('Set-Content -LiteralPath $bootstrapShim -Value @(');
+    const planted = windows.indexOf('$plantedForeignHelper = $true', plant);
+    const fixtureHash = windows.indexOf(
+      '$foreignHelperHash = (Get-FileHash -LiteralPath $bootstrapShim -Algorithm SHA256).Hash'
+    );
+    const install = windows.indexOf('$installArgs = @(');
+    const untouched = windows.indexOf('throw "MSI changed the foreign file at helper path $bootstrapShim"');
+    // A unary comma keeps PowerShell from flattening the one remaining pair into two strings.
+    const helperLoop = windows.indexOf("foreach ($pair in @(,@($credentialShim, 'credential'))) {");
+    assert.ok(plant > 0 && plant < planted && planted < fixtureHash && fixtureHash < install);
+    assert.ok(untouched > install && untouched < helperLoop);
+    // The fixture must read as foreign to the engine: no owner marker anywhere in it.
+    assert.doesNotMatch(windows.slice(plant, planted), /\$helperMarker|Managed by anyray-connect/);
+    assert.match(
+      windows,
+      /\(Get-FileHash -LiteralPath \$bootstrapShim -Algorithm SHA256\)\.Hash -ne \$foreignHelperHash/
+    );
+    assert.match(windows, /\$plantedForeignHelper = \$false/);
+    // The bootstrap-headers wrapper is not written in this run, so nothing compares it.
+    assert.doesNotMatch(windows, /@\(\$bootstrapShim, 'bootstrap-headers'\)/);
+
+    // Uninstall must still remove the managed shim. What it does to the foreign fixture is
+    // recorded, not asserted; the smoke removes its own fixture and the directory it emptied.
+    assert.match(windows, /foreach \(\$helperPath in @\(\$credentialShim\)\) \{/);
+    const uninstall = windows.indexOf('-ArgumentList $uninstallArgs');
+    const fixtureCleanup = windows.indexOf('if ($plantedForeignHelper) {', uninstall);
+    const postUninstall = windows.indexOf('if (Test-Path -LiteralPath $installedMainPath -PathType Leaf)');
+    assert.ok(uninstall > 0 && fixtureCleanup > uninstall && fixtureCleanup < postUninstall);
+    const cleanup = windows.slice(fixtureCleanup, postUninstall);
+    assert.match(cleanup, /Foreign helper fixture after MSI uninstall: present=/);
+    assert.match(cleanup, /Remove-Item -LiteralPath \$bootstrapShim -Force -ErrorAction SilentlyContinue/);
+    assert.match(cleanup, /\$createdInstallDir -and \(Test-Path -LiteralPath \$installDir\)/);
+    assert.match(cleanup, /@\(Get-ChildItem -LiteralPath \$installDir -Force\)\.Count -eq 0/);
+  });
+
+  test('proves from the install log that no PowerShell or retired sweep/finish action ran', () => {
+    const windows = job('verify-windows-signatures');
+    const install = windows.indexOf('$installArgs = @(');
+    const readLog = windows.indexOf('$msiLines = @(Get-Content -LiteralPath $log)');
+    // Paired with the absence check below: an unreadable or wrongly decoded log has no
+    // WriteDesktopHelpers line, so it fails here instead of passing as "nothing scripted".
+    const nativeAction = windows.indexOf("Select-String -SimpleMatch 'WriteDesktopHelpers'");
+    const scripted = windows.indexOf(
+      "Select-String -Pattern 'powershell|EncodedCommand|WixQuietExec|SweepMachineState|FinishInstall|ANYRAY-CA-ERROR|\\.anyray-rollback-staging|\\.anyray-stale-engines'"
+    );
+    const staging = windows.indexOf("foreach ($staging in @('.anyray-rollback-staging', '.anyray-stale-engines')) {");
+    const payloadCheck = windows.indexOf('throw "MSI changed signed payload');
+    assert.ok(install > 0 && readLog > install);
+    assert.ok(nativeAction > readLog && scripted > nativeAction && staging > scripted && staging < payloadCheck);
+    assert.match(windows, /MSI log does not show the native WriteDesktopHelpers action/);
+    assert.match(windows, /MSI log names a retired scripted custom action/);
+    assert.match(windows, /MSI left the retired staging folder \$staging in \$installDir/);
   });
 
   test('preserves MSI evidence independently of the failing smoke step', () => {

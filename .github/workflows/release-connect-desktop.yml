@@ -1961,7 +1961,7 @@ jobs:
           bucket: ${{ vars.CI_ARTIFACTS_BUCKET }}
           name: connect-desktop-windows-installer-signed
           path: installer
-      - name: Verify refusal, install layout, execute, and uninstall without touching CLI state
+      - name: Verify install over foreign files, layout, execute, and uninstall without touching CLI state
         id: windows-msi-smoke
         shell: pwsh
         run: |
@@ -2018,6 +2018,7 @@ jobs:
           $installed = $false
           $smokeFailure = $null
           $createdInstallDir = $false
+          $plantedForeignHelper = $false
           $appProcess = $null
           $createdRunKey = $false
 
@@ -2061,6 +2062,18 @@ jobs:
               "REM $helperMarker"
               'echo stale-helper-sentinel'
             )
+            # A non-Anyray wrapper already at a helper path. Since #5342 the installed engine writes
+            # the helpers as a non-fatal step and never replaces a file it does not own. It writes
+            # the credential helper first and stops at the first foreign file, so this sits at the
+            # bootstrap-headers path: the install must succeed, keep it byte for byte, and still
+            # rewrite the stale credential shim above.
+            Set-Content -LiteralPath $bootstrapShim -Value @(
+              '@echo off'
+              'REM foreign-helper-sentinel: an admin wrapper Anyray does not own'
+              'echo foreign-helper-sentinel'
+            )
+            $plantedForeignHelper = $true
+            $foreignHelperHash = (Get-FileHash -LiteralPath $bootstrapShim -Algorithm SHA256).Hash
 
             # auto-launch opens this standard desktop key; it does not create it.
             # Minimal Windows runner profiles may not have an Explorer Run key.
@@ -2092,6 +2105,25 @@ jobs:
             if ((Get-FileHash -LiteralPath $installedEnginePath -Algorithm SHA256).Hash -eq $foreignHash) {
               throw 'MSI left the foreign engine in place instead of replacing it'
             }
+            # The MSI runs no PowerShell since #5342. The native helper action must be in the log
+            # first, so a log that cannot be read fails here instead of passing the absence check.
+            $msiLines = @(Get-Content -LiteralPath $log)
+            if (-not ($msiLines | Select-String -SimpleMatch 'WriteDesktopHelpers')) {
+              throw 'MSI log does not show the native WriteDesktopHelpers action'
+            }
+            $scripted = @($msiLines | Select-String -Pattern 'powershell|EncodedCommand|WixQuietExec|SweepMachineState|FinishInstall|ANYRAY-CA-ERROR|\.anyray-rollback-staging|\.anyray-stale-engines')
+            if ($scripted.Count -ne 0) {
+              throw "MSI log names a retired scripted custom action (line $($scripted[0].LineNumber), $($scripted.Count) matching lines)"
+            }
+            foreach ($staging in @('.anyray-rollback-staging', '.anyray-stale-engines')) {
+              if (Test-Path -LiteralPath (Join-Path $installDir $staging)) {
+                throw "MSI left the retired staging folder $staging in $installDir"
+              }
+            }
+            if (-not (Test-Path -LiteralPath $bootstrapShim -PathType Leaf) -or
+              (Get-FileHash -LiteralPath $bootstrapShim -Algorithm SHA256).Hash -ne $foreignHelperHash) {
+              throw "MSI changed the foreign file at helper path $bootstrapShim"
+            }
             # Compare the actual MSI payload, not just Tauri's restored input.
             foreach ($pair in @(
               @($installedMain.FullName, 'inner/anyray-connect-tray-windows-x64.exe'),
@@ -2103,10 +2135,9 @@ jobs:
             }
             ./scripts/verify-authenticode-windows.ps1 -Path $installedEngine.FullName
             ./scripts/verify-authenticode-windows.ps1 -Path $installedMain.FullName
-            foreach ($pair in @(
-              @($credentialShim, 'credential'),
-              @($bootstrapShim, 'bootstrap-headers')
-            )) {
+            # Only the credential helper is written in this run: the bootstrap-headers path holds the
+            # foreign fixture. The unary comma keeps the one pair from flattening into two strings.
+            foreach ($pair in @(,@($credentialShim, 'credential'))) {
               $helperPath = $pair[0]
               $wrapperKind = $pair[1]
               if (-not (Test-Path -LiteralPath $helperPath -PathType Leaf)) {
@@ -2258,6 +2289,16 @@ jobs:
                 if ($remove.ExitCode -notin 0,3010) {
                   throw "MSI uninstall failed with exit $($remove.ExitCode)"
                 }
+                if ($plantedForeignHelper) {
+                  # The foreign wrapper is this smoke's own fixture: record what uninstall did with
+                  # it, remove it, then remove the install directory if that left it empty.
+                  Write-Host "Foreign helper fixture after MSI uninstall: present=$(Test-Path -LiteralPath $bootstrapShim -PathType Leaf)"
+                  Remove-Item -LiteralPath $bootstrapShim -Force -ErrorAction SilentlyContinue
+                  if ($createdInstallDir -and (Test-Path -LiteralPath $installDir) -and
+                    @(Get-ChildItem -LiteralPath $installDir -Force).Count -eq 0) {
+                    Remove-Item -LiteralPath $installDir
+                  }
+                }
               }
               elseif ($createdInstallDir -and (Test-Path -LiteralPath $installDir)) {
                 # Only a directory this smoke created is removed: a failure before the clean
@@ -2277,7 +2318,7 @@ jobs:
           if (Test-Path -LiteralPath $installedEnginePath -PathType Leaf) {
             throw 'MSI uninstall left a desktop executable behind'
           }
-          foreach ($helperPath in @($credentialShim, $bootstrapShim)) {
+          foreach ($helperPath in @($credentialShim)) {
             if (Test-Path -LiteralPath $helperPath -PathType Leaf) {
               throw "MSI uninstall left a managed helper shim behind: $helperPath"
             }

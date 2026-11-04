@@ -1446,16 +1446,20 @@ the real uninstall:
   developer account. The same manual pass covers the UI Quit action, a real
   logout/login, enrollment, key renewal, and an EDR policy;
 - Windows first plants an unsigned foreign engine at
-  `C:\Program Files\Anyray\anyray-connect.exe` and a stale managed credential
-  shim, then installs into that fixed directory. The MSI runs no scripts
-  (monorepo #5342): Windows Installer replaces an unowned engine in place and
-  rollback restores it, so the install must succeed and leave the signed engine
-  where the foreign one was. The smoke verifies the
-  installed engine's Authenticode signature, both regenerated managed shims and
-  their engine target, the machine `PATH` entry, `uninstall.ps1`, and the
-  `ai.anyray.connect-tray` value under
+  `C:\Program Files\Anyray\anyray-connect.exe`, a stale managed credential
+  shim, and a non-Anyray `.cmd` at the bootstrap-headers helper path, then
+  installs into that fixed directory. The MSI runs no scripts (monorepo #5342):
+  Windows Installer replaces an unowned engine in place and rollback restores
+  it, and the engine's helper write is non-fatal and never replaces a file it
+  does not own. So the install must succeed, leave the signed engine where the
+  foreign one was, rewrite the credential shim, and keep the foreign `.cmd`
+  byte for byte. The install log must name `WriteDesktopHelpers` and no
+  PowerShell, `WixQuietExec`, or retired sweep or finish action. The smoke
+  verifies the installed engine's Authenticode signature, the regenerated
+  credential shim and its engine target, the machine `PATH` entry,
+  `uninstall.ps1`, and the `ai.anyray.connect-tray` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; MSI uninstall must
-  remove both shims and the machine `PATH` entry. On failure, the job prints
+  remove the credential shim and the machine `PATH` entry. On failure, the job prints
   context around MSI failure markers. Full install and uninstall logs
   (whichever were created) are uploaded even when the smoke fails as
   `connect-desktop-windows-msi-logs`. The job summary links the S3 URI; download

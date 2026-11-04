@@ -40,10 +40,47 @@ runs:
 
         src="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${ARTIFACT_NAME}"
 
+        # list_prefix <uri>: sets LISTED and returns 0 once the CLI answers
+        # (exit 0 with keys, or exit 1 with no output: its answer for an empty
+        # prefix). Any other exit is the CLI failing (252-255, or 127 when it
+        # is absent) and is retried with backoff; after the last attempt it
+        # returns 1 with LIST_RC and LIST_ERROR set. The CLI's own message (AWS
+        # metadata, no content) is always printed: run 41794404528 lost a
+        # release to a hidden CLI error read as "nothing uploaded".
+        list_attempts=5
+        list_prefix() {
+          local uri=$1 attempt=1 delay=2 err_file
+          err_file="$(mktemp)"
+          while :; do
+            LIST_RC=0
+            LISTED="$(aws s3 ls "$uri" 2>"$err_file")" || LIST_RC=$?
+            if [ "$LIST_RC" -le 1 ]; then
+              sed -e '/^[[:space:]]*$/d' -e 's/^/  aws: /' "$err_file"
+              rm -f "$err_file"
+              return 0
+            fi
+            LIST_ERROR="$(tr -d '\r' < "$err_file" | grep -v '^[[:space:]]*$' | tail -n 1 || true)"
+            echo "aws s3 ls ${uri} failed (exit ${LIST_RC}, attempt ${attempt}/${list_attempts}):"
+            sed -e '/^[[:space:]]*$/d' -e 's/^/  aws: /' "$err_file"
+            if [ "$attempt" -ge "$list_attempts" ]; then
+              rm -f "$err_file"
+              return 1
+            fi
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+          done
+        }
+        list_failed() {
+          echo "::error::Could not list $1: the AWS CLI failed ${list_attempts} times (last exit ${LIST_RC}: ${LIST_ERROR//%/%25}). This is a CI or AWS fault, not a missing upload; re-run the job."
+          exit 1
+        }
+
         # An empty prefix means the producing job never uploaded. Fail here
         # rather than let the consumer proceed on an empty directory and
         # publish a release that is quietly missing a platform's binary.
-        if [ -z "$(aws s3 ls "${src}/" 2>/dev/null | head -1)" ]; then
+        list_prefix "${src}/" || list_failed "$src"
+        if [ -z "$LISTED" ]; then
           # Keys are attempt-scoped on purpose (a re-run must never read a
           # previous attempt's bytes), which makes "re-run failed jobs" a trap:
           # it re-runs only the CONSUMER, so it reads attempt N while the
@@ -59,7 +96,8 @@ runs:
             n=$((GITHUB_RUN_ATTEMPT - 1))
             while [ "$n" -ge 1 ]; do
               prev="s3://${BUCKET}/${GITHUB_REPOSITORY##*/}/${GITHUB_RUN_ID}-${n}/${ARTIFACT_NAME}"
-              if [ -n "$(aws s3 ls "${prev}/" 2>/dev/null | head -1)" ]; then
+              list_prefix "${prev}/" || list_failed "$prev"
+              if [ -n "$LISTED" ]; then
                 found_attempt="$n"
                 break
               fi

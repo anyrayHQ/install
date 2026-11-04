@@ -1087,6 +1087,12 @@ jobs:
             exit 0
           fi
 
+          # Installer keeps a failing pkg script's output in /var/log/install.log, so a
+          # failure from here on also prints it, each account's last uninstall result and
+          # the Anyray processes still running (scripts/pkg-diagnostics.sh).
+          install_log_start="$(/usr/bin/stat -f %z /var/log/install.log 2>/dev/null || echo 0)"
+          trap 'echo "::error::macOS verification failed at script line $LINENO"; sudo ./scripts/pkg-diagnostics.sh /var/log/install.log "$install_log_start" /Users || true' ERR
+
           installed_app='/Applications/Anyray Connect.app'
           launcher='/usr/local/bin/anyray-connect'
           credential_helper='/usr/local/bin/anyray-credential-helper'

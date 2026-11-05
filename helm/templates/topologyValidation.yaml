@@ -5,15 +5,12 @@
 {{- if not (or .Values.ingress.enabled .Values.httpRoute.enabled) }}
 {{- fail "topology=split requires Ingress or HTTPRoute enabled" }}
 {{- end }}
-{{- if not .Values.inference.host }}
-{{- fail "topology=split requires inference.host" }}
-{{- end }}
 {{- $hosts := list .Values.host }}
 {{- range .Values.ingress.hosts }}
 {{- $hosts = append $hosts (default $.Values.host .host) }}
 {{- end }}
 {{- $hosts = concat $hosts .Values.httpRoute.hostnames }}
-{{- if has .Values.inference.host $hosts }}
+{{- if and .Values.inference.host (has .Values.inference.host $hosts) }}
 {{- fail "inference.host must differ from every existing host" }}
 {{- end }}
 {{- if .Values.gateway.autoscaling.enabled }}
@@ -24,5 +21,8 @@
 {{- end }}
 {{- if has .Values.gateway.service.type (list "LoadBalancer" "NodePort") }}
 {{- fail "topology=split requires gateway.service.type=ClusterIP" }}
+{{- end }}
+{{- if not (include "anyray.atLeastAppVersion" (dict "component" "gateway" "floor" "v1.10.563" "context" .)) }}
+{{- fail (printf "topology=split needs a gateway image of v1.10.563 or newer (this renders %s): older images ignore --inference-only" (include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .))) }}
 {{- end }}
 {{- end }}

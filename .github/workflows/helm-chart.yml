@@ -27,14 +27,12 @@ on:
       - 'helm/**'
       - 'tests/autoupdate-pin.test.mjs'
       - 'tests/helm-topology.test.mjs'
-      - 'tests/fixtures/topology/**'
       - '.github/workflows/helm-chart.yml'
   pull_request:
     paths:
       - 'helm/**'
       - 'tests/autoupdate-pin.test.mjs'
       - 'tests/helm-topology.test.mjs'
-      - 'tests/fixtures/topology/**'
       - '.github/workflows/helm-chart.yml'
   workflow_dispatch:
 
@@ -52,7 +50,7 @@ jobs:
           version: v3.16.3
           token: ${{ github.token }}
 
-      - name: Single and split topology render checks
+      - name: Split topology render checks
         run: node --test tests/helm-topology.test.mjs
 
       - name: Lint

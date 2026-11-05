@@ -87,7 +87,8 @@
 - name: ANYRAY_GATEWAY_PUBLIC_URL
   value: {{ . | quote }}
 {{- end }}
-{{- if and (eq .Values.topology "split") .Values.inference.host }}
+{{- /* A wildcard host is no URL a client can dial, and the gateway takes only an HTTPS model URL. */}}
+{{- if and (eq .Values.topology "split") .Values.inference.host (not (contains "*" .Values.inference.host)) (hasPrefix "https://" (toString $gatewayPublicUrl)) }}
 # The model base URL management hands out; inference pods accept it as their own /mcp host.
 - name: ANYRAY_INFERENCE_PUBLIC_URL
   value: {{ printf "https://%s" .Values.inference.host | quote }}

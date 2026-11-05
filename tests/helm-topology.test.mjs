@@ -97,4 +97,6 @@ test('split hands both pods the inference URL only when inference.host is set', 
   }
   assert.doesNotMatch(render(['topology=split', 'ingress.enabled=true']), /ANYRAY_INFERENCE_PUBLIC_URL/);
   assert.doesNotMatch(render(['inference.host=inference.anyray.example.com']), /ANYRAY_INFERENCE_PUBLIC_URL/);
+  assert.doesNotMatch(render([...split, 'inference.host=*.inference.anyray.example.com']), /ANYRAY_INFERENCE_PUBLIC_URL/, 'a wildcard is not a URL a client can connect to');
+  assert.doesNotMatch(render([...split, 'gateway.publicUrl=http://anyray.example.com']), /ANYRAY_INFERENCE_PUBLIC_URL/, 'a plain-HTTP install keeps its gateway URL');
 });

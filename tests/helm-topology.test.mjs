@@ -53,8 +53,8 @@ if (process.argv.includes('--record-single')) {
       assert.doesNotMatch(i, /persistentVolumeClaim/);
       assert.match(i, /terminationGracePeriodSeconds: 120/);
       assert.match(i, /preStop:/);
-      assert.ok(doc(s, 'PodDisruptionBudget', 'anyray-inference'));
-      assert.ok(doc(s, 'HorizontalPodAutoscaler', 'anyray-inference'));
+      assert.match(doc(s, 'PodDisruptionBudget', 'anyray-inference'), /matchLabels:\n(\s+.+\n)*?\s+app.kubernetes.io\/component: inference\n/);
+      assert.match(doc(s, 'HorizontalPodAutoscaler', 'anyray-inference'), /kind: Deployment\n\s+name: anyray-inference\n\s+minReplicas: 2\n\s+maxReplicas: 10\n/);
       assert.equal(doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway'), '');
       assert.match(doc(s, 'NetworkPolicy', 'anyray-optimizer'), /component: inference/);
       assert.match(doc(s, 'Service', 'gateway-inference'), /component: inference/);
@@ -71,28 +71,37 @@ if (process.argv.includes('--record-single')) {
       const s = render([...split, ...extra]);
       assert.equal(strip(doc(s, 'Deployment', 'anyray-inference')), strip(doc(s, 'Deployment', 'anyray-gateway')), extra.join(' '));
     }
-    assert.match(doc(render(split), 'HorizontalPodAutoscaler', 'anyray-inference'), /minReplicas: 2/);
   });
   test('split routes', () => {
     const edge = JSON.parse(readFileSync('helm/files/edgeRoutes.json', 'utf8'));
     const s = render(split);
     const ing = doc(s, 'Ingress', 'anyray');
     for (const host of ['anyray.example.com', 'inference.anyray.example.com']) {
-      const rule = ing.split(`    - host: ${host}\n`)[1]?.split('    - host:')[0];
+      const rule = ing.split(`    - host: ${host.startsWith('inference.') ? `"${host}"` : host}\n`)[1]?.split('    - host:')[0];
       assert.ok(rule, host);
-      for (const r of edge.ingress.filter(r => host === 'anyray.example.com' || r.target === 'inference')) {
+      if (host.startsWith('inference.')) {
+        assert.deepEqual(rule.match(/- path: .+/g), ['- path: /']);
+        assert.match(rule, /pathType: Prefix\n[\s\S]*name: gateway-inference\n/);
+        continue;
+      }
+      for (const r of edge.ingress) {
         const b = rule.split(`          - path: ${r.path}\n            pathType: ${r.pathType}\n`)[1]?.split('          - path:')[0];
         assert.ok(b, r.path);
         assert.match(b, new RegExp(`name: ${r.target === 'inference' ? 'gateway-inference' : r.target === 'console' ? 'anyray-proxy' : 'gateway'}\n`));
       }
-      if (host.startsWith('inference.')) assert.match(rule, /path: \/\n[\s\S]*name: gateway-inference/);
     }
     const h = render(['topology=split', 'inference.host=inference.anyray.example.com', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway']);
     for (const name of ['anyray', 'anyray-inference']) {
       const d = doc(h, 'HTTPRoute', name);
       assert.match(d, /name: synthetic-gateway/);
       assert.ok(d.includes(`    - \"${name === 'anyray' ? 'anyray.example.com' : 'inference.anyray.example.com'}\"`));
-      for (const r of edge.httpRoute.filter(r => name === 'anyray' || r.target === 'inference')) {
+      if (name === 'anyray-inference') {
+        const rules = d.split('    - matches:').slice(1);
+        assert.equal(rules.length, 1);
+        assert.match(rules[0], /type: PathPrefix\n\s+value: \/\n\s+timeouts:\n\s+request: 0s\n\s+backendRefs:\n\s+- name: gateway-inference\n/);
+        continue;
+      }
+      for (const r of edge.httpRoute) {
         const b = d.split('    - matches:').find(b => r.matches.every(m => b.includes(`value: ${m.path.value}\n`)));
         assert.ok(b);
         assert.match(b, new RegExp(`name: ${r.target === 'inference' ? 'gateway-inference' : r.target === 'console' ? 'anyray-proxy' : 'gateway'}\n`));
@@ -100,11 +109,8 @@ if (process.argv.includes('--record-single')) {
       }
     }
   });
-  test('split inference HTTPRoute sends unmatched paths to inference', () => {
-    const h = render(['topology=split', 'inference.host=inference.anyray.example.com', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway']);
-    const last = doc(h, 'HTTPRoute', 'anyray-inference').split('    - matches:').at(-1);
-    assert.match(last, /type: PathPrefix\n\s+value: \/\n/);
-    assert.match(last, /name: gateway-inference\n/);
+  test('split accepts a wildcard inference host', () => {
+    assert.match(doc(render([...split, 'inference.host=*.inference.example.com']), 'Ingress', 'anyray'), /- host: "\*\.inference\.example\.com"\n/);
   });
   test('split updater pins inference using gateway resolver', () => {
     const s = render([...split, 'image.tag=policy-stable']);

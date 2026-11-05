@@ -77,28 +77,17 @@ spec:
   hostnames:
     - {{ .Values.inference.host | quote }}
   rules:
-    {{- range $rule := $edge.httpRoute }}
-    {{- if eq $rule.target "inference" }}
-    - matches:
-        {{- range $rule.matches }}
-        - path:
-            type: {{ .path.type }}
-            value: {{ .path.value }}
-        {{- end }}
-      {{- if and $rule.timeouts $.Values.httpRoute.streamingDefaults }}
-      timeouts:
-        request: {{ $rule.timeouts.request }}
-      {{- end }}
-      backendRefs:
-        - name: gateway-inference
-          port: 8787
-    {{- end }}
-    {{- end }}
     {{- $fallback := last (last $edge.httpRoute).matches }}
     - matches:
         - path:
             type: {{ $fallback.path.type }}
             value: {{ $fallback.path.value }}
+      {{- range $edge.httpRoute }}
+      {{- if and (eq .target "inference") .timeouts $.Values.httpRoute.streamingDefaults }}
+      timeouts:
+        request: {{ .timeouts.request }}
+      {{- end }}
+      {{- end }}
       backendRefs:
         - name: gateway-inference
           port: 8787

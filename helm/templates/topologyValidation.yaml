@@ -25,4 +25,7 @@
 {{- if has .Values.gateway.service.type (list "LoadBalancer" "NodePort") }}
 {{- fail "topology=split requires gateway.service.type=ClusterIP" }}
 {{- end }}
+{{- if not (include "anyray.atLeastAppVersion" (dict "component" "gateway" "floor" "v1.10.563" "context" .)) }}
+{{- fail (printf "topology=split needs a gateway image of v1.10.563 or newer (this renders %s): older images ignore --inference-only" (include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .))) }}
+{{- end }}
 {{- end }}

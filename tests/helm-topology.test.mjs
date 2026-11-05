@@ -30,6 +30,7 @@ if (process.argv.includes('--record-single')) {
       [[...split, 'gateway.autoscaling.enabled=true'], /gateway.autoscaling.enabled/],
       [[...split, 'gateway.persistence.enabled=true'], /gateway.persistence.enabled/],
       ...['LoadBalancer', 'NodePort'].map(t => [[...split, `gateway.service.type=${t}`], /gateway.service.type/]),
+      [[...split, 'images.gateway.tag=v1.10.562'], /v1\.10\.563/],
     ]) {
       const r = spawnSync('helm', [...base, ...args(values)], { encoding: 'utf8' });
       assert.notEqual(r.status, 0, values.join(' '));
@@ -57,7 +58,7 @@ if (process.argv.includes('--record-single')) {
       assert.match(doc(s, 'HorizontalPodAutoscaler', 'anyray-inference'), /kind: Deployment\n\s+name: anyray-inference\n\s+minReplicas: 2\n\s+maxReplicas: 10\n/);
       assert.equal(doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway'), '');
       assert.match(doc(s, 'NetworkPolicy', 'anyray-optimizer'), /component: inference/);
-      assert.match(doc(s, 'Service', 'gateway-inference'), /component: inference/);
+      assert.ok(doc(s, 'Service', 'gateway-inference').split('selector:\n')[1]?.includes('app.kubernetes.io/component: inference\n'));
     }
     const r = spawnSync('helm', [...base, ...args([...split, 'inference.terminationGracePeriodSeconds=90'])], { encoding: 'utf8' });
     assert.notEqual(r.status, 0, 'inference must budget the 90 second gateway drain');
@@ -108,6 +109,9 @@ if (process.argv.includes('--record-single')) {
         if (r.timeouts) assert.match(b, /request: 0s/);
       }
     }
+  });
+  test('split renders on gateway images that serve inference-only', () => {
+    for (const tag of ['v1.10.563', 'policy-stable']) assert.ok(doc(render([...split, `images.gateway.tag=${tag}`]), 'Deployment', 'anyray-inference'), tag);
   });
   test('split accepts a wildcard inference host', () => {
     assert.match(doc(render([...split, 'inference.host=*.inference.example.com']), 'Ingress', 'anyray'), /- host: "\*\.inference\.example\.com"\n/);

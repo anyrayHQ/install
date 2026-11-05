@@ -15,7 +15,6 @@ test('split refuses settings it cannot run safely', () => {
   for (const [values, message] of [
     [['topology=other'], /topology.*single.*split/],
     [['topology=split'], /requires.*[Ii]ngress.*HTTPRoute/],
-    [['topology=split', 'ingress.enabled=true'], /inference.host/],
     [[...split, 'inference.host=anyray.example.com'], /inference.host.*existing/],
     [[...split, 'ingress.hosts[0].host=inference.anyray.example.com'], /inference.host.*existing/],
     [[...split, 'httpRoute.hostnames[0]=inference.anyray.example.com'], /inference.host.*existing/],
@@ -79,4 +78,15 @@ test('split routes model paths to inference on both hosts and everything on the 
   assert.equal(rules.length, 2);
   assert.ok(rules[0].includes('- "inference.anyray.example.com"') && rules[0].includes('name: synthetic-gateway'));
   assert.match(rules[1], /value: \/\n\s+timeouts:\n\s+request: 0s\n\s+backendRefs:\n\s+- name: gateway-inference\n/);
+});
+
+test('split without inference.host routes model paths to inference on the existing host only', () => {
+  const edge = JSON.parse(readFileSync('helm/files/edgeRoutes.json', 'utf8'));
+  const ing = doc(render(['topology=split', 'ingress.enabled=true']), 'Ingress', 'anyray');
+  assert.equal(ing.match(/    - host: .+/g).length, 1);
+  const r = edge.ingress.find(r => r.target === 'inference');
+  assert.ok(ing.split(`          - path: ${r.path}\n`)[1].split('          - path:')[0].includes('name: gateway-inference\n'));
+  const h = render(['topology=split', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway']);
+  assert.ok(doc(h, 'HTTPRoute', 'anyray').includes('name: gateway-inference\n'));
+  assert.equal(doc(h, 'HTTPRoute', 'anyray-inference'), '');
 });

@@ -55,6 +55,6 @@ Availability of this release:
 Docs: https://docs.anyray.ai
 
 {{- if eq .Values.topology "split" }}
-Inference: https://{{ .Values.inference.host }}/v1
+Inference: {{ .Values.inference.host | default .Values.host | printf "https://%s/v1" }}
 Management: 2 gateway replicas.
 {{- end }}

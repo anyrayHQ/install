@@ -81,7 +81,7 @@ spec:
                   number: {{ ternary 3000 8787 $console }}
           {{- end }}
     {{- end }}
-    {{- if eq .Values.topology "split" }}
+    {{- if and (eq .Values.topology "split") .Values.inference.host }}
     - host: {{ .Values.inference.host | quote }}
       http:
         paths:

@@ -5,15 +5,12 @@
 {{- if not (or .Values.ingress.enabled .Values.httpRoute.enabled) }}
 {{- fail "topology=split requires Ingress or HTTPRoute enabled" }}
 {{- end }}
-{{- if not .Values.inference.host }}
-{{- fail "topology=split requires inference.host" }}
-{{- end }}
 {{- $hosts := list .Values.host }}
 {{- range .Values.ingress.hosts }}
 {{- $hosts = append $hosts (default $.Values.host .host) }}
 {{- end }}
 {{- $hosts = concat $hosts .Values.httpRoute.hostnames }}
-{{- if has .Values.inference.host $hosts }}
+{{- if and .Values.inference.host (has .Values.inference.host $hosts) }}
 {{- fail "inference.host must differ from every existing host" }}
 {{- end }}
 {{- if .Values.gateway.autoscaling.enabled }}

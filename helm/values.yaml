@@ -1,6 +1,7 @@
 topology: single
 
 inference:
+  # Optional under split: a second hostname that serves only model requests.
   host: ""
   replicas: 2
   autoscaling:

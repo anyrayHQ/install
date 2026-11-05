@@ -90,3 +90,11 @@ test('split without inference.host routes model paths to inference on the existi
   assert.ok(doc(h, 'HTTPRoute', 'anyray').includes('name: gateway-inference\n'));
   assert.equal(doc(h, 'HTTPRoute', 'anyray-inference'), '');
 });
+test('split hands both pods the inference URL only when inference.host is set', () => {
+  const s = render(split);
+  for (const name of ['anyray-gateway', 'anyray-inference']) {
+    assert.match(doc(s, 'Deployment', name), /- name: ANYRAY_INFERENCE_PUBLIC_URL\n\s+value: "https:\/\/inference\.anyray\.example\.com"\n/, name);
+  }
+  assert.doesNotMatch(render(['topology=split', 'ingress.enabled=true']), /ANYRAY_INFERENCE_PUBLIC_URL/);
+  assert.doesNotMatch(render(['inference.host=inference.anyray.example.com']), /ANYRAY_INFERENCE_PUBLIC_URL/);
+});

@@ -87,7 +87,7 @@
 - name: ANYRAY_GATEWAY_PUBLIC_URL
   value: {{ . | quote }}
 {{- end }}
-{{- if eq .Values.topology "split" }}
+{{- if and (eq .Values.topology "split") .Values.inference.host }}
 # The model base URL management hands out; inference pods accept it as their own /mcp host.
 - name: ANYRAY_INFERENCE_PUBLIC_URL
   value: {{ printf "https://%s" .Values.inference.host | quote }}

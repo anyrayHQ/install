@@ -26,11 +26,13 @@ on:
     paths:
       - 'helm/**'
       - 'tests/autoupdate-pin.test.mjs'
+      - 'tests/helm-topology.test.mjs'
       - '.github/workflows/helm-chart.yml'
   pull_request:
     paths:
       - 'helm/**'
       - 'tests/autoupdate-pin.test.mjs'
+      - 'tests/helm-topology.test.mjs'
       - '.github/workflows/helm-chart.yml'
   workflow_dispatch:
 
@@ -47,6 +49,9 @@ jobs:
         with:
           version: v3.16.3
           token: ${{ github.token }}
+
+      - name: Split topology render checks
+        run: node --test tests/helm-topology.test.mjs
 
       - name: Lint
         run: helm lint helm --set host=anyray.example.com --set postgres.storage=150Gi

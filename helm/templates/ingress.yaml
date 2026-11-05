@@ -76,9 +76,22 @@ spec:
             pathType: {{ $rule.pathType }}
             backend:
               service:
-                name: {{ ternary $proxy "gateway" $console }}
+                name: {{ ternary $proxy (ternary "gateway-inference" "gateway" (and (eq $.Values.topology "split") (eq $rule.target "inference"))) $console }}
                 port:
                   number: {{ ternary 3000 8787 $console }}
           {{- end }}
+    {{- end }}
+    {{- if and (eq .Values.topology "split") .Values.inference.host }}
+    - host: {{ .Values.inference.host | quote }}
+      http:
+        paths:
+          {{- $fallback := last $edge.ingress }}
+          - path: {{ $fallback.path }}
+            pathType: {{ $fallback.pathType }}
+            backend:
+              service:
+                name: gateway-inference
+                port:
+                  number: 8787
     {{- end }}
 {{- end }}

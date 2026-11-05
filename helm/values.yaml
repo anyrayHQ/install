@@ -1,3 +1,35 @@
+topology: single
+
+inference:
+  # Optional under split: a second hostname that serves only model requests.
+  host: ""
+  replicas: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  # Omitted rollout, probes and drain settings inherit the global values.
+  # minReadySeconds: 5
+  # revisionHistoryLimit: 3
+  # progressDeadlineSeconds: 300
+  # startupProbe: {enabled: true, periodSeconds: 5, failureThreshold: 360}
+  # livenessProbe: {enabled: true, periodSeconds: 10, failureThreshold: 6}
+  # preStopDrainSeconds: 15
+  # terminationGracePeriodSeconds: 120
+
 # Anyray Helm chart values.
 # Run setup.sh --k8s --connect <adt_token> to generate the Secret and a starter
 # values file, then install into your chosen namespace:

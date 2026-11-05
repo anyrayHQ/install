@@ -7,7 +7,8 @@ Expand the name of the chart.
 
 {{/* Resolve an app component's effective image tag. */}}
 {{- define "anyray.effectiveImageTag" -}}
-{{- $image := index .context.Values.images .component | default dict -}}
+{{- $component := ternary "gateway" .component (eq .component "inference") -}}
+{{- $image := index .context.Values.images $component | default dict -}}
 {{- $image.tag | default .context.Values.image.tag | default .context.Chart.AppVersion | toString -}}
 {{- end }}
 
@@ -443,7 +444,7 @@ guard stops protecting the real default; raise the app's without raising this
 and a stock install is SIGKILLed mid-drain again. */ -}}
 {{- $drainMs := 0 -}}
 {{- $drainEnv := "" -}}
-{{- if eq $component "gateway" -}}
+{{- if has $component (list "gateway" "inference") -}}
 {{- $drainMs = 90000 -}}
 {{- $drainEnv = "ANYRAY_SHUTDOWN_DRAIN_MS" -}}
 {{- else if eq $component "optimizer" -}}
@@ -452,7 +453,11 @@ and a stock install is SIGKILLed mid-drain again. */ -}}
 {{- end -}}
 {{- /* Only for the components whose drain is actually env-tunable. */ -}}
 {{- if $drainEnv -}}
-{{- range $env := ($overrides.extraEnv | default list) -}}
+{{- $envs := $overrides.extraEnv | default list -}}
+{{- if eq $component "inference" -}}
+{{- $envs = $context.Values.gateway.extraEnv -}}
+{{- end -}}
+{{- range $env := $envs -}}
 {{- if eq (toString $env.name) $drainEnv -}}
 {{- $drainMs = int (toString $env.value) -}}
 {{- end -}}
@@ -850,4 +855,8 @@ BYO /v1/record path, which full-stack installs don't use.
 - name: ANYRAY_SPEND_DB_URL
   value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "anyray.fullname" . }}-postgres:5432/postgres"
 {{- end }}
+{{- end }}
+
+{{- define "anyray.gatewayReplicas" -}}
+{{- if eq .Values.topology "split" -}}2{{- else -}}{{ .Values.gateway.replicas }}{{- end -}}
 {{- end }}

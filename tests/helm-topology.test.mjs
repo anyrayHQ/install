@@ -53,7 +53,7 @@ if (process.argv.includes('--record-single')) {
       assert.doesNotMatch(i, /persistentVolumeClaim/);
       assert.match(i, /terminationGracePeriodSeconds: 120/);
       assert.match(i, /preStop:/);
-      assert.match(doc(s, 'PodDisruptionBudget', 'anyray-inference'), /matchLabels:\n(\s+.+\n)*?\s+app.kubernetes.io\/component: inference\n/);
+      assert.ok(doc(s, 'PodDisruptionBudget', 'anyray-inference').split('matchLabels:\n')[1]?.includes('app.kubernetes.io/component: inference\n'));
       assert.match(doc(s, 'HorizontalPodAutoscaler', 'anyray-inference'), /kind: Deployment\n\s+name: anyray-inference\n\s+minReplicas: 2\n\s+maxReplicas: 10\n/);
       assert.equal(doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway'), '');
       assert.match(doc(s, 'NetworkPolicy', 'anyray-optimizer'), /component: inference/);

@@ -26,7 +26,7 @@ import {
 // so they are literals below — which also breaks the gateway<->optimizer reference
 // cycle that plain object refs would create.
 
-const TAG = "v1.10.565";
+const TAG = "v1.10.566";
 const ecr = (name: string) => image(`public.ecr.aws/anyray/${name}:${TAG}`);
 
 export default defineRailway(() => {

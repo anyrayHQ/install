@@ -63,6 +63,13 @@ if (process.argv.includes('--record-single')) {
     assert.notEqual(r.status, 0, 'inference must budget the 90 second gateway drain');
     assert.match(r.stderr, /drain/);
   });
+  test('split hands the inference URL to both pods, single does not', () => {
+    const s = render(split);
+    for (const name of ['anyray-gateway', 'anyray-inference']) {
+      assert.match(doc(s, 'Deployment', name), /- name: ANYRAY_INFERENCE_PUBLIC_URL\n\s+value: "https:\/\/inference\.anyray\.example\.com"\n/, name);
+    }
+    assert.doesNotMatch(render(['inference.host=inference.anyray.example.com']), /ANYRAY_INFERENCE_PUBLIC_URL/);
+  });
   test('split inference pod matches the gateway pod apart from identity, args and replicas', () => {
     const volumes = ['gateway.extraVolumes[0].name=ca', 'gateway.extraVolumes[0].secret.secretName=ca', 'gateway.extraVolumeMounts[0].name=ca', 'gateway.extraVolumeMounts[0].mountPath=/etc/anyray/ca'];
     const strip = d => d.split('\n').filter(l => !/^\s*#/.test(l) && !/^  replicas: /.test(l) && !l.includes('args: ["node", "build/start-server.js", "--inference-only"]')).join('\n')

@@ -3,7 +3,34 @@ import { resolve } from 'node:path';
 import { compareVersions } from './publish-desktop-feed.mjs';
 import { channelConfig, feedFiles } from './desktop-channel.mjs';
 
-export async function verifyPublication({ repo, version, minVersion, channel, dryRun, token }, request = fetch) {
+// GitHub sometimes does not answer: connect 0.11.588 lost its whole prepare to one HTTP 504 on the
+// feed download and 0.11.600 to one 30s timeout. A timeout, a network error, a 5xx or a 429 is
+// tried three times in all (10s, then 20s apart); any other answer is final, so a 401, 403 or
+// 404 still decides at once. Worst case is about two minutes a request, inside the 15-minute job.
+const TRIES = 3;
+const FIRST_DELAY_MS = 10_000;
+const transientStatus = (status) => status === 429 || status >= 500;
+const transientError = (error) => error?.name === 'TimeoutError' || error?.name === 'AbortError' || error instanceof TypeError;
+
+async function requestWithRetry(request, wait, url, init = {}) {
+  for (let attempt = 1, delay = FIRST_DELAY_MS; ; attempt++, delay *= 2) {
+    let response;
+    try {
+      // A fresh signal per attempt: a timed-out one stays aborted.
+      response = await request(url, { ...init, signal: AbortSignal.timeout(30_000) });
+    } catch (error) {
+      if (!transientError(error) || attempt >= TRIES) throw error;
+      await wait(delay);
+      continue;
+    }
+    if (!transientStatus(response.status) || attempt >= TRIES) return response;
+    await wait(delay);
+  }
+}
+
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+export async function verifyPublication({ repo, version, minVersion, channel, dryRun, token }, request = fetch, { wait = sleep } = {}) {
   compareVersions(version, version);
   const { feed } = channelConfig(channel);
   const components = version.split('.').map(Number);
@@ -23,9 +50,8 @@ export async function verifyPublication({ repo, version, minVersion, channel, dr
   }
   if (dryRun) return;
   const api = async (path, optional = false) => {
-    const response = await request(`https://api.github.com/repos/${repo}/${path}`, {
+    const response = await requestWithRetry(request, wait, `https://api.github.com/repos/${repo}/${path}`, {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
-      signal: AbortSignal.timeout(30_000),
     });
     if (optional && response.status === 404) return null;
     if (!response.ok) throw new Error(`Publication preflight ${path}: HTTP ${response.status}`);
@@ -55,9 +81,7 @@ export async function verifyPublication({ repo, version, minVersion, channel, dr
     if (!assets.some((asset) => asset.name === name)) throw new Error(`${feed} feed is missing ${name}`);
   }
   // Public asset URL: do not send the GitHub token across download redirects.
-  const response = await request(`https://github.com/${repo}/releases/download/${feed}/${feed}.json`, {
-    signal: AbortSignal.timeout(30_000),
-  });
+  const response = await requestWithRetry(request, wait, `https://github.com/${repo}/releases/download/${feed}/${feed}.json`);
   if (!response.ok) throw new Error(`${feed} feed download: HTTP ${response.status}`);
   const current = await response.json();
   if (compareVersions(current.version, version) > 0) throw new Error(`Refusing to downgrade the ${feed} feed`);

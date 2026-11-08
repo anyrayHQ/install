@@ -207,8 +207,9 @@ fi
 
 if [ "$require_all" -eq 1 ] && [ "${#missing[@]}" -gt 0 ]; then
   echo "::error::desktop release ${VERSION} is missing: ${missing[*]}. The CLI and the other OSes are published."
-  # Only an OS the stored set holds can be added by re-publishing that set; one it lacks failed
-  # verification at prepare time and needs a rebuild, which re-signs to new bytes.
+  # Only an OS the stored set holds can be added by re-publishing that set; one it lacks did not
+  # finish at prepare time (build, signing, verification or a CI fault) and needs a rebuild, which
+  # re-signs to new bytes.
   read -r -a stored <<< "${STORED_OSES:-}"
   for os in "${missing[@]}"; do
     in_set=0
@@ -220,7 +221,7 @@ if [ "$require_all" -eq 1 ] && [ "${#missing[@]}" -gt 0 ]; then
     elif [ "$in_set" -eq 1 ]; then
       echo "::error::${os} is in the stored desktop set for ${VERSION} but its upload to ${TAG} failed; re-dispatch mode=publish with the same version and set_sums_sha256 to add it from the stored set."
     else
-      echo "::error::the stored desktop set for ${VERSION} has no ${os} files: ${os} failed verification when the set was prepared, so it was never stored; a re-dispatch with the same set cannot add them; release a new version."
+      echo "::error::the stored desktop set for ${VERSION} has no ${os} files: ${os} did not finish when the set was prepared (a build, signing, verification or CI failure; that prepare run names it), so it was never stored; a re-dispatch with the same set cannot add them; release a new version."
     fi
   done
   exit 1

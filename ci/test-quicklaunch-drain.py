@@ -29,7 +29,7 @@ Why each case is here:
 
 Run: python3 ci/test-quicklaunch-drain.py   (needs node on PATH)
 """
-import os, re, shutil, signal, subprocess, sys, time
+import os, re, select, shutil, signal, subprocess, sys, time
 
 TPL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    'aws', 'anyray-quicklaunch.template.yaml')
@@ -148,14 +148,37 @@ else:
     test_hold = 1.5
     fast = script.replace(re.search(r'const drainMs = \d+;', script).group(0),
                           'const drainMs = %d;' % int(test_hold * 1000))
+    # The handlers are installed synchronously, so a line printed after the script's last statement
+    # proves they are in place. A fixed head start was not enough: on a loaded runner node had not
+    # reached them 0.5s in, the signal killed it (-15), and every check below failed with it.
+    READY = 'drain-test: handlers installed'
+    fast += "console.log('%s');\n" % READY
+    second_signal_after = 1.0  # a restarted hold would end at this + test_hold, well past the bound below
+
+    def wait_ready(p, timeout=20):
+        deadline = time.time() + timeout
+        seen = b''
+        while time.time() < deadline and p.poll() is None:
+            if select.select([p.stdout], [], [], 0.1)[0]:
+                chunk = os.read(p.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                seen += chunk
+                if READY.encode() in seen:
+                    return True, seen
+        return False, seen
 
     def run(signals):
         p = subprocess.Popen([node, '-e', fast], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(0.5)  # let node install its handlers
+        ready, early = wait_ready(p)
+        if not ready:
+            p.kill()
+            p.wait()
+            return False, 'never ready', 0.0, (early + p.stdout.read()).decode()
         start = time.time()
         for i, sig in enumerate(signals):
             if i:
-                time.sleep(0.5)
+                time.sleep(second_signal_after)
             p.send_signal(sig)
         time.sleep(0.2)
         alive_early = p.poll() is None
@@ -164,7 +187,7 @@ else:
         except subprocess.TimeoutExpired:
             p.kill()
             rc = 'timeout'
-        out = p.stdout.read().decode()
+        out = (early + p.stdout.read()).decode()
         return alive_early, rc, time.time() - start, out
 
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGQUIT):
@@ -179,7 +202,8 @@ else:
     alive, rc, elapsed, out = run([signal.SIGTERM, signal.SIGTERM])
     check('still up after the second signal', alive)
     check('exits 0', rc == 0, str(rc))
-    check('held once, from the first signal (%.1fs)' % elapsed, test_hold <= elapsed < test_hold + 0.4)
+    check('held once, from the first signal (%.1fs)' % elapsed,
+          test_hold <= elapsed < test_hold + second_signal_after - 0.1)
     check('logged once', out.count('stop signal') == 1, out.strip())
 
 if failures:

@@ -1277,7 +1277,9 @@ channel manifest binding them to `version` and `source_sha`.
 
 Before starting native runners, a Linux job checks the source SHA/version and
 publication eligibility: a newer feed or a feed awaiting recovery fails the run
-before any publication. `min_version` must not exceed `version`, and the release
+before any publication. Each of its GitHub lookups is tried three times when GitHub
+times out or answers 5xx or 429 (10s, then 20s apart); any other answer fails at
+once. `min_version` must not exceed `version`, and the release
 version must fit MSI's `255.255.65535` limits. Dry runs skip remote publication
 checks but still validate the source and version inputs. Nothing publishes, and the
 feed is never rewritten, unless that check succeeded. The combined CLI release runs

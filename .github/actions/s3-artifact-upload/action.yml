@@ -39,6 +39,8 @@ runs:
         ARTIFACT_PATH: ${{ inputs.path }}
         NO_FILES: ${{ inputs.if-no-files-found }}
         BUCKET: ${{ inputs.bucket }}
+        # Windows Git Bash rewrites a value starting with `/` (a base64 secret key, 1 in 64) for native aws.exe.
+        MSYS2_ENV_CONV_EXCL: AWS_
       run: |
         set -euo pipefail
 

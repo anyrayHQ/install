@@ -577,6 +577,7 @@ jobs:
         with:
           sparse-checkout: |
             .github/actions
+            scripts/apple-timestamp-retry.sh
             scripts/artifact-digest.sh
             scripts/safe-unzip.sh
             scripts/staple-notarized.sh
@@ -669,14 +670,15 @@ jobs:
           </plist>
           PLIST
 
-          codesign --force --options runtime --timestamp \
+          # Every timestamped signature retries an unanswered Apple timestamp request (0.11.602).
+          ./scripts/apple-timestamp-retry.sh codesign --force --options runtime --timestamp \
             --entitlements "$RUNNER_TEMP/connect-desktop-engine-entitlements.plist" \
             --identifier ai.anyray.connect-engine --sign "$APPLE_SIGNING_IDENTITY" "$engine"
           codesign --verify --strict --verbose=2 "$engine"
 
           # The nested engine is signed first; signing the bundle then signs the
           # app's main executable and seals the already-signed sidecar.
-          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
+          ./scripts/apple-timestamp-retry.sh codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign_details="$(codesign -dv --verbose=4 "$app" 2>&1)"
           printf '%s\n' "$codesign_details" | grep -Fxq 'TeamIdentifier=V53XMA78UF'
@@ -782,7 +784,7 @@ jobs:
             --resources "$resources" \
             --package-path "$packages" \
             "$work/unsigned.pkg"
-          productsign --sign "$INSTALLER_IDENTITY" "$work/unsigned.pkg" "$uninstaller"
+          ./scripts/apple-timestamp-retry.sh --remove "$uninstaller" productsign --sign "$INSTALLER_IDENTITY" "$work/unsigned.pkg" "$uninstaller"
           pkgutil --check-signature "$uninstaller"
           xar -tf "$uninstaller" | grep -qx 'Distribution'
 
@@ -888,7 +890,7 @@ jobs:
             "$unsigned_pkg"
 
           pkg="out/anyray-connect-desktop-${VERSION}-macos-universal.pkg"
-          productsign --sign "$INSTALLER_IDENTITY" "$unsigned_pkg" "$pkg"
+          ./scripts/apple-timestamp-retry.sh --remove "$pkg" productsign --sign "$INSTALLER_IDENTITY" "$unsigned_pkg" "$pkg"
           pkgutil --check-signature "$pkg"
           xar -tf "$pkg" | grep -qx 'Distribution'
           payload_files="$(pkgutil --payload-files "$pkg")"

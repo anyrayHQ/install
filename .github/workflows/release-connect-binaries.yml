@@ -602,6 +602,7 @@ jobs:
         with:
           sparse-checkout: |
             .github/actions
+            scripts/apple-timestamp-retry.sh
             scripts/artifact-digest.sh
             scripts/staple-notarized.sh
           sparse-checkout-cone-mode: false
@@ -901,7 +902,8 @@ jobs:
           # (connect.sh, selfUpdate.ts) chmod after download.
           chmod +x out/anyray-connect-darwin-*
           for bin in out/anyray-connect-darwin-*; do
-            codesign --force --options runtime --timestamp \
+            # Every timestamped signature retries an unanswered Apple timestamp request (0.11.602).
+            ./scripts/apple-timestamp-retry.sh codesign --force --options runtime --timestamp \
               --entitlements "$RUNNER_TEMP/entitlements.plist" \
               --identifier ai.anyray.connect --sign "$IDENTITY" "$bin"
             codesign --verify --strict --verbose=2 "$bin"
@@ -909,7 +911,7 @@ jobs:
 
           root="$RUNNER_TEMP/anyray-connect-pkgroot"
           universal_connect="$root/usr/local/bin/anyray-connect"
-          codesign --force --options runtime --timestamp \
+          ./scripts/apple-timestamp-retry.sh codesign --force --options runtime --timestamp \
             --entitlements "$RUNNER_TEMP/entitlements.plist" \
             --identifier ai.anyray.connect --sign "$IDENTITY" "$universal_connect"
           codesign --verify --strict --verbose=2 "$universal_connect"
@@ -996,7 +998,7 @@ jobs:
             exit 1
           fi
           echo "using installer signing identity $INSTALLER_IDENTITY"
-          productsign --sign "$INSTALLER_IDENTITY" \
+          ./scripts/apple-timestamp-retry.sh --remove out/anyray-connect.pkg productsign --sign "$INSTALLER_IDENTITY" \
             "$unsigned_pkg" out/anyray-connect.pkg
           pkgutil --check-signature out/anyray-connect.pkg
           xar -tf out/anyray-connect.pkg | grep -qx 'Distribution'

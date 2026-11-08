@@ -112,8 +112,10 @@ describe('desktop per-OS publication', { skip: !tools && 'needs bash, jq and sha
     assert.deepEqual(s.manifest().artifacts.some(({ name }) => name.endsWith('-linux-x64.deb')), true);
   });
 
-  // A publish run ships a stored set. An OS the set never had failed verification at prepare time,
-  // so re-dispatching the same set cannot add it; only an OS the set has but whose upload failed can.
+  // A publish run ships a stored set. An OS the set never had did not finish at prepare time (a build,
+  // signing, verification or CI fault), so re-dispatching the same set cannot add it; only an OS the
+  // set has but whose upload failed can. connect 0.11.595 lost Windows to an S3 SignatureDoesNotMatch,
+  // and the message blamed verification.
   const reconcileWithout = (t, os, env) => {
     const s = sandbox(t);
     for (const other of ['macos', 'windows', 'linux'].filter((name) => name !== os)) {
@@ -127,7 +129,8 @@ describe('desktop per-OS publication', { skip: !tools && 'needs bash, jq and sha
     assert.notEqual(result.status, 0);
     assert.match(result.stdout, /missing: windows/);
     assert.match(result.stdout, /the stored desktop set for 1\.2\.3 has no windows files/);
-    assert.match(result.stdout, /failed verification when the set was prepared/);
+    assert.match(result.stdout, /windows did not finish when the set was prepared \(a build, signing, verification or CI failure; that prepare run names it\), so it was never stored/);
+    assert.doesNotMatch(result.stdout, /failed verification/);
     assert.match(result.stdout, /a re-dispatch with the same set cannot add them; release a new version/);
     assert.doesNotMatch(result.stdout, /re-dispatch mode=publish/);
   });

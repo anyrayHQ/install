@@ -90,3 +90,16 @@ test('split without inference.host routes model paths to inference on the existi
   assert.ok(doc(h, 'HTTPRoute', 'anyray').includes('name: gateway-inference\n'));
   assert.equal(doc(h, 'HTTPRoute', 'anyray-inference'), '');
 });
+test('split hands both pods the inference URL only when inference.host is set', () => {
+  const s = render(split);
+  for (const name of ['anyray-gateway', 'anyray-inference']) {
+    assert.match(doc(s, 'Deployment', name), /- name: ANYRAY_INFERENCE_PUBLIC_URL\n\s+value: "https:\/\/inference\.anyray\.example\.com"\n/, name);
+  }
+  assert.doesNotMatch(render(['topology=split', 'ingress.enabled=true']), /ANYRAY_INFERENCE_PUBLIC_URL/);
+  assert.doesNotMatch(render(['inference.host=inference.anyray.example.com']), /ANYRAY_INFERENCE_PUBLIC_URL/);
+  assert.doesNotMatch(render([...split, 'inference.host=*.inference.anyray.example.com']), /ANYRAY_INFERENCE_PUBLIC_URL/, 'a wildcard is not a URL a client can connect to');
+  assert.doesNotMatch(render([...split, 'gateway.publicUrl=http://anyray.example.com']), /ANYRAY_INFERENCE_PUBLIC_URL/, 'a plain-HTTP install keeps its gateway URL');
+  for (const route of [['ingress.hosts[0].host=mgmt.anyray.example.com'], ['ingress.enabled=false', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway', 'httpRoute.hostnames[0]=mgmt.anyray.example.com']]) {
+    assert.match(render([...split, 'host=', ...route]), /- name: ANYRAY_INFERENCE_PUBLIC_URL\n\s+value: "https:\/\/inference\.anyray\.example\.com"\n/, route.join(' '));
+  }
+});

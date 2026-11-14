@@ -307,6 +307,24 @@ poll_stop() { # poll_stop <label>
   fi
 }
 
+# Upload a template for --template-url. DB_ENGINE_VERSION, when set, swaps the
+# database's pinned engine version in the STAGED copy only. RDS retires minor
+# versions, and a template that still pins a retired one cannot create a
+# database at all; the swap lets a lane that is not about the database run.
+# The lanes that judge the template itself never set it.
+stage_template() { # stage_template <file> <key>
+  local file="$1" pin="^      EngineVersion: '[0-9.]+'\$"
+  if [ -n "${DB_ENGINE_VERSION:-}" ]; then
+    [[ "$DB_ENGINE_VERSION" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "bad DB_ENGINE_VERSION" >&2; return 2; }
+    grep -qE "$pin" "$file" || { echo "no EngineVersion pin to swap in ${file}" >&2; return 2; }
+    local staged
+    staged="$(mktemp)"
+    sed -E "s/${pin}/      EngineVersion: '${DB_ENGINE_VERSION}'/" "$file" > "$staged"
+    file="$staged"
+  fi
+  aws s3 cp --only-show-errors "$file" "s3://${TEMPLATE_BUCKET}/${2}"
+}
+
 # The URL of the template the starting stack is created from: the candidate,
 # or this repo's template at BASE_REF, staged beside it.
 base_template_url() {
@@ -316,7 +334,7 @@ base_template_url() {
   file="$(mktemp)"
   git -C "${HERE}/.." fetch --quiet --depth 1 origin "$BASE_REF"
   git -C "${HERE}/.." show "${BASE_REF}:${TEMPLATE}" > "$file"
-  aws s3 cp --only-show-errors "$file" "s3://${TEMPLATE_BUCKET}/${BASE_KEY}"
+  stage_template "$file" "$BASE_KEY"
   printf 'https://%s.s3.%s.amazonaws.com/%s' "$TEMPLATE_BUCKET" "$REGION" "$BASE_KEY"
 }
 
@@ -357,7 +375,7 @@ aws s3api head-bucket --bucket "$TEMPLATE_BUCKET" 2>/dev/null || {
     --public-access-block-configuration \
     BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 }
-aws s3 cp --only-show-errors "$TEMPLATE" "s3://${TEMPLATE_BUCKET}/${CANDIDATE_KEY}"
+stage_template "$TEMPLATE" "$CANDIDATE_KEY"
 
 case "$LANE" in
   fresh)

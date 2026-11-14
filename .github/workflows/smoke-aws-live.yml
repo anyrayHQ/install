@@ -166,6 +166,11 @@ jobs:
           FROM_TAG: v1.10.595
           ROLL_TAG: ${{ matrix.lane == 'flip' && 'v1.10.600' || '' }}
           BASE_REF: ${{ matrix.lane == 'flip' && 'd4642909760eff08170ea44a3efaa95063f9a2c1' || '' }}
+          # RDS retired Postgres 17.5, which the template pins, in eu-central-1
+          # and us-east-1 (seen 14 Nov 2026). These two lanes are not about the
+          # database, so their staged copies get a version RDS still offers.
+          # The template lanes stay on the real pin, and fail on it.
+          DB_ENGINE_VERSION: ${{ (matrix.lane == 'flip' || matrix.lane == 'self') && '17.7' || '' }}
         run: ./scripts/smoke-aws.sh
 
       # Belt + braces: the script's EXIT trap tears down, but a runner kill

@@ -34,6 +34,13 @@ name: AWS quicklaunch live smoke
 # a failure of that kind shows in no other check. The role is denied
 # il-central-1 on purpose (the developer workspaces live there), so it is not
 # on the list.
+#
+# `enable-autoupdate` is the path of a customer whose stack runs with
+# EnableAutoUpdate=false: `flip` starts on a 28 Oct 2026 template and, in one
+# stack update to the candidate, turns it on and moves the version; `self`
+# turns it on alone and waits for the gateway to move itself. `flip` needs a
+# region where RDS still creates Postgres 17.5, which that old template pins:
+# eu-west-3 on 14 Nov 2026.
 
 on:
   # Manual-only. The pull_request + weekly-schedule triggers were removed to
@@ -50,7 +57,7 @@ on:
         description: Which lanes to run
         type: choice
         default: all
-        options: [all, fresh, update]
+        options: [all, fresh, update, enable-autoupdate]
       database:
         description: The update lane's database before the update
         type: choice
@@ -76,14 +83,16 @@ jobs:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     if: vars.AWS_CFN_SMOKE_ROLE_ARN != ''
     environment: cfn-smoke
-    timeout-minutes: 75
+    # `self` waits up to 35 minutes for the gateway's own update. The ceiling
+    # stays under the two-hour role session below.
+    timeout-minutes: 110
     permissions:
       id-token: write
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        lane: ${{ fromJSON(inputs.lanes == 'fresh' && '["fresh"]' || inputs.lanes == 'update' && '["update"]' || '["fresh","update","ha"]') }}
+        lane: ${{ fromJSON(inputs.lanes == 'fresh' && '["fresh"]' || inputs.lanes == 'update' && '["update"]' || inputs.lanes == 'enable-autoupdate' && '["flip","self"]' || '["fresh","update","ha"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -170,6 +179,13 @@ jobs:
           # Read by the update lane only: move the database to the newest
           # minor version before the update, as RDS does to running customers.
           DB_AHEAD: ${{ inputs.database == 'moved-ahead' && '1' || '0' }}
+          # Read only by the flip and self lanes. The stack starts four
+          # releases behind the candidate. `flip` creates it from the template
+          # as it stood on 28 Oct 2026 (install#657) and ends by asking the
+          # updater for a release newer than the candidate.
+          FROM_TAG: v1.10.595
+          ROLL_TAG: ${{ matrix.lane == 'flip' && 'v1.10.600' || '' }}
+          BASE_REF: ${{ matrix.lane == 'flip' && 'd4642909760eff08170ea44a3efaa95063f9a2c1' || '' }}
         run: ./scripts/smoke-aws.sh
 
       # Belt + braces: the script's EXIT trap tears down, but a runner kill

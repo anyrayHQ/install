@@ -14,7 +14,11 @@
 #             today), probe, then UPDATE it to the candidate — the exact path
 #             an existing customer takes — and probe again. Catches
 #             update-only failures (e.g. Cloud Map name collisions, in-place
-#             transitions ECS refuses) that a fresh create never sees.
+#             transitions ECS refuses) that a fresh create never sees. The
+#             update must leave the database alone: same engine version, no
+#             restart. With DB_AHEAD=1 the database is first moved to the
+#             newest minor version out of band, which is what RDS's own minor
+#             upgrades do to a running customer.
 #   ha      — create the candidate with HighAvailability + EnableAutoscaling,
 #             assert the auto-sized Multi-AZ database and the scaling targets
 #             and policies, probe, delete.
@@ -34,7 +38,9 @@
 #   (a real adt_ token; a placeholder never gets an entitlement lease, so the
 #   gateway's /readyz stays 503 and the stack never finishes creating).
 # Optional: STACK (name), PUBLISHED_URL, ALLOWED_CIDR (defaults to caller IP/32),
-#           TEMPLATE_BUCKET (defaults to anyray-cfn-smoke-tpl-<account>),
+#           TEMPLATE_BUCKET (defaults to anyray-cfn-smoke-tpl-<account>, with
+#           -<region> appended outside eu-central-1: the URL must name the
+#           bucket's own region),
 #           KEEP=1 to skip teardown (debugging).
 set -euo pipefail
 
@@ -47,7 +53,12 @@ ALLOWED_CIDR="${ALLOWED_CIDR:-$(curl -fsS --max-time 10 https://checkip.amazonaw
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEPLOYMENT_TOKEN="${DEPLOYMENT_TOKEN:?a real adt_ deployment token (repo secret ANYRAY_CFN_SMOKE_DEPLOYMENT_TOKEN)}"
 REGION="${AWS_REGION:-$(aws configure get region)}"
-TEMPLATE_BUCKET="${TEMPLATE_BUCKET:-anyray-cfn-smoke-tpl-$(aws sts get-caller-identity --query Account --output text)}"
+if [ -z "${TEMPLATE_BUCKET:-}" ]; then
+  TEMPLATE_BUCKET="anyray-cfn-smoke-tpl-$(aws sts get-caller-identity --query Account --output text)"
+  # The first bucket lives in eu-central-1. A stack elsewhere gets its own, so
+  # the regional URL below names the region the bucket is really in.
+  [ "$REGION" = eu-central-1 ] || TEMPLATE_BUCKET="${TEMPLATE_BUCKET}-${REGION}"
+fi
 CANDIDATE_KEY="candidate-${STACK}.yaml"
 CANDIDATE_URL="https://${TEMPLATE_BUCKET}.s3.${REGION}.amazonaws.com/${CANDIDATE_KEY}"
 
@@ -171,6 +182,44 @@ expect() { # expect <what> <actual> <wanted>
   echo "✓ ${1}: ${2}"
 }
 
+db_engine() {
+  aws rds describe-db-instances --db-instance-identifier "$(phys Db)" \
+    --query 'DBInstances[0].EngineVersion' --output text
+}
+
+# How many times RDS shut the database down or restarted it since <time>.
+db_restarts_since() {
+  aws rds describe-events --source-type db-instance --source-identifier "$(phys Db)" \
+    --start-time "$1" \
+    --query "length(Events[?contains(Message, 'shutdown') || contains(Message, 'restarted')])" \
+    --output text
+}
+
+# Move the database to the newest minor version of its major, the way RDS's
+# own minor upgrades do: outside CloudFormation, which keeps believing the
+# version the template named.
+move_db_ahead() {
+  local db from to
+  db="$(phys Db)"; from="$(db_engine)"
+  # The backticks are a JMESPath boolean literal, not shell interpolation.
+  # shellcheck disable=SC2016
+  to="$(aws rds describe-db-engine-versions --engine postgres --engine-version "$from" \
+    --query 'DBEngineVersions[0].ValidUpgradeTarget[?IsMajorVersionUpgrade==`false`].EngineVersion | [-1]' \
+    --output text)"
+  [ -n "$to" ] && [ "$to" != None ] || { echo "::error::no newer minor version than ${from}"; exit 1; }
+  echo "→ move the database ${from} → ${to} outside CloudFormation"
+  aws rds modify-db-instance --db-instance-identifier "$db" --engine-version "$to" \
+    --apply-immediately >/dev/null
+  for _ in $(seq 1 90); do
+    if [ "$(db_engine)" = "$to" ] && [ "$(aws rds describe-db-instances --db-instance-identifier "$db" \
+         --query 'DBInstances[0].DBInstanceStatus' --output text)" = available ]; then
+      break
+    fi
+    sleep 20
+  done
+  expect "database moved ahead" "$(db_engine)" "$to"
+}
+
 # Stage the candidate: it is past the 51,200-byte --template-body cap, so every
 # create/update of it goes through --template-url.
 aws s3api head-bucket --bucket "$TEMPLATE_BUCKET" 2>/dev/null || {
@@ -192,6 +241,8 @@ case "$LANE" in
     aws cloudformation wait stack-create-complete --stack-name "$STACK"
     expect "database (blank class, no HA)" "$(db_state)" $'db.t4g.small\tFalse'
     expect "scalable targets (autoscaling off)" "$(scalable_targets)" ""
+    # The template names the major version alone; RDS picks the minor.
+    expect "database major version" "$(db_engine | cut -d. -f1)" 17
     probe fresh
     ;;
   ha)
@@ -220,6 +271,12 @@ case "$LANE" in
       --parameters "${published_params[@]}" >/dev/null
     aws cloudformation wait stack-create-complete --stack-name "$STACK"
     probe published
+    if [ "${DB_AHEAD:-0}" = 1 ]; then
+      move_db_ahead
+      probe moved-ahead
+    fi
+    db_before="$(db_engine)"
+    update_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo "→ update ${STACK} to candidate (the customer upgrade path)"
     # The backticks are JMESPath boolean literals, not shell interpolation.
@@ -249,6 +306,11 @@ case "$LANE" in
       echo "::error::update-stack failed: ${upd_err}"; exit 1
     fi
     aws cloudformation wait stack-update-complete --stack-name "$STACK"
+    # A stack update is not a database change. CloudFormation sends RDS any
+    # new engine version the template names: a restart when the database is
+    # behind it, a failed update when it is ahead.
+    expect "database engine version after the update" "$(db_engine)" "$db_before"
+    expect "database restarts during the update" "$(db_restarts_since "$update_started")" 0
     probe updated
     ;;
   *) echo "unknown LANE=${LANE}"; exit 2 ;;

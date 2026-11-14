@@ -805,6 +805,16 @@ Resources:
                               lambda: json.dumps({'username': 'postgres',
                                                   'password': rnd.token_hex(32)})),
                       }
+                      # The database's engine version, decided once per stack
+                      # and never changed after (see Db.EngineVersion). A new
+                      # stack gets the major version alone. A stack that is
+                      # already running reaches here on an Update with nothing
+                      # stored: it was created with 17.5, the only value this
+                      # template ever pinned, and must keep saying so.
+                      ensure(prefix + 'db-engine-version',
+                             lambda: '17' if rt == 'Create' else '17.5')
+                      data['DbEngineVersion'] = sm.get_secret_value(
+                          SecretId=prefix + 'db-engine-version')['SecretString']
                       return send(event, context, 'SUCCESS', data, prefix + 'generate')
                   if action == 'composeDbUrl':
                       return send(event, context, 'SUCCESS',
@@ -821,7 +831,9 @@ Resources:
       ServiceToken: !GetAtt SecretFn.Arn
       Action: generate
       Prefix: !Sub '${AWS::StackName}/anyray/'
-      Names: [content-key, optimizer-token, admin-token, pseudonym-salt, db-master]
+      # Adding a name is also what makes CloudFormation call `generate` again
+      # on a running stack's update, so the stack gets the new attribute.
+      Names: [content-key, optimizer-token, admin-token, pseudonym-salt, db-master, db-engine-version]
 
   DbUrlSecret:
     Type: Custom::AnyrayDbUrl
@@ -1029,7 +1041,21 @@ Resources:
     UpdateReplacePolicy: Snapshot
     Properties:
       Engine: postgres
-      EngineVersion: '17.5'
+      # Decided once per stack by SecretFn's `generate` and never changed
+      # after: '17' for a new stack (RDS picks the region's current 17.x),
+      # '17.5' for a stack created while this template pinned it.
+      #
+      # A full x.y pin is what stopped new installs in November 2026: RDS
+      # retired 17.5 and every new stack failed on "Cannot find version 17.5
+      # for postgres". The pin cannot simply be changed either. CloudFormation
+      # sends any change of this property to RDS, which restarts and upgrades
+      # a database that is behind the new value and FAILS the stack update
+      # for one its own minor upgrades moved ahead ("Cannot upgrade postgres
+      # from 17.11 to 17.9"). A value that never changes is never sent.
+      #
+      # No value at all is not an option: RDS then picks its default major,
+      # Postgres 18 today.
+      EngineVersion: !GetAtt AppSecrets.DbEngineVersion
       DBInstanceClass: !If
         - AutoDbClass
         - !If [LargeDb, db.t4g.medium, db.t4g.small]

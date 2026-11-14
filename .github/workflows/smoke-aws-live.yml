@@ -32,8 +32,9 @@ name: AWS quicklaunch live smoke
 #
 # Regions: what a region offers decides what the template can create there, and
 # a failure of that kind shows in no other check. The role is denied
-# il-central-1 on purpose (the developer workspaces live there), so it is not
-# on the list.
+# il-central-1 on purpose (the developer workspaces live there). A run there
+# fails at once unless an account administrator has narrowed that deny for the
+# run and made the smoke VPC and template bucket beforehand.
 #
 # `enable-autoupdate` is the path of a customer whose stack runs with
 # EnableAutoUpdate=false: `flip` starts on a 28 Oct 2026 template and, in one
@@ -52,7 +53,7 @@ on:
         description: Region the stacks are created in
         type: choice
         default: eu-central-1
-        options: [eu-central-1, eu-west-3, us-east-1]
+        options: [eu-central-1, eu-west-3, us-east-1, il-central-1]
       lanes:
         description: Which lanes to run
         type: choice

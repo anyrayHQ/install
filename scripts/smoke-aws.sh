@@ -18,15 +18,21 @@
 #   ha      — create the candidate with HighAvailability + EnableAutoscaling,
 #             assert the auto-sized Multi-AZ database and the scaling targets
 #             and policies, probe, delete.
-#   flip    — a stack that runs with EnableAutoUpdate=false, one release
-#             behind (FROM_TAG), gets ONE stack update on its previous
-#             template: EnableAutoUpdate=true and ImageTag=TO_TAG. Polls the
-#             gateway through the update, asserts the updater now exists and
-#             every service moved, then asks the updater for ROLL_TAG and
-#             asserts that roll too.
-#   self    — the same starting stack, but the update flips EnableAutoUpdate
-#             only. The gateway now has an applier and is behind, so it must
-#             move itself to TO_TAG with no further stack update.
+#   flip    — a stack that runs with EnableAutoUpdate=false, behind
+#             (FROM_TAG) and on an older template (BASE_REF), gets ONE stack
+#             update to the candidate: EnableAutoUpdate=true and
+#             ImageTag=TO_TAG. Polls the gateway through the update, asserts
+#             the updater now exists and every service moved, then asks the
+#             updater for ROLL_TAG and asserts that roll too.
+#   self    — a stack on the candidate, same starting state, but the update
+#             flips EnableAutoUpdate only. The gateway now has an applier and
+#             is behind, so it must move itself to TO_TAG with no further
+#             stack update.
+#
+# Both lanes hand CloudFormation the template on every update. "Use previous
+# template" with new parameter values is refused on this template: it carries
+# the AWS::LanguageExtensions transform, and CloudFormation then answers "No
+# updates are to be performed" and changes nothing (seen live, 14 Nov 2026).
 #
 # The candidate is staged in S3 (TEMPLATE_BUCKET) and deployed by URL: the
 # template is past CloudFormation's 51,200-byte --template-body cap.
@@ -353,13 +359,14 @@ update_params() {
   printf '%s' "$params"
 }
 
-# One stack update on the template the stack already has, polled throughout.
-update_on_previous_template() { # <label> <key> <value> [<key> <value>...]
+# One stack update to the candidate template, polled throughout. Never
+# --use-previous-template: see the note on these lanes at the top.
+update_to_candidate() { # <label> <key> <value> [<key> <value>...]
   local label="$1"; shift
   local params
   params="$(update_params "$@")"
   poll_start
-  aws cloudformation update-stack --stack-name "$STACK" --use-previous-template \
+  aws cloudformation update-stack --stack-name "$STACK" --template-url "$CANDIDATE_URL" \
     --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
     --parameters "$params" >/dev/null
   aws cloudformation wait stack-update-complete --stack-name "$STACK"
@@ -471,10 +478,10 @@ case "$LANE" in
 
     if [ "$LANE" = flip ]; then
       echo "→ one stack update: EnableAutoUpdate=true and ImageTag=${TO_TAG}"
-      update_on_previous_template flip EnableAutoUpdate true ImageTag "$TO_TAG"
+      update_to_candidate flip EnableAutoUpdate true ImageTag "$TO_TAG"
     else
       echo "→ one stack update: EnableAutoUpdate=true only (stays on ${FROM_TAG})"
-      update_on_previous_template flip EnableAutoUpdate true
+      update_to_candidate flip EnableAutoUpdate true
     fi
     expect "updater while EnableAutoUpdate=true" "$(has_updater)" yes
     show_status
@@ -534,7 +541,7 @@ case "$LANE" in
       expect "gateway version (self-updated)" "$(status_field .version)" "${TO_TAG#v}"
 
       echo "→ the stack's own ImageTag catches up to ${TO_TAG}"
-      update_on_previous_template "ImageTag catch-up" ImageTag "$TO_TAG"
+      update_to_candidate "ImageTag catch-up" ImageTag "$TO_TAG"
       expect "image tags (ImageTag caught up)" "$(image_tags)" "$TO_TAG"
       probe caught-up
     fi

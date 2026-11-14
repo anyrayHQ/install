@@ -31,9 +31,10 @@ name: AWS quicklaunch live smoke
 # this file, and neither is interpolated into a run: block.
 #
 # The `enable-autoupdate` suite is the path of a customer whose stack runs with
-# EnableAutoUpdate=false: `flip` turns it on and moves the version in one stack
-# update on a 28 Oct 2026 template, `self` turns it on alone on today's template
-# and waits for the gateway to move itself. Two stacks, one database each.
+# EnableAutoUpdate=false: `flip` starts on a 28 Oct 2026 template and, in one
+# stack update to the candidate, turns it on and moves the version; `self`
+# turns it on alone and waits for the gateway to move itself. Two stacks, one
+# database each.
 
 on:
   # Manual-only. The pull_request + weekly-schedule triggers were removed to

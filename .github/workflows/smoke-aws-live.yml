@@ -27,12 +27,30 @@ name: AWS quicklaunch live smoke
 #
 # Injection-safety note: the only ${{ }} used inside run: are matrix.lane
 # (defined in this file) and github.run_id (numeric) — no event-controlled text.
+# The two inputs are choices: they pick a lane list and a region written in
+# this file, and neither is interpolated into a run: block.
+#
+# The `enable-autoupdate` suite is the path of a customer whose stack runs with
+# EnableAutoUpdate=false: `flip` turns it on and moves the version in one stack
+# update on a 28 Oct 2026 template, `self` turns it on alone on today's template
+# and waits for the gateway to move itself. Two stacks, one database each.
 
 on:
   # Manual-only. The pull_request + weekly-schedule triggers were removed to
   # stop recurring AWS spend (each run stands up real ECS/RDS/ALB stacks). Run
   # it by hand from the Actions tab before shipping a change to the template.
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Which lanes to run
+        type: choice
+        default: template
+        options: [template, enable-autoupdate]
+      region:
+        description: Region the stacks are created in
+        type: choice
+        default: eu-central-1
+        options: [eu-central-1, il-central-1]
 
 permissions:
   contents: read
@@ -42,7 +60,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: eu-central-1
+  AWS_REGION: ${{ inputs.region || 'eu-central-1' }}
   TEMPLATE: aws/anyray-quicklaunch.template.yaml
 
 jobs:
@@ -53,16 +71,25 @@ jobs:
     runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
     if: vars.AWS_CFN_SMOKE_ROLE_ARN != ''
     environment: cfn-smoke
-    timeout-minutes: 75
+    # `self` waits up to 35 minutes for the gateway's own update. The ceiling
+    # stays under the two-hour role session below.
+    timeout-minutes: 110
     permissions:
       id-token: write
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        lane: [fresh, update, ha]
+        lane: ${{ fromJSON(inputs.suite == 'enable-autoupdate' && '["flip","self"]' || '["fresh","update","ha"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # In a region with no smoke VPC yet, two lanes starting together would
+      # each create one (the duplicate-VPC race the next step works around).
+      # Let `flip` create it first.
+      - name: Let the first lane create the smoke VPC
+        if: matrix.lane == 'self'
+        run: sleep 150
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
@@ -131,6 +158,14 @@ jobs:
           # /readyz stays 503 until Billing grants an entitlement lease, so a
           # placeholder token can never pass the ECS deployment.
           DEPLOYMENT_TOKEN: ${{ secrets.ANYRAY_CFN_SMOKE_DEPLOYMENT_TOKEN }}
+          # Read only by the flip and self lanes. The stack starts four
+          # releases behind the candidate. `flip` creates it from the template
+          # as it stood on 28 Oct 2026 (install#657), the oldest one that
+          # deploys in every region, and ends by asking the updater for a
+          # release newer than the candidate.
+          FROM_TAG: v1.10.595
+          ROLL_TAG: ${{ matrix.lane == 'flip' && 'v1.10.600' || '' }}
+          BASE_REF: ${{ matrix.lane == 'flip' && 'd4642909760eff08170ea44a3efaa95063f9a2c1' || '' }}
         run: ./scripts/smoke-aws.sh
 
       # Belt + braces: the script's EXIT trap tears down, but a runner kill

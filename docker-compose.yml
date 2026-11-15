@@ -67,6 +67,9 @@ services:
       # your configured provider serves (a bare model is read under `anthropic`).
       ANYRAY_DEFAULT_MODEL: ${ANYRAY_DEFAULT_MODEL:-anthropic/claude-sonnet-5-5}
       ANYRAY_CONTENT_KEY: ${ANYRAY_CONTENT_KEY:?run ./setup.sh first}
+      # Rotating the content key: put the old key here (comma-separated, up to
+      # four) so portable threads sealed under it keep working. Empty = none.
+      ANYRAY_CONTENT_KEY_PREVIOUS: ${ANYRAY_CONTENT_KEY_PREVIOUS:-}
       ANYRAY_ALLOW_PLAINTEXT: ${ANYRAY_ALLOW_PLAINTEXT:-false}
       ANYRAY_ADMIN_TOKEN: ${ANYRAY_ADMIN_TOKEN:?run ./setup.sh first}
       # Optional override of the token the gateway sends to the updater when an

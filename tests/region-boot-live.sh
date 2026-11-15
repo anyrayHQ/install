@@ -8,8 +8,8 @@
 #     config arrived from home; CI has no licence, so no lease);
 #   - anyray_region_schema_migrations has rows in the regional database;
 #   - the region gateway's /livez answers 200;
-#   - an authorized optimizer request is not 503 region_state_pending (the region
-#     optimizer adopted home's state through gateway-internal).
+#   - the optimizer runs in region mode (bootstrap-durable answers 404) and
+#     adopted home's state through gateway-internal (a valid optimize call answers 200).
 #
 # Home serves https://home.anyray.example.com through ingress-nginx with a
 # self-signed CA; a CoreDNS rewrite points that name at the controller, and the
@@ -232,22 +232,32 @@ region_livez() {
       .catch((e) => console.log(String(e)));
   ' 2>&1 | tail -1
 }
-# POST /v1/optimize with the optimizer token: past auth, a region optimizer without home's state answers 503 region_state_pending.
-optimizer_adopted_state() {
+# opt_status <path> <json body>: the status (and body head) a POST to the region optimizer answers with its own token.
+opt_status() {
   k -n region exec deploy/anyray-optimizer -c optimizer -- /nodejs/bin/node -e '
-    fetch("http://127.0.0.1:8088/v1/optimize", {
+    fetch(`http://127.0.0.1:8088${process.argv[1]}`, {
       method: "POST",
       headers: { authorization: `Bearer ${process.env.ANYRAY_OPTIMIZER_TOKEN}`, "content-type": "application/json" },
-      body: "{}",
-    }).then(async (r) => {
-      const body = await r.text();
-      console.log(![401, 403, 503].includes(r.status) ? "PASS" : `status=${r.status} ${body.slice(0, 120)}`);
-    }).catch((e) => console.log(String(e)));
-  ' 2>&1 | tail -1
+      body: process.argv[2],
+    }).then(async (r) => console.log(`${r.status} ${(await r.text()).slice(0, 120)}`))
+      .catch((e) => console.log(String(e)));
+  ' "$1" "$2" 2>&1 | tail -1
+}
+# Region mode: bootstrap-durable answers 404 before auth there; at home it is an admin route.
+optimizer_region_mode() {
+  local out
+  out="$(opt_status /admin/optimizer/bootstrap-durable '{}')"
+  case "$out" in "404 "*) echo PASS ;; *) echo "status=$out" ;; esac
+}
+# Adopted state: a valid optimize body answers 200; without home's state it is 503 region_state_pending.
+optimizer_adopted_state() {
+  local out
+  out="$(opt_status /v1/optimize '{"endpoint":"/v1/messages","request":{"model":"synthetic-model","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}}')"
+  case "$out" in "200 "*) echo PASS ;; *) echo "status=$out" ;; esac
 }
 
 log "D8 checks, up to ${DEADLINE_S}s after the region install"
-CHECKS=(home_lists_region region_health_reason region_migrations region_livez optimizer_adopted_state)
+CHECKS=(home_lists_region region_health_reason region_migrations region_livez optimizer_region_mode optimizer_adopted_state)
 declare -A RESULT
 while :; do
   pending=0

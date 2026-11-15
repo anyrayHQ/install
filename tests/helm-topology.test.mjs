@@ -163,6 +163,21 @@ test('region: with networkPolicy, gateway takes 8787 from anywhere and 8789 from
   assert.equal(doc(render(['networkPolicy.enabled=true']), 'NetworkPolicy', 'anyray-gateway'), '');
 });
 
+test('region: with request signing, the gateway holds the private key and the optimizer never does', () => {
+  const s = render([...region, 'optimizerRequestSigning.enabled=true', 'optimizerRequestSigning.enforce=true']);
+  assert.match(doc(s, 'Deployment', 'anyray-gateway'), /- name: ANYRAY_OPTIMIZER_SIGNING_KEY\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: anyray-secrets\n\s+key: ANYRAY_OPTIMIZER_SIGNING_KEY\n\s+optional: true\n/);
+  const o = doc(s, 'Deployment', 'anyray-optimizer');
+  assert.doesNotMatch(o, /ANYRAY_OPTIMIZER_SIGNING_KEY/);
+  assert.match(o, /key: ANYRAY_OPTIMIZER_VERIFY_KEY\n/);
+  assert.doesNotMatch(doc(render(region), 'Deployment', 'anyray-gateway'), /ANYRAY_OPTIMIZER_SIGNING_KEY/);
+});
+
+test('region: the gateway keeps the concurrency cap and auth-fail limit', () => {
+  const g = doc(render([...region, 'gateway.maxConcurrentRequests=7', 'gateway.authFailLimit=8']), 'Deployment', 'anyray-gateway');
+  assert.match(g, /- name: ANYRAY_MAX_CONCURRENT_REQUESTS\n\s+value: "7"\n/);
+  assert.match(g, /- name: ANYRAY_AUTH_FAIL_LIMIT\n\s+value: "8"\n/);
+});
+
 for (const [values, err] of [
   [[...region, 'gateway.extraEnv[0].name=ANYRAY_ADMIN_TOKEN', 'gateway.extraEnv[0].value=x'], /ANYRAY_ADMIN_TOKEN is forbidden in a region/],
   [[...region, 'gateway.extraEnv[0].name=ANYRAY_OBSERVABILITY_DB_URL', 'gateway.extraEnv[0].value=x'], /forbidden in a region/],

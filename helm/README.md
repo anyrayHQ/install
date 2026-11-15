@@ -710,6 +710,57 @@ default two of each use up to 64. On older images, each gateway pod uses about 4
 and each optimizer pod about 20, or ~135 for two of each. Raise the limit before raising replicas or enabling an HPA. For
 external Postgres, size its limit the same way.
 
+## Topology
+
+`topology` picks what the release runs. The default, `single`, is everything
+above.
+
+**`split`** adds an `inference` Deployment and a `gateway-inference` Service for
+model traffic, so model requests scale apart from management. It needs Ingress or
+HTTPRoute and a gateway image of `v1.10.563` or newer. `inference.host` optionally
+gives model traffic its own hostname. The Secret is the same as `single`.
+
+```yaml
+topology: split
+ingress:
+  enabled: true
+inference:
+  host: inference.anyray.example.com
+```
+
+**`region`** runs a second region against an existing home install. The release
+runs the gateway and the optimizer on their own Postgres (bundled or
+`postgres.external`), with no proxy and no console. Every Ingress or HTTPRoute
+path goes to the gateway, which forwards management requests home. It needs gateway
+and optimizer images of `v1.10.604` or newer. Mint the region on home first; the
+token carries the region name and home's URL.
+
+```yaml
+topology: region
+host: eu.anyray.example.com
+ingress:
+  enabled: true
+```
+
+The region's Secret holds only these keys:
+
+| Key | Value |
+|---|---|
+| `ANYRAY_REGION_TOKEN` | the token home returned when you added the region |
+| `ANYRAY_OPTIMIZER_TOKEN` | a new random value for this region |
+| `POSTGRES_PASSWORD` | the bundled Postgres password (omit with `postgres.external`) |
+
+The chart refuses home-only variables in `gateway.extraEnv` or
+`optimizer.extraEnv` under `region`: `ANYRAY_ADMIN_TOKEN`,
+`ANYRAY_DEPLOYMENT_TOKEN`, `ANYRAY_CONTENT_KEY`, `ANYRAY_METERING_ENABLED`,
+`ANYRAY_PSEUDONYM_SALT` and `ANYRAY_OBSERVABILITY_DB_URL`.
+
+A `region` release also creates the ClusterIP Service `gateway-internal` on port
+8789. The region optimizer pulls home's state through it. Never route it from
+an Ingress or HTTPRoute. With `networkPolicy.enabled`, only optimizer pods reach
+8789. See [Regions](https://docs.anyray.ai/operate/regions) for health and
+operations.
+
 ## External Postgres
 
 The chart bundles a single-replica Postgres StatefulSet for the gateway's trace +

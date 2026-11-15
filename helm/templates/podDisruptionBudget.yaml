@@ -18,7 +18,10 @@ completing the node upgrade. Since chart 0.8.0 every workload defaults to two
 replicas, so all three are covered out of the box.
 */}}
 {{- if .Values.podDisruptionBudget.enabled }}
-{{- $components := list "gateway" "optimizer" "proxy" }}
+{{- $components := list "gateway" "optimizer" }}
+{{- if ne .Values.topology "region" }}
+{{- $components = append $components "proxy" }}
+{{- end }}
 {{- if eq .Values.topology "split" }}
 {{- $components = append $components "inference" }}
 {{- end }}

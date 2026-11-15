@@ -1,3 +1,4 @@
+# single | split | region. region runs a second region against a home (README "Topology").
 topology: single
 
 inference:

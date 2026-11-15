@@ -44,7 +44,8 @@ spec:
   {{- $proxy := printf "%s-proxy" (include "anyray.fullname" .) }}
   rules:
     {{- range $rule := $edge.httpRoute }}
-    {{- $console := eq $rule.target "console" }}
+    {{- /* A region serves no console: its management paths reach the gateway, which forwards them home. */}}
+    {{- $console := and (eq $rule.target "console") (ne $.Values.topology "region") }}
     - matches:
         {{- range $rule.matches }}
         - path:

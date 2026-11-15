@@ -77,4 +77,32 @@ spec:
     {{- with .Values.networkPolicy.optimizerExtraIngress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+{{- if eq .Values.topology "region" }}
+---
+{{- /* Region: 8787 is the public listener; 8789 hands out home's keys, so only optimizer pods reach it. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "anyray.fullname" . }}-gateway
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8787
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8789
+{{- end }}
 {{- end }}

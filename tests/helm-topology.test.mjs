@@ -103,3 +103,80 @@ test('split hands both pods the inference URL only when inference.host is set', 
     assert.match(render([...split, 'host=', ...route]), /- name: ANYRAY_INFERENCE_PUBLIC_URL\n\s+value: "https:\/\/inference\.anyray\.example\.com"\n/, route.join(' '));
   }
 });
+
+const region = ['topology=region', 'ingress.enabled=true', 'image.tag=policy-stable'];
+const regionForbidden = /ANYRAY_ADMIN_TOKEN|ANYRAY_DEPLOYMENT_TOKEN|ANYRAY_CONTENT_KEY|ANYRAY_METERING_ENABLED|ANYRAY_PSEUDONYM_SALT|ANYRAY_OBSERVABILITY_DB_URL/;
+
+test('region: the gateway pod runs the region entry with region env only', () => {
+  const g = doc(render(region), 'Deployment', 'anyray-gateway');
+  assert.match(g, /args: \["node", "build\/region-server\.js"\]/);
+  assert.match(g, /- name: ANYRAY_REGION_TOKEN\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: anyray-secrets\n\s+key: ANYRAY_REGION_TOKEN\n/);
+  assert.match(g, /- name: ANYRAY_OPTIMIZER_URL\n\s+value: "http:\/\/optimizer:8088"\n/);
+  assert.match(g, /key: ANYRAY_OPTIMIZER_TOKEN\n/);
+  assert.match(g, /- name: ANYRAY_SPEND_DB_URL\n/);
+  assert.match(g, /- name: ANYRAY_GATEWAY_PUBLIC_URL\n\s+value: "https:\/\/anyray\.example\.com"\n/);
+  assert.doesNotMatch(g, regionForbidden);
+  assert.match(g, /livenessProbe:\n\s+httpGet:\n\s+path: \/livez\n\s+port: 8787\n/);
+  assert.match(g, /- containerPort: 8789\n/);
+  const opt = ['gateway.trustProxy=true', 'gateway.rateLimitRpm=60', 'gateway.maxBodyBytes=1000', 'gateway.extraEnv[0].name=SYNTHETIC_FLAG', 'gateway.extraEnv[0].value=on'];
+  const withOpt = doc(render([...region, ...opt]), 'Deployment', 'anyray-gateway');
+  for (const name of ['ANYRAY_TRUST_PROXY', 'ANYRAY_RATE_LIMIT_RPM', 'ANYRAY_MAX_BODY_BYTES', 'SYNTHETIC_FLAG']) assert.match(withOpt, new RegExp(`- name: ${name}\n`), name);
+});
+
+test('region: the optimizer pulls from the internal service and holds no home secret', () => {
+  const o = doc(render(region), 'Deployment', 'anyray-optimizer');
+  assert.match(o, /- name: ANYRAY_REGION_GATEWAY_URL\n\s+value: "http:\/\/gateway-internal:8789"\n/);
+  assert.match(o, /key: ANYRAY_OPTIMIZER_TOKEN\n/);
+  assert.match(o, /- name: ANYRAY_SPEND_DB_URL\n/);
+  assert.doesNotMatch(o, /ANYRAY_ADMIN_TOKEN|ANYRAY_CONTENT_KEY|ANYRAY_CONTENT_MODE|ANYRAY_ALLOW_PLAINTEXT|ANYRAY_OBSERVABILITY_DB_URL/);
+});
+
+test('region: gateway-internal is ClusterIP, publishes not-ready endpoints, never on the edge', () => {
+  const s = render(region);
+  const svc = doc(s, 'Service', 'gateway-internal');
+  assert.match(svc, /type: ClusterIP\n/);
+  assert.match(svc, /publishNotReadyAddresses: true\n/);
+  assert.match(svc, /- port: 8789\n\s+targetPort: 8789\n/);
+  assert.match(svc, /selector:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: gateway\n/);
+  assert.doesNotMatch(doc(s, 'Ingress', 'anyray'), /gateway-internal|8789/);
+  const h = render([...region, 'ingress.enabled=false', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway']);
+  assert.doesNotMatch(doc(h, 'HTTPRoute', 'anyray'), /gateway-internal|8789/);
+  assert.equal(doc(render(['ingress.enabled=true']), 'Service', 'gateway-internal'), '');
+});
+
+test('region: no proxy is rendered and every edge target is the gateway', () => {
+  const s = render([...region, 'proxy.autoscaling.enabled=true', 'networkPolicy.enabled=true']);
+  assert.equal(doc(s, 'Deployment', 'anyray-proxy'), '');
+  assert.doesNotMatch(s, /anyray-proxy|component: proxy/);
+  const ing = doc(s, 'Ingress', 'anyray');
+  assert.deepEqual([...new Set(ing.match(/name: \S+\n\s+port:\n\s+number: \d+/g).map(b => b.replace(/\s+/g, ' ')))], ['name: gateway port: number: 8787']);
+  const h = doc(render([...region, 'ingress.enabled=false', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway']), 'HTTPRoute', 'anyray');
+  assert.deepEqual([...new Set(h.match(/- name: \S+\n\s+port: \d+/g).map(b => b.replace(/\s+/g, ' ')))], ['- name: gateway port: 8787']);
+  const pins = JSON.parse(JSON.parse(doc(s, 'CronJob', 'anyray-autoupdate').split('name: AUTOUPDATE_PINS')[1].split('\n')[1].trim().slice(7)));
+  assert.deepEqual(pins.map(p => p.container), ['gateway', 'optimizer']);
+});
+
+test('region: with networkPolicy, gateway takes 8787 from anywhere and 8789 from optimizer pods only', () => {
+  const np = doc(render([...region, 'networkPolicy.enabled=true']), 'NetworkPolicy', 'anyray-gateway');
+  assert.match(np, /podSelector:\n\s+matchLabels:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: gateway\n/);
+  assert.match(np, /ingress:\n\s+- ports:\n\s+- protocol: TCP\n\s+port: 8787\n\s+- from:\n\s+- podSelector:\n\s+matchLabels:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: optimizer\n\s+app\.kubernetes\.io\/instance: topology-test\n\s+ports:\n\s+- protocol: TCP\n\s+port: 8789\n/);
+  assert.equal(doc(render(['networkPolicy.enabled=true']), 'NetworkPolicy', 'anyray-gateway'), '');
+});
+
+for (const [values, err] of [
+  [[...region, 'gateway.extraEnv[0].name=ANYRAY_ADMIN_TOKEN', 'gateway.extraEnv[0].value=x'], /ANYRAY_ADMIN_TOKEN is forbidden in a region/],
+  [[...region, 'gateway.extraEnv[0].name=ANYRAY_OBSERVABILITY_DB_URL', 'gateway.extraEnv[0].value=x'], /forbidden in a region/],
+  [[...region, 'optimizer.extraEnv[0].name=ANYRAY_CONTENT_KEY', 'optimizer.extraEnv[0].value=x'], /ANYRAY_CONTENT_KEY is forbidden in a region/],
+  [[...region, 'image.tag=v1.10.600'], /region needs gateway image v1\.10\.604/],
+  [[...region, 'images.optimizer.tag=v1.10.600'], /region needs optimizer image v1\.10\.604/],
+]) test(`region refuses ${values.slice(region.length).join(' ')}`, () => { const r = helm(values); assert.notEqual(r.status, 0); assert.match(r.stderr, err); });
+
+test('region renders on the image floor', () => {
+  render([...region, 'image.tag=v1.10.604']);
+});
+
+test('single render is unchanged by the region work', () => {
+  // Frozen with CI's helm 3; helm 4 adds blank lines between documents.
+  const lines = s => s.split('\n').filter(l => l.trim());
+  assert.deepEqual(lines(render([])), lines(readFileSync('tests/fixtures/single-render.yaml', 'utf8')));
+});

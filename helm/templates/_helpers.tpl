@@ -603,6 +603,14 @@ silently keeps the old single-replica posture.
        ANY-407 had already stopped per-pod mints under content mode off). */}}
 {{- define "anyray.multiOptimizerFloor" -}}v1.10.403{{- end }}
 
+{{- /* First appVersion whose gateway and optimizer start a region from env. */}}
+{{- define "anyray.regionFloor" -}}v1.10.604{{- end }}
+
+{{- /* Home-only env a region refuses to start with; topologyValidation keeps it out of both extraEnvs. */}}
+{{- define "anyray.regionForbiddenEnv" -}}
+{{- list "ANYRAY_ADMIN_TOKEN" "ANYRAY_DEPLOYMENT_TOKEN" "ANYRAY_CONTENT_KEY" "ANYRAY_METERING_ENABLED" "ANYRAY_PSEUDONYM_SALT" "ANYRAY_OBSERVABILITY_DB_URL" | toJson -}}
+{{- end }}
+
 {{- /* Optimizer replica count. An explicit value wins; unset resolves to 2, or
        to 1 wherever a default of 2 would render stricter than chart 0.7.x did
        (persistence on, or an image below the multi-replica floor). */}}

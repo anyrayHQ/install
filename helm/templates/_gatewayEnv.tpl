@@ -79,10 +79,7 @@
        to https://<host> (the Ingress endpoint) when publicUrl isn't set, so a
        plain `--host` install doesn't leave enrollment links with no gateway.
        NodePort / non-TLS installs override via gateway.publicUrl. */}}
-{{- $gatewayPublicUrl := .Values.gateway.publicUrl }}
-{{- if and (not $gatewayPublicUrl) .Values.host }}
-{{- $gatewayPublicUrl = printf "https://%s" .Values.host }}
-{{- end }}
+{{- $gatewayPublicUrl := include "anyray.gatewayPublicUrl" . }}
 {{- with $gatewayPublicUrl }}
 - name: ANYRAY_GATEWAY_PUBLIC_URL
   value: {{ . | quote }}
@@ -127,6 +124,50 @@
 {{- end }}
 {{- with .Values.gateway.authFailLimit }}
 - name: ANYRAY_AUTH_FAIL_LIMIT
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.maxBodyBytes }}
+- name: ANYRAY_MAX_BODY_BYTES
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.extraEnv }}
+{{- toYaml . | nindent 0 }}
+{{- end }}
+{{- end }}
+
+{{- define "anyray.gatewayPublicUrl" -}}
+{{- .Values.gateway.publicUrl | default (ternary (printf "https://%s" .Values.host) "" (not (empty .Values.host))) -}}
+{{- end }}
+
+{{- /* Region gateway env: the region token is the mode, and the spend DB URL is the regional database. */}}
+{{- define "anyray.regionEnv" -}}
+- name: ANYRAY_REGION_TOKEN
+  valueFrom:
+    {{- include "anyray.secretRef" (dict "key" "ANYRAY_REGION_TOKEN" "context" .) | nindent 4 }}
+- name: ANYRAY_OPTIMIZER_URL
+  value: "http://optimizer:8088"
+- name: ANYRAY_OPTIMIZER_TOKEN
+  valueFrom:
+    {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 4 }}
+{{- include "anyray.spendDbEnv" . | nindent 0 }}
+{{- with include "anyray.gatewayPublicUrl" . }}
+- name: ANYRAY_GATEWAY_PUBLIC_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.trustProxy }}
+- name: ANYRAY_TRUST_PROXY
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.rateLimitRpm }}
+- name: ANYRAY_RATE_LIMIT_RPM
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.rateLimitIpRpm }}
+- name: ANYRAY_RATE_LIMIT_IP_RPM
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.rateLimitUnauthRpm }}
+- name: ANYRAY_RATE_LIMIT_UNAUTH_RPM
   value: {{ . | quote }}
 {{- end }}
 {{- with .Values.gateway.maxBodyBytes }}

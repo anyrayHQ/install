@@ -1,0 +1,19 @@
+{{- if eq .Values.topology "region" }}
+apiVersion: v1
+kind: Service
+metadata:
+  # Bare name: the region optimizer's ANYRAY_REGION_GATEWAY_URL. Never put it on an Ingress or HTTPRoute.
+  name: gateway-internal
+  labels:
+    {{- include "anyray.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  # The optimizer must pull state from a region that is not Ready yet; the routes keep their own auth.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "anyray.selectorLabels" (dict "component" "gateway" "context" .) | nindent 4 }}
+  ports:
+    - port: 8789
+      targetPort: 8789
+{{- end }}

@@ -1,0 +1,40 @@
+name: Helm region boot
+
+# Boots a home (topology single) and a region (topology region) of this chart
+# in kind and checks the region came up against home without a lease:
+# tests/region-boot-live.sh. Images are the chart's appVersion. Serving with a
+# lease is proven on the release-gate stack, not here.
+on:
+  pull_request:
+    paths:
+      - 'helm/**'
+      - 'tests/region-boot-live.sh'
+      - '.github/workflows/helm-region-boot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  region-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.16.3
+          token: ${{ github.token }}
+
+      - name: Install kind v0.27.0
+        run: |
+          set -euo pipefail
+          curl -fsSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.27.0/kind-linux-amd64
+          echo "a6875aaea358acf0ac07786b1a6755d08fd640f4c79b7a2e46681cc13f49a04b  kind" | sha256sum -c -
+          sudo install -m 0755 kind /usr/local/bin/kind
+          rm kind
+          kind version
+
+      - name: Boot a region against a home
+        run: tests/region-boot-live.sh helm

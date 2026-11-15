@@ -18,6 +18,10 @@ const SIGNING_JOBS = [
   'release-connect-desktop.yml:preflight',
   'release-connect-desktop.yml:sign-macos',
 ];
+// The daily notary probe (ANY-2279) signs nothing: it reads the three notary secrets only.
+const NOTARY_PROBE = 'apple-notary-probe.yml:probe';
+const NOTARY_SECRETS = ['APPLE_NOTARY_KEY', 'APPLE_NOTARY_KEY_ID', 'APPLE_NOTARY_ISSUER_ID'];
+const APPLE_READERS = [...SIGNING_JOBS, NOTARY_PROBE];
 const WORKFLOW_DIR = new URL('../.github/workflows/', import.meta.url);
 
 function workflowFiles() {
@@ -62,8 +66,8 @@ test('every job that reads an Apple secret declares the release-signing environm
       assert.doesNotMatch(body, /^\s+environment:\s*\$\{\{/m, `${file}:${id} must name its environment literally`);
     }
   }
-  assert.deepEqual(readers.sort(), [...SIGNING_JOBS].sort());
-  assert.deepEqual(declared.sort(), [...SIGNING_JOBS].sort());
+  assert.deepEqual(readers.sort(), [...APPLE_READERS].sort());
+  assert.deepEqual(declared.sort(), [...APPLE_READERS].sort());
 });
 
 test('each signing job reads every Apple secret it names from the job env, never at workflow level', () => {
@@ -79,14 +83,33 @@ test('each signing job reads every Apple secret it names from the job env, never
   }
 });
 
-test('workflows that can reach Apple material run only by dispatch or a call from one', () => {
+test('the notary probe reads exactly the three notary secrets, in its probe step alone', () => {
+  const [file, id] = NOTARY_PROBE.split(':');
+  const body = jobs(readWorkflow(file))[id];
+  const read = [...body.matchAll(/\bsecrets\.(APPLE_[A-Z0-9_]+)/g)].map((match) => match[1]).sort();
+  assert.deepEqual(read, [...NOTARY_SECRETS].sort());
+  const steps = body.split(/\n(?= {6}- )/).slice(1).filter((step) => /secrets\./.test(step));
+  assert.equal(steps.length, 1, 'one step holds the notary secrets');
+  assert.match(steps[0], /\n {8}id: probe\n/);
+  assert.doesNotMatch(body.slice(0, body.indexOf('\n    steps:\n')), /secrets\./, 'no notary secret in the job env');
+});
+
+// A schedule runs the default branch's copy of a workflow at the default branch's head: the
+// same trust as a dispatch from main, which the environment admits anyway. Only the notary
+// probe, which reads the three notary secrets and signs nothing, is allowed one (ANY-2279).
+const allowedTriggers = (file) => (file === NOTARY_PROBE.split(':')[0] ? ['schedule', 'workflow_dispatch'] : ['workflow_dispatch', 'workflow_call']);
+
+test('workflows that can reach Apple material run only by dispatch or a call from one; the notary probe also daily', () => {
   for (const file of workflowFiles()) {
     const text = readWorkflow(file);
     if (!/secrets\.APPLE_|release-signing/.test(text)) continue;
     const on = triggers(text);
     assert.ok(on.length > 0, file);
-    for (const trigger of on) assert.ok(['workflow_dispatch', 'workflow_call'].includes(trigger), `${file} is triggered by ${trigger}`);
+    for (const trigger of on) assert.ok(allowedTriggers(file).includes(trigger), `${file} is triggered by ${trigger}`);
   }
+  assert.deepEqual(triggers(readWorkflow(NOTARY_PROBE.split(':')[0])).sort(), ['schedule', 'workflow_dispatch']);
+  // The schedule is the probe's alone: a signing workflow on a timer is still refused.
+  for (const entry of SIGNING_JOBS) assert.ok(!allowedTriggers(entry.split(':')[0]).includes('schedule'), entry);
 });
 
 test('no workflow runs privileged on pull request or another run', () => {
@@ -134,7 +157,7 @@ test('the runbook gives the admin the environment, branch policy, secret move an
   const removal = section.match(/^for name in ([A-Z0-9_ ]+); do gh secret delete "\$name" -R anyrayHQ\/install; done$/m);
   assert.ok(removal, 'the repository-level delete loop is absent');
   assert.deepEqual(removal[1].split(' ').sort(), [...APPLE_SECRETS, 'APPLE_SIGNING_CERT_PEM'].sort());
-  for (const entry of SIGNING_JOBS) {
+  for (const entry of APPLE_READERS) {
     const [file, id] = entry.split(':');
     assert.ok(section.includes(`\`${id}\``) && section.includes(file.replace('.yml', '')), `runbook must name ${entry}`);
   }

@@ -1,0 +1,150 @@
+name: Apple notary probe
+
+# Asks Apple's notary API once a day whether it still accepts the notarization key
+# (ANY-2279). From 2026-11-13 every Connect prepare failed at sign-macos with "Error:
+# HTTP status code: 403. A required agreement is missing or has expired.": Apple had
+# issued a new Program License Agreement on 2026-10-29 and nobody had accepted it.
+# Nobody knew for 36 hours. scripts/apple-notary-probe.mjs makes one read-only call
+# (it lists this team's notary submissions and submits nothing).
+#
+# A refusal (401/403) fails the run and keeps ONE `apple-notary-refused` issue open
+# until the probe passes again. Apple down or unreachable fails the run too but leaves
+# the issue alone: it says nothing about the key. GitHub also mails a failed scheduled
+# run to whoever last edited the schedule below.
+#
+# Apple material (RELEASING.md, "The release-signing environment"): `probe` declares
+# release-signing, which admits main only, and the three notary values reach its probe
+# step alone. A schedule runs the default branch's copy of this file at main's head,
+# the same trust as a dispatch from main, so this is the one scheduled reader that
+# scripts/verify-connect-desktop-signing-environment.test.mjs allows. `report` holds no
+# Apple value: it writes the issue with its own token.
+#
+# Runner: the CodeBuild install runner, whose webhook admits the release maintainers
+# only (RELEASING.md, "CI runners"). A scheduled run's actor is whoever last edited the
+# cron line, so that edit must come from a maintainer, or the jobs wait for a runner
+# that never starts.
+
+on:
+  schedule:
+    - cron: '41 6 * * *' # daily 06:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-notary-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    environment: release-signing
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.probe.outputs.verdict }}
+      status: ${{ steps.probe.outputs.status }}
+      code: ${{ steps.probe.outputs.code }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: scripts/apple-notary-probe.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Ask Apple's notary API whether it accepts the notarization key
+        id: probe
+        env:
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: node scripts/apple-notary-probe.mjs
+
+  # One issue while Apple refuses the key, closed when it accepts it again, the shape of
+  # the monorepo's main-health. Only a verdict about the key moves it.
+  report:
+    needs: probe
+    if: ${{ !cancelled() && (needs.probe.outputs.verdict == 'refused' || needs.probe.outputs.verdict == 'accepted') }}
+    runs-on: codebuild-anyray-install-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Keep one issue open while Apple refuses the notarization key
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          VERDICT: ${{ needs.probe.outputs.verdict }}
+          STATUS: ${{ needs.probe.outputs.status }}
+          CODE: ${{ needs.probe.outputs.code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const LABEL = 'apple-notary-refused';
+            const TITLE = "Apple's notary API refuses the notarization key: macOS signing is down";
+            const { owner, repo } = context.repo;
+            const env = process.env;
+            const refused = env.VERDICT === 'refused';
+            if (!refused && env.VERDICT !== 'accepted') return;
+
+            // This repository is public: only a numeric status and a code-shaped Apple code.
+            const status = /^\d{3}$/.test(env.STATUS ?? '') ? env.STATUS : '?';
+            const code = /^[A-Z0-9_.]{1,80}$/.test(env.CODE ?? '') ? env.CODE : '';
+            const why = `HTTP ${status}${code ? `, ${code}` : ''}`;
+
+            const open = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: LABEL, per_page: 20,
+            });
+            // listForRepo returns pull requests too; never touch a labelled PR.
+            const existing = open.data.find((item) => !item.pull_request);
+
+            if (!refused) {
+              if (!existing) return;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Recovered: Apple's notary API accepts the notarization key again.\n\n${env.RUN_URL}`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, state: 'closed',
+              });
+              return;
+            }
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Still refused: ${why}.\n\n${env.RUN_URL}`,
+              });
+              return;
+            }
+
+            // Create the label on first use so the workflow is self-installing.
+            try {
+              await github.rest.issues.createLabel({
+                owner, repo, name: LABEL, color: 'b60205',
+                description: "Apple's notary API refuses the notarization key: no macOS signing",
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e; // 422 = already exists
+            }
+
+            await github.rest.issues.create({
+              owner, repo, title: TITLE, labels: [LABEL],
+              body: [
+                `The daily Apple notary probe (\`apple-notary-probe.yml\`) was refused (${why}).`,
+                '',
+                env.RUN_URL,
+                '',
+                'Every `sign-macos` job fails until this is fixed, so no Connect version can be',
+                'prepared or released.',
+                '',
+                '- An agreement is pending: the Account Holder signs in at',
+                '  https://developer.apple.com/account and accepts it.',
+                '- Nothing is pending: the key was revoked or is wrong. Create a new Team key and',
+                '  set it in the `release-signing` environment (RELEASING.md).',
+                '',
+                'Then run the probe again (Actions, Apple notary probe, Run workflow). This issue',
+                'closes itself when the probe passes.',
+              ].join('\n'),
+            });

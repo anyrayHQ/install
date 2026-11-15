@@ -1,6 +1,14 @@
 {{- if not (has .Values.topology (list "single" "split" "region")) }}
 {{- fail "topology must be single, split or region" }}
 {{- end }}
+{{- $regionMode := include "anyray.regionModeEnv" . | fromJsonArray }}
+{{- range $component := list "gateway" "optimizer" }}
+{{- range (index $.Values $component).extraEnv | default list }}
+{{- if has (toString .name) $regionMode }}
+{{- fail (printf "%s.extraEnv: %s is set by the chart under topology=region and never through extraEnv" $component .name) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if eq .Values.topology "split" }}
 {{- if not (or .Values.ingress.enabled .Values.httpRoute.enabled) }}
 {{- fail "topology=split requires Ingress or HTTPRoute enabled" }}

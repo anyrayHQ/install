@@ -606,6 +606,11 @@ silently keeps the old single-replica posture.
 {{- /* First appVersion whose gateway and optimizer start a region from env. */}}
 {{- define "anyray.regionFloor" -}}v1.10.604{{- end }}
 
+{{- /* Region mode switches the chart sets itself under topology=region; extraEnv would flip a home pod into region mode. */}}
+{{- define "anyray.regionModeEnv" -}}
+{{- list "ANYRAY_REGION_TOKEN" "ANYRAY_REGION_GATEWAY_URL" | toJson -}}
+{{- end }}
+
 {{- /* Home-only env a region refuses to start with; topologyValidation keeps it out of both extraEnvs. */}}
 {{- define "anyray.regionForbiddenEnv" -}}
 {{- list "ANYRAY_ADMIN_TOKEN" "ANYRAY_DEPLOYMENT_TOKEN" "ANYRAY_CONTENT_KEY" "ANYRAY_METERING_ENABLED" "ANYRAY_PSEUDONYM_SALT" "ANYRAY_OBSERVABILITY_DB_URL" | toJson -}}

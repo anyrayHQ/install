@@ -186,6 +186,18 @@ for (const [values, err] of [
   [[...region, 'images.optimizer.tag=v1.10.600'], /region needs optimizer image v1\.10\.604/],
 ]) test(`region refuses ${values.slice(region.length).join(' ')}`, () => { const r = helm(values); assert.notEqual(r.status, 0); assert.match(r.stderr, err); });
 
+for (const [topology, base] of [['single', []], ['split', split], ['region', region]]) {
+  for (const component of ['gateway', 'optimizer']) {
+    for (const name of ['ANYRAY_REGION_TOKEN', 'ANYRAY_REGION_GATEWAY_URL']) {
+      test(`${topology} refuses ${name} in ${component}.extraEnv`, () => {
+        const r = helm([...base, `${component}.extraEnv[0].name=${name}`, `${component}.extraEnv[0].value=x`]);
+        assert.notEqual(r.status, 0);
+        assert.match(r.stderr, new RegExp(`${component}\\.extraEnv: ${name} is set by the chart`));
+      });
+    }
+  }
+}
+
 test('region renders on the image floor', () => {
   render([...region, 'image.tag=v1.10.604']);
 });

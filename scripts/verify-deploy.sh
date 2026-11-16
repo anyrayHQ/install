@@ -19,6 +19,10 @@ JSON_OUTPUT=0
 JSON_ERROR_EMITTED=0
 TOKEN_LOADED=0
 VERIFY_COMPLETE=0
+KUBERNETES=0
+HEALTH_URL=""
+FORWARD_PID=""
+FORWARD_LOG=""
 
 usage() {
   cat <<'EOF'
@@ -76,6 +80,17 @@ get_yaml_secret() {
   printf '%s' "$encoded" | openssl base64 -d -A 2>/dev/null || true
 }
 
+secret_namespace() {
+  [ -f "$SECRET_FILE" ] || return 0
+  awk '
+    /^metadata:[[:space:]]*$/ { meta=1; next }
+    meta && /^[^[:space:]]/ { exit }
+    meta && /^[[:space:]]+namespace:[[:space:]]*/ {
+      sub(/^[[:space:]]+namespace:[[:space:]]*/, ""); print; exit
+    }
+  ' "$SECRET_FILE"
+}
+
 valid_deployment_token() {
   [[ "$1" =~ ^adt_[A-Za-z0-9_-]+$ ]]
 }
@@ -127,8 +142,17 @@ EOF
   return 1
 }
 
+stop_gateway_forward() {
+  [ -n "$FORWARD_PID" ] || return 0
+  kill "$FORWARD_PID" 2>/dev/null || true
+  wait "$FORWARD_PID" 2>/dev/null || true
+  FORWARD_PID=""
+}
+
 verify_exit() {
   code=$?
+  stop_gateway_forward
+  [ -z "$FORWARD_LOG" ] || rm -f "$FORWARD_LOG"
   if [ "$code" -ne 0 ]; then
     if [ "$TOKEN_LOADED" -eq 1 ] && [ "$VERIFY_COMPLETE" -eq 0 ]; then
       report_claim_progress error verification_failed >/dev/null 2>&1 || true
@@ -163,15 +187,53 @@ if [ -n "$CLAIM_URL" ]; then
   TOKEN_LOADED=1
 fi
 
+if [ -z "$ADMIN_TOKEN" ]; then
+  ADMIN_TOKEN="$(get_env ANYRAY_ADMIN_TOKEN)"
+  if [ -z "$ADMIN_TOKEN" ]; then
+    ADMIN_TOKEN="$(get_yaml_secret ANYRAY_ADMIN_TOKEN)"
+    [ -z "$ADMIN_TOKEN" ] || KUBERNETES=1
+  fi
+fi
+
+# The ingress sends /admin to the cookie-only console proxy, so read health from the Service.
+start_gateway_forward() {
+  command -v kubectl >/dev/null 2>&1 || fail_verify missing_dependency "kubectl is required to read health from the gateway Service"
+  namespace="$(secret_namespace)"
+  namespace_args=()
+  if [ -n "$namespace" ]; then
+    [[ "$namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || fail_verify invalid_namespace "anyray-secrets.yaml has an invalid metadata.namespace"
+    namespace_args=(--namespace "$namespace")
+  fi
+  FORWARD_LOG="$(mktemp)"
+  deadline=$((SECONDS + 90))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    kubectl port-forward ${namespace_args[@]+"${namespace_args[@]}"} svc/gateway :8787 </dev/null >"$FORWARD_LOG" 2>&1 3>&- &
+    FORWARD_PID=$!
+    for _ in $(seq 1 20); do
+      port="$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> 8787.*/\1/p' "$FORWARD_LOG" | head -1)"
+      if [ -n "$port" ]; then
+        HEALTH_URL="http://127.0.0.1:${port}"
+        return 0
+      fi
+      kill -0 "$FORWARD_PID" 2>/dev/null || break
+      sleep 0.5
+    done
+    stop_gateway_forward
+    sleep 2
+  done
+  fail_verify gateway_unreachable "could not port-forward to the gateway Service; confirm the namespace and that the gateway pods are running"
+}
+
+if [ "$KUBERNETES" -eq 1 ]; then
+  start_gateway_forward
+  [ -n "$GATEWAY_URL" ] || GATEWAY_URL="$HEALTH_URL"
+fi
 if [ -z "$GATEWAY_URL" ]; then
   GATEWAY_URL="$(get_env ANYRAY_GATEWAY_PUBLIC_URL)"
   [ -n "$GATEWAY_URL" ] || GATEWAY_URL="http://localhost:8787"
 fi
-if [ -z "$ADMIN_TOKEN" ]; then
-  ADMIN_TOKEN="$(get_env ANYRAY_ADMIN_TOKEN)"
-  [ -n "$ADMIN_TOKEN" ] || ADMIN_TOKEN="$(get_yaml_secret ANYRAY_ADMIN_TOKEN)"
-fi
 GATEWAY_URL="${GATEWAY_URL%/}"
+[ -n "$HEALTH_URL" ] || HEALTH_URL="$GATEWAY_URL"
 
 echo "→ Verifying Anyray at ${GATEWAY_URL}"
 
@@ -203,7 +265,7 @@ fi
 # Query deep health without placing the admin credential in argv. The response
 # is content-free, but malformed bodies still stay out of diagnostics.
 BODY="$(curl -q --config - 2>/dev/null <<EOF
-url = "${GATEWAY_URL}/admin/health"
+url = "${HEALTH_URL}/admin/health"
 header = "Authorization: Bearer ${ADMIN_TOKEN}"
 connect-timeout = 10
 max-time = 30
@@ -265,9 +327,40 @@ EOF
   printf '%s' "$response" | tr -d '\r\n' | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p'
 }
 
+# Billing lets a non-superseded error recover and answers gateway-not-connected until the heartbeat.
+resume_claim_after_error() {
+  response=""
+  for _attempt in 1 2 3; do
+    response="$(curl -q --config - 2>/dev/null <<EOF
+url = "${CLAIM_URL}/progress"
+request = "POST"
+header = "Accept: application/json"
+header = "Content-Type: application/json"
+header = "Authorization: Bearer ${DEPLOYMENT_TOKEN}"
+data = "{\"status\":\"ready\"}"
+connect-timeout = 10
+max-time = 30
+silent
+show-error
+EOF
+)" || response=""
+    [ -z "$response" ] || break
+  done
+  response="$(printf '%s' "$response" | tr -d '\r\n')"
+  ready_re='^\{.*"status"[[:space:]]*:[[:space:]]*"ready".*\}$'
+  error_re='"error"[[:space:]]*:'
+  waiting_re='^\{"error":\{"code":"gateway-not-connected",.*\}\}$'
+  if [[ "$response" =~ $ready_re ]] && ! [[ "$response" =~ $error_re ]]; then
+    echo ready
+  elif [[ "$response" =~ $waiting_re ]]; then
+    echo waiting
+  fi
+}
+
 # Billing owns gateway_connected because only it can prove a heartbeat arrived
 # after redemption. Wait for that proof before submitting local Ready.
 gateway_connected=0
+ready_reported=0
 for _ in $(seq 1 45); do
   status="$(claim_status)" || status=""
   case "$status" in
@@ -281,14 +374,22 @@ for _ in $(seq 1 45); do
       emit_json_status gateway_connected
       break ;;
     error)
-      fail_verify install_claim_error "Billing reports that the install needs attention" ;;
+      case "$(resume_claim_after_error)" in
+        ready)
+          gateway_connected=1
+          ready_reported=1
+          emit_json_status gateway_connected
+          break ;;
+        waiting) sleep 2 ;;
+        *) fail_verify install_claim_error "Billing reports that the install needs attention" ;;
+      esac ;;
     pending|claimed|preflight|configured|'') sleep 2 ;;
     *) fail_verify invalid_claim_response "Billing returned an unknown install status" ;;
   esac
 done
 [ "$gateway_connected" -eq 1 ] || fail_verify gateway_not_connected "the deployment did not phone home before the verification timeout"
 
-report_claim_progress ready || fail_verify ready_rejected "Billing did not accept the local Ready report"
+[ "$ready_reported" -eq 1 ] || report_claim_progress ready || fail_verify ready_rejected "Billing did not accept the local Ready report"
 
 # Confirm the state through the public poll surface. Do not trust only the POST
 # transport result; the portal and the agent both consume this final state.

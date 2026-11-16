@@ -20,9 +20,17 @@ fs.appendFileSync(process.env.CLAIM_TEST_ARGV, JSON.stringify(args) + '\\n');
 if (!args.includes('--config')) process.exit(0);
 const config = fs.readFileSync(0, 'utf8');
 const url = config.match(/^url = "([^"]+)"/m)?.[1] ?? '';
-if (url.endsWith('/admin/health')) {
+const ingressOrigin = process.env.CLAIM_TEST_INGRESS_ORIGIN;
+if (ingressOrigin && url.startsWith(ingressOrigin + '/admin/')) {
+  // The console proxy strips Authorization and answers its own 401 page.
+  process.stdout.write('<html><head><title>401 Authorization Required</title></head></html>');
+} else if (url.endsWith('/admin/health')) {
+  const expectedUrl = process.env.CLAIM_TEST_HEALTH_URL;
+  if (expectedUrl && url !== expectedUrl) process.exit(7);
+  const adminToken = process.env.CLAIM_TEST_ADMIN_TOKEN;
+  if (adminToken && !config.includes('Authorization: Bearer ' + adminToken + '"')) process.exit(0);
   process.stdout.write(JSON.stringify({
-    ok: true,
+    ok: process.env.CLAIM_TEST_HEALTH_OK !== 'false',
     observability: { ok: true, configured: true },
     spend: { ok: true },
     optimizer: { ok: true, configured: true },
@@ -41,9 +49,26 @@ if (url.endsWith('/admin/health')) {
     process.exit(22);
   }
   if (config.includes('\\\\"status\\\\":\\\\"ready\\\\"')) {
+    const rejections = Number(process.env.CLAIM_TEST_READY_REJECTIONS || 0);
+    const counter = process.env.CLAIM_TEST_READY + '.attempts';
+    const attempt = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0) + 1;
+    fs.writeFileSync(counter, String(attempt));
+    if (process.env.CLAIM_TEST_READY_RAW) {
+      process.stdout.write(process.env.CLAIM_TEST_READY_RAW);
+      process.exit(0);
+    }
+    const code = process.env.CLAIM_TEST_READY_REJECT_CODE ||
+      (attempt <= rejections ? 'gateway-not-connected' : '');
+    if (code) {
+      if (/^fail$/m.test(config)) process.exit(22);
+      process.stdout.write(JSON.stringify({ error: { code, message: 'Rejected.' } }));
+      process.exit(0);
+    }
     fs.writeFileSync(process.env.CLAIM_TEST_READY, 'ready');
+    process.stdout.write(JSON.stringify({ version: 1, status: 'ready' }));
+  } else {
+    process.stdout.write('{}');
   }
-  process.stdout.write('{}');
 } else if (url === process.env.CLAIM_TEST_URL) {
   const ready = fs.existsSync(process.env.CLAIM_TEST_READY);
   process.stdout.write(JSON.stringify({
@@ -51,6 +76,9 @@ if (url.endsWith('/admin/health')) {
     claimId: 'icl_synthetic',
     deploymentId: 'dep_synthetic',
     status: ready ? 'ready' : (process.env.CLAIM_TEST_INITIAL_STATUS || 'pending'),
+    ...(!ready && process.env.CLAIM_TEST_INITIAL_ERROR_CODE
+      ? { errorCode: process.env.CLAIM_TEST_INITIAL_ERROR_CODE }
+      : {}),
     createdAt: '2026-09-04T00:00:00.000Z',
     expiresAt: '2026-09-04T01:00:00.000Z',
     updatedAt: '2026-09-04T00:00:00.000Z',
@@ -66,19 +94,40 @@ if (args[0] === 'volume' && args[1] === 'inspect') process.exit(1);
 process.exit(0);
 `;
 
+const fakeKubectl = `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.CLAIM_TEST_KUBECTL_ARGV, JSON.stringify(args) + '\\n');
+if (args[0] !== 'port-forward') process.exit(1);
+const counter = process.env.CLAIM_TEST_KUBECTL_ARGV + '.forwards';
+const attempt = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0) + 1;
+fs.writeFileSync(counter, String(attempt));
+if (attempt <= Number(process.env.CLAIM_TEST_FORWARD_FAILURES || 0)) {
+  process.stderr.write('error: unable to forward port because pod is not running\\n');
+  process.exit(1);
+}
+fs.appendFileSync(process.env.CLAIM_TEST_KUBECTL_ARGV + '.pids', process.pid + '\\n');
+process.stdout.write('Forwarding from 127.0.0.1:' + process.env.CLAIM_TEST_FORWARD_PORT + ' -> 8787\\n');
+setInterval(() => {}, 1000);
+`;
+
 const makeWorld = async (initialStatus, activeClaimUrl = claimUrl) => {
   const root = await mkdtemp(join(tmpdir(), 'anyray-agent-install-'));
   const bin = join(root, 'bin');
   await mkdir(bin);
   await writeFile(join(bin, 'curl'), fakeCurl);
   await writeFile(join(bin, 'docker'), fakeDocker);
+  await writeFile(join(bin, 'kubectl'), fakeKubectl);
   await chmod(join(bin, 'curl'), 0o755);
   await chmod(join(bin, 'docker'), 0o755);
+  await chmod(join(bin, 'kubectl'), 0o755);
   const argv = join(root, 'curl-argv.ndjson');
+  const kubectlArgv = join(root, 'kubectl-argv.ndjson');
   const ready = join(root, 'ready');
   return {
     root,
     argv,
+    kubectlArgv,
     ready,
     env: {
       ...process.env,
@@ -88,6 +137,8 @@ const makeWorld = async (initialStatus, activeClaimUrl = claimUrl) => {
       CLAIM_TEST_URL: activeClaimUrl,
       CLAIM_TEST_DEPLOYMENT_TOKEN: deploymentToken,
       CLAIM_TEST_INITIAL_STATUS: initialStatus,
+      CLAIM_TEST_KUBECTL_ARGV: kubectlArgv,
+      CLAIM_TEST_FORWARD_PORT: '18787',
     },
   };
 };
@@ -340,3 +391,212 @@ test('verifier disables xtrace before reading the stored deployment credential',
   assert.equal(result.status, 0, result.stderr);
   await assertSecretAbsent(result, world.argv);
 });
+
+const ingressOrigin = 'https://anyray.example.com';
+const k8sAdminToken = 'ar-adm-synthetic-k8s';
+const k8sHealthEnv = {
+  CLAIM_TEST_INGRESS_ORIGIN: ingressOrigin,
+  CLAIM_TEST_HEALTH_URL: 'http://127.0.0.1:18787/admin/health',
+  CLAIM_TEST_ADMIN_TOKEN: k8sAdminToken,
+};
+
+const makeKubernetesRoot = async (world, { namespace = 'anyray-synthetic' } = {}) => {
+  const b64 = (value) => Buffer.from(value).toString('base64');
+  await writeFile(
+    join(world.root, 'anyray-secrets.yaml'),
+    [
+      'apiVersion: v1',
+      'kind: Secret',
+      'metadata:',
+      '  name: anyray-secrets',
+      ...(namespace ? [`  namespace: ${namespace}`] : []),
+      'type: Opaque',
+      'data:',
+      `  ANYRAY_ADMIN_TOKEN: ${b64(k8sAdminToken)}`,
+      `  ANYRAY_CONTROL_PLANE_URL: ${b64('https://app.anyray.ai')}`,
+      `  ANYRAY_DEPLOYMENT_TOKEN: ${b64(deploymentToken)}`,
+      '',
+    ].join('\n'),
+    { mode: 0o600 }
+  );
+  const scripts = join(world.root, 'scripts');
+  await mkdir(scripts);
+  const copiedVerify = join(scripts, 'verify-deploy.sh');
+  await copyFile(verify, copiedVerify);
+  await chmod(copiedVerify, 0o755);
+  return copiedVerify;
+};
+
+const makeDockerRoot = async (world) => {
+  const scripts = join(world.root, 'scripts');
+  await mkdir(scripts);
+  const copiedVerify = join(scripts, 'verify-deploy.sh');
+  await copyFile(verify, copiedVerify);
+  await chmod(copiedVerify, 0o755);
+  await writeFile(
+    join(world.root, '.env'),
+    [
+      `ANYRAY_DEPLOYMENT_TOKEN=${deploymentToken}`,
+      'ANYRAY_ADMIN_TOKEN=ar-adm-synthetic',
+      'ANYRAY_GATEWAY_PUBLIC_URL=http://gateway.test:8787',
+      'ANYRAY_CONTROL_PLANE_URL=https://app.anyray.ai',
+      '',
+    ].join('\n'),
+    { mode: 0o600 }
+  );
+  return copiedVerify;
+};
+
+const jsonLines = (stdout) =>
+  stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+
+const kubectlCalls = async (world) =>
+  (await readFile(world.kubectlArgv, 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+
+const assertForwardsStopped = async (world) => {
+  const pids = (await readFile(`${world.kubectlArgv}.pids`, 'utf8'))
+    .trim()
+    .split('\n')
+    .map(Number);
+  assert.ok(pids.length > 0);
+  for (const pid of pids) {
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  }
+};
+
+const assertAdminTokenAbsent = async (result, world, token) => {
+  assert.ok(!result.stdout.includes(token));
+  assert.ok(!result.stderr.includes(token));
+  assert.ok(!(await readFile(world.argv, 'utf8')).includes(token));
+  assert.ok(!(await readFile(world.kubectlArgv, 'utf8')).includes(token));
+};
+
+test('Kubernetes verifier reads health from the gateway Service, not the cookie-gated ingress', async () => {
+  const world = await makeWorld('gateway_connected');
+  const copiedVerify = await makeKubernetesRoot(world);
+  const result = spawnSync(
+    copiedVerify,
+    ['--claim', claimUrl, '--json', ingressOrigin],
+    {
+      cwd: world.root,
+      env: { ...world.env, ...k8sHealthEnv },
+      encoding: 'utf8',
+    }
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(statuses(result.stdout), ['gateway_connected', 'ready']);
+  assert.ok((await readFile(world.argv, 'utf8')).includes(JSON.stringify(`${ingressOrigin}/`)));
+  assert.deepEqual(await kubectlCalls(world), [
+    ['port-forward', '--namespace', 'anyray-synthetic', 'svc/gateway', ':8787'],
+  ]);
+  await assertForwardsStopped(world);
+  await assertSecretAbsent(result, world.argv);
+  await assertAdminTokenAbsent(result, world, k8sAdminToken);
+});
+
+test('Kubernetes verifier retries the forward while the gateway pod starts and uses the current namespace', async () => {
+  const world = await makeWorld('gateway_connected');
+  const copiedVerify = await makeKubernetesRoot(world, { namespace: '' });
+  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+    cwd: world.root,
+    env: {
+      ...world.env,
+      ...k8sHealthEnv,
+      CLAIM_TEST_FORWARD_FAILURES: '2',
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(statuses(result.stdout), ['gateway_connected', 'ready']);
+  const calls = await kubectlCalls(world);
+  assert.equal(calls.length, 3);
+  for (const call of calls) {
+    assert.deepEqual(call, ['port-forward', 'svc/gateway', ':8787']);
+  }
+  await assertForwardsStopped(world);
+});
+
+test('Kubernetes verifier stops its forward when health fails', async () => {
+  const world = await makeWorld('gateway_connected');
+  const copiedVerify = await makeKubernetesRoot(world);
+  const result = spawnSync(
+    copiedVerify,
+    ['--claim', claimUrl, '--json', ingressOrigin],
+    {
+      cwd: world.root,
+      env: {
+        ...world.env,
+        ...k8sHealthEnv,
+        CLAIM_TEST_HEALTH_OK: 'false',
+      },
+      encoding: 'utf8',
+    }
+  );
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(jsonLines(result.stdout), [
+    { status: 'error', errorCode: 'health_failed' },
+  ]);
+  await assertForwardsStopped(world);
+});
+
+test('Docker verifier reads health from the configured gateway URL without kubectl', async () => {
+  const world = await makeWorld('gateway_connected');
+  const copiedVerify = await makeDockerRoot(world);
+  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+    cwd: world.root,
+    env: {
+      ...world.env,
+      CLAIM_TEST_HEALTH_URL: 'http://gateway.test:8787/admin/health',
+      CLAIM_TEST_ADMIN_TOKEN: 'ar-adm-synthetic',
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(statuses(result.stdout), ['gateway_connected', 'ready']);
+  await assert.rejects(readFile(world.kubectlArgv, 'utf8'));
+});
+
+test('verifier recovers a claim left in error by an earlier failed run once the heartbeat lands', async () => {
+  const world = await makeWorld('error');
+  const copiedVerify = await makeDockerRoot(world);
+  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+    cwd: world.root,
+    env: {
+      ...world.env,
+      CLAIM_TEST_INITIAL_ERROR_CODE: 'verification_failed',
+      CLAIM_TEST_READY_REJECTIONS: '2',
+    },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(statuses(result.stdout), ['gateway_connected', 'ready']);
+  assert.equal(await readFile(`${world.ready}.attempts`, 'utf8'), '3');
+  await assertSecretAbsent(result, world.argv);
+});
+
+for (const [name, override] of [
+  ['a superseded claim', { CLAIM_TEST_INITIAL_ERROR_CODE: 'superseded', CLAIM_TEST_READY_REJECT_CODE: 'install-claim-inactive' }],
+  ['a revoked deployment', { CLAIM_TEST_INITIAL_ERROR_CODE: 'deployment_revoked', CLAIM_TEST_READY_REJECT_CODE: 'deployment-revoked' }],
+  ['a malformed answer', { CLAIM_TEST_INITIAL_ERROR_CODE: 'verification_failed', CLAIM_TEST_READY_RAW: '<html>bad gateway</html>' }],
+  ['a truncated answer', { CLAIM_TEST_INITIAL_ERROR_CODE: 'verification_failed', CLAIM_TEST_READY_RAW: '{"version":1,"status":"ready"' }],
+  ['a status nested in an error', { CLAIM_TEST_INITIAL_ERROR_CODE: 'verification_failed', CLAIM_TEST_READY_RAW: '{"error":{"status":"ready","code":"deployment-revoked"}}' }],
+]) {
+  test(`verifier keeps a claim error fatal for ${name}`, async () => {
+    const world = await makeWorld('error');
+    const copiedVerify = await makeDockerRoot(world);
+    const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+      cwd: world.root,
+      env: { ...world.env, ...override },
+      encoding: 'utf8',
+    });
+    assert.notEqual(result.status, 0);
+    assert.deepEqual(jsonLines(result.stdout), [
+      { status: 'error', errorCode: 'install_claim_error' },
+    ]);
+    await assert.rejects(readFile(world.ready, 'utf8'));
+    await assertSecretAbsent(result, world.argv);
+  });
+}

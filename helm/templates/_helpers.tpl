@@ -604,7 +604,7 @@ silently keeps the old single-replica posture.
 {{- define "anyray.multiOptimizerFloor" -}}v1.10.403{{- end }}
 
 {{- /* First appVersion whose gateway and optimizer start a region from env. */}}
-{{- define "anyray.regionFloor" -}}v1.10.604{{- end }}
+{{- define "anyray.regionFloor" -}}v1.10.606{{- end }}
 
 {{- /* Region mode switches the chart sets itself under topology=region; extraEnv would flip a home pod into region mode. */}}
 {{- define "anyray.regionModeEnv" -}}

@@ -732,7 +732,7 @@ inference:
 runs the gateway and the optimizer on their own Postgres (bundled or
 `postgres.external`), with no proxy and no console. Every Ingress or HTTPRoute
 path goes to the gateway, which forwards management requests home. It needs gateway
-and optimizer images of `v1.10.604` or newer. Mint the region on home first; the
+and optimizer images of `v1.10.606` or newer. Mint the region on home first; the
 token carries the region name and home's URL.
 
 ```yaml

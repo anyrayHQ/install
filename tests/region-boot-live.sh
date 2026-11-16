@@ -3,7 +3,7 @@
 # Live check for topology=region (ANY-1905): boot a home (`single`) and a region
 # (`topology=region`) of this chart in one throwaway kind cluster, and require,
 # within 180 s of the region install:
-#   - home lists the region with a recent contact;
+#   - home lists the region with a recent contact and the region's own address;
 #   - the region's /region-health reason is exactly "lease unavailable" (keys and
 #     config arrived from home; CI has no licence, so no lease);
 #   - anyray_region_schema_migrations has rows in the regional database;
@@ -32,6 +32,7 @@ CLUSTER=anyray-region-boot
 CTX="kind-$CLUSTER"
 HOME_HOST=home.anyray.example.com
 REGION_NAME=ci-region
+REGION_HOST=region.anyray.example.com
 INGRESS_NGINX_URL=https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.1/deploy/static/provider/cloud/deploy.yaml
 INGRESS_NGINX_SHA256=c6dbb962b7b396369fce700bafe3f789fd25f31ca093d499f7c165dd31b0ecff
 DEADLINE_S=180
@@ -173,7 +174,7 @@ k -n region create secret generic anyray-secrets --from-file="$WORK/region-secre
 k -n region create configmap home-ca --from-file=ca.crt="$WORK/ca.crt" >/dev/null || die "home CA ConfigMap"
 cat >"$WORK/region-values.yaml" <<EOF
 topology: region
-host: region.anyray.example.com
+host: $REGION_HOST
 postgres:
   storage: 150Gi
 autoUpdate:
@@ -209,9 +210,10 @@ home_lists_region() {
       .then((r) => r.json()).then((b) => {
         const r = (b.regions || []).find((x) => x.name === process.argv[1]);
         const age = r && r.lastSeenAt ? Date.now() - Date.parse(r.lastSeenAt) : null;
-        console.log(age !== null && age < 120000 ? "PASS" : `lastSeenAt=${r ? r.lastSeenAt : "no region"}`);
+        const ok = age !== null && age < 120000 && r.url === process.argv[2];
+        console.log(ok ? "PASS" : r ? `lastSeenAt=${r.lastSeenAt} url=${r.url}` : "no region");
       }).catch((e) => console.log(String(e)));
-  ' "$REGION_NAME" 2>&1 | tail -1
+  ' "$REGION_NAME" "https://$REGION_HOST" 2>&1 | tail -1
 }
 region_health_reason() {
   k -n region exec deploy/anyray-gateway -c gateway -- node -e '

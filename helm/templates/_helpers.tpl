@@ -603,8 +603,8 @@ silently keeps the old single-replica posture.
        ANY-407 had already stopped per-pod mints under content mode off). */}}
 {{- define "anyray.multiOptimizerFloor" -}}v1.10.403{{- end }}
 
-{{- /* First appVersion whose gateway and optimizer start a region from env. */}}
-{{- define "anyray.regionFloor" -}}v1.10.606{{- end }}
+{{- /* First appVersion whose region sends home its address; an older one starts and is never offered to Connect. */}}
+{{- define "anyray.regionFloor" -}}v1.10.611{{- end }}
 
 {{- /* Region mode switches the chart sets itself under topology=region; extraEnv would flip a home pod into region mode. */}}
 {{- define "anyray.regionModeEnv" -}}

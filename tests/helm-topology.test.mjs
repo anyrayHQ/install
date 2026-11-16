@@ -182,8 +182,8 @@ for (const [values, err] of [
   [[...region, 'gateway.extraEnv[0].name=ANYRAY_ADMIN_TOKEN', 'gateway.extraEnv[0].value=x'], /ANYRAY_ADMIN_TOKEN is forbidden in a region/],
   [[...region, 'gateway.extraEnv[0].name=ANYRAY_OBSERVABILITY_DB_URL', 'gateway.extraEnv[0].value=x'], /forbidden in a region/],
   [[...region, 'optimizer.extraEnv[0].name=ANYRAY_CONTENT_KEY', 'optimizer.extraEnv[0].value=x'], /ANYRAY_CONTENT_KEY is forbidden in a region/],
-  [[...region, 'image.tag=v1.10.600'], /region needs gateway image v1\.10\.606/],
-  [[...region, 'images.optimizer.tag=v1.10.600'], /region needs optimizer image v1\.10\.606/],
+  [[...region, 'image.tag=v1.10.610'], /region needs gateway image v1\.10\.611/],
+  [[...region, 'images.optimizer.tag=v1.10.610'], /region needs optimizer image v1\.10\.611/],
 ]) test(`region refuses ${values.slice(region.length).join(' ')}`, () => { const r = helm(values); assert.notEqual(r.status, 0); assert.match(r.stderr, err); });
 
 for (const [topology, base] of [['single', []], ['split', split], ['region', region]]) {
@@ -199,7 +199,7 @@ for (const [topology, base] of [['single', []], ['split', split], ['region', reg
 }
 
 test('region renders on the image floor', () => {
-  render([...region, 'image.tag=v1.10.606']);
+  render([...region, 'image.tag=v1.10.611']);
 });
 
 test('single render is unchanged by the region work', () => {

@@ -69,8 +69,9 @@ if (ingressOrigin && url.startsWith(ingressOrigin + '/admin/')) {
   if (expectedUrl && url !== expectedUrl) process.exit(7);
   const adminToken = process.env.CLAIM_TEST_ADMIN_TOKEN;
   if (adminToken && !config.includes('Authorization: Bearer ' + adminToken + '"')) {
-    process.stdout.write(JSON.stringify({ error: { code: 'unauthorized' } }));
-    writeOut(401);
+    const denied = Number(process.env.CLAIM_TEST_HEALTH_DENY_STATUS || 401);
+    process.stdout.write(JSON.stringify({ error: { code: denied === 401 ? 'unauthorized' : 'forbidden' } }));
+    writeOut(denied);
     process.exit(0);
   }
   process.stdout.write(JSON.stringify({
@@ -744,6 +745,25 @@ test('verifier reports a rejected admin token instead of an unreadable health re
   ]);
   assert.match(result.stderr, /rejected the admin token/);
   await assertSecretAbsent(result, world.argv);
+});
+
+test('verifier does not blame the admin token for a 403', async () => {
+  const world = await makeWorld('gateway_connected');
+  const copiedVerify = await makeDockerRoot(world);
+  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+    cwd: world.root,
+    env: {
+      ...world.env,
+      CLAIM_TEST_ADMIN_TOKEN: 'ar-adm-synthetic-other',
+      CLAIM_TEST_HEALTH_DENY_STATUS: '403',
+    },
+    encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(jsonLines(result.stdout), [
+    { status: 'error', errorCode: 'invalid_health_response' },
+  ]);
+  assert.doesNotMatch(result.stderr, /admin token/);
 });
 
 test('verifier pointed at the console proxy with a token reports the rejection', async () => {

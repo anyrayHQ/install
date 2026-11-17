@@ -284,11 +284,14 @@ silent
 show-error
 EOF
 )" || true
-HEALTH_STATUS="${BODY##*$'\n'}"
-BODY="${BODY%$'\n'*}"
-case "$HEALTH_STATUS" in
-  401|403) fail_verify admin_token_rejected "the gateway rejected the admin token (HTTP ${HEALTH_STATUS}); check ANYRAY_ADMIN_TOKEN and that the URL reaches the gateway, not the console" ;;
-esac
+HEALTH_STATUS=""
+if [[ "${BODY##*$'\n'}" =~ ^[0-9]{3}$ ]]; then
+  HEALTH_STATUS="${BODY##*$'\n'}"
+  BODY="${BODY%$'\n'*}"
+fi
+if [ "$HEALTH_STATUS" = 401 ]; then
+  fail_verify admin_token_rejected "the gateway rejected the admin token (HTTP 401); check ANYRAY_ADMIN_TOKEN and that the URL reaches the gateway, not the console"
+fi
 if [ -z "$BODY" ]; then
   fail_verify health_unavailable "/admin/health returned no response"
 fi

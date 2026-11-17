@@ -401,6 +401,9 @@ gateway:
   # https://<host>; set it explicitly for NodePort / non-TLS (e.g.
   # http://gw.example.com:30787) so enrollment links resolve.
   publicUrl: ""
+  # Public URL of the console. Leave blank and it defaults to the gateway URL
+  # when that is http(s)://<host> and the chart's Ingress or HTTPRoute serves
+  # <host>; otherwise set it (e.g. a NodePort install's proxy port).
   consolePublicUrl: ""
   # Note: /v1/* is always restricted to verified developers (a minted client key),
   # secure-by-default with no toggle — the former requireClientKeys /

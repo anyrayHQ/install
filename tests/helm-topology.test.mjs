@@ -103,3 +103,32 @@ test('split hands both pods the inference URL only when inference.host is set', 
     assert.match(render([...split, 'host=', ...route]), /- name: ANYRAY_INFERENCE_PUBLIC_URL\n\s+value: "https:\/\/inference\.anyray\.example\.com"\n/, route.join(' '));
   }
 });
+test('the console URL defaults to the gateway origin only when the chart routes that host to the console', () => {
+  const consoleUrl = d => d.match(/- name: ANYRAY_CONSOLE_PUBLIC_URL\n\s+value: "([^"]*)"\n/g)?.map(m => m.match(/value: "([^"]*)"/)[1]);
+  const gw = values => consoleUrl(doc(render(values), 'Deployment', 'anyray-gateway'));
+  const route = ['httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway'];
+  for (const [values, want] of [
+    [['ingress.enabled=true'], 'https://anyray.example.com'],
+    [route, 'https://anyray.example.com'],
+    [['ingress.enabled=true', 'gateway.publicUrl=https://anyray.example.com/'], 'https://anyray.example.com'],
+    [['ingress.enabled=true', 'gateway.publicUrl=http://anyray.example.com'], 'http://anyray.example.com'],
+    [['ingress.enabled=true', 'ingress.hosts[0].host=other.anyray.example.com', 'ingress.hosts[1].host=anyray.example.com'], 'https://anyray.example.com'],
+    [['ingress.enabled=true', 'ingress.hosts[0].host=other.anyray.example.com', 'ingress.hosts[1].className=synthetic'], 'https://anyray.example.com'],
+    [[...route, 'httpRoute.hostnames[0]=other.anyray.example.com', 'httpRoute.hostnames[1]=anyray.example.com'], 'https://anyray.example.com'],
+    [['ingress.enabled=true', 'gateway.consolePublicUrl=https://console.anyray.example.com'], 'https://console.anyray.example.com'],
+    [['gateway.consolePublicUrl=https://console.anyray.example.com'], 'https://console.anyray.example.com'],
+  ]) assert.deepEqual(gw(values), [want], values.join(' '));
+  const s = render(split);
+  for (const name of ['anyray-gateway', 'anyray-inference']) assert.deepEqual(consoleUrl(doc(s, 'Deployment', name)), ['https://anyray.example.com'], name);
+  for (const values of [
+    [],
+    ['ingress.enabled=true', 'gateway.publicUrl=http://anyray.example.com:30787'],
+    ['ingress.enabled=true', 'gateway.publicUrl=https://anyray.example.com/gateway'],
+    ['ingress.enabled=true', 'gateway.publicUrl=https://gw.anyray.example.com'],
+    [...route, 'host=*.anyray.example.com'],
+    ['ingress.enabled=true', 'ingress.hosts[0].host=other.anyray.example.com'],
+    [...route, 'httpRoute.hostnames[0]=other.anyray.example.com'],
+    ['proxy.service.type=LoadBalancer'],
+    ['ingress.hosts[0].host=anyray.example.com', 'httpRoute.hostnames[0]=anyray.example.com'],
+  ]) assert.equal(gw(values), undefined, values.join(' '));
+});

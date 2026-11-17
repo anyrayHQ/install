@@ -255,9 +255,9 @@ report_claim_status() {
   error_code="${2:-}"
   [ "$CLAIM_REDEEMED" -eq 1 ] || return 1
   if [ "$status" = error ]; then
-    progress_body="{\"status\":\"error\",\"errorCode\":\"${error_code:-setup_failed}\"}"
+    progress_data="{\\\"status\\\":\\\"error\\\",\\\"errorCode\\\":\\\"${error_code:-setup_failed}\\\"}"
   else
-    progress_body="{\"status\":\"${status}\"}"
+    progress_data="{\\\"status\\\":\\\"${status}\\\"}"
   fi
   for _claim_attempt in 1 2 3; do
     if curl -q --config - >/dev/null 2>&1 <<EOF
@@ -266,7 +266,7 @@ request = "POST"
 header = "Accept: application/json"
 header = "Content-Type: application/json"
 header = "Authorization: Bearer ${CONNECT_TOKEN}"
-data = "${progress_body//\"/\\\"}"
+data = "${progress_data}"
 connect-timeout = 10
 max-time = 30
 fail

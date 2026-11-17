@@ -117,9 +117,9 @@ report_claim_progress() {
   error_code="${2:-}"
   [ "$TOKEN_LOADED" -eq 1 ] || return 1
   if [ "$status" = error ]; then
-    body="{\"status\":\"error\",\"errorCode\":\"${error_code:-verification_failed}\"}"
+    data="{\\\"status\\\":\\\"error\\\",\\\"errorCode\\\":\\\"${error_code:-verification_failed}\\\"}"
   else
-    body="{\"status\":\"${status}\"}"
+    data="{\\\"status\\\":\\\"${status}\\\"}"
   fi
   for _attempt in 1 2 3; do
     if curl -q --config - >/dev/null 2>&1 <<EOF
@@ -128,7 +128,7 @@ request = "POST"
 header = "Accept: application/json"
 header = "Content-Type: application/json"
 header = "Authorization: Bearer ${DEPLOYMENT_TOKEN}"
-data = "${body//\"/\\\"}"
+data = "${data}"
 connect-timeout = 10
 max-time = 30
 fail
@@ -279,10 +279,16 @@ url = "${HEALTH_URL}/admin/health"
 header = "Authorization: Bearer ${ADMIN_TOKEN}"
 connect-timeout = 10
 max-time = 30
+write-out = "\n%{http_code}"
 silent
 show-error
 EOF
 )" || true
+HEALTH_STATUS="${BODY##*$'\n'}"
+BODY="${BODY%$'\n'*}"
+case "$HEALTH_STATUS" in
+  401|403) fail_verify admin_token_rejected "the gateway rejected the admin token (HTTP ${HEALTH_STATUS}); check ANYRAY_ADMIN_TOKEN and that the URL reaches the gateway, not the console" ;;
+esac
 if [ -z "$BODY" ]; then
   fail_verify health_unavailable "/admin/health returned no response"
 fi

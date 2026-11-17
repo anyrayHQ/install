@@ -205,23 +205,26 @@ start_gateway_forward() {
     namespace_args=(--namespace "$namespace")
   fi
   FORWARD_LOG="$(mktemp)"
-  deadline=$((SECONDS + 90))
+  # A fresh install may still be pulling images or migrating; kubectl listens before the gateway does.
+  deadline=$((SECONDS + 180))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    kubectl port-forward ${namespace_args[@]+"${namespace_args[@]}"} svc/gateway :8787 </dev/null >"$FORWARD_LOG" 2>&1 3>&- &
-    FORWARD_PID=$!
-    for _ in $(seq 1 20); do
-      port="$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> 8787.*/\1/p' "$FORWARD_LOG" | head -1)"
-      if [ -n "$port" ]; then
-        HEALTH_URL="http://127.0.0.1:${port}"
-        return 0
-      fi
-      kill -0 "$FORWARD_PID" 2>/dev/null || break
-      sleep 0.5
-    done
-    stop_gateway_forward
-    sleep 2
+    if [ -z "$FORWARD_PID" ]; then
+      kubectl port-forward ${namespace_args[@]+"${namespace_args[@]}"} svc/gateway :8787 </dev/null >"$FORWARD_LOG" 2>&1 3>&- &
+      FORWARD_PID=$!
+      forward_started=$SECONDS
+      port=""
+    fi
+    [ -n "$port" ] || port="$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) -> 8787.*/\1/p' "$FORWARD_LOG" | head -1)"
+    if [ -n "$port" ] && curl -fsS --connect-timeout 3 --max-time 5 -o /dev/null "http://127.0.0.1:${port}/" 2>/dev/null; then
+      HEALTH_URL="http://127.0.0.1:${port}"
+      return 0
+    fi
+    if ! kill -0 "$FORWARD_PID" 2>/dev/null || { [ -z "$port" ] && [ $((SECONDS - forward_started)) -ge 10 ]; }; then
+      stop_gateway_forward
+    fi
+    sleep 1
   done
-  fail_verify gateway_unreachable "could not port-forward to the gateway Service; confirm the namespace and that the gateway pods are running"
+  fail_verify gateway_unreachable "the gateway Service never answered through kubectl port-forward; confirm the namespace and that the gateway pods are running"
 }
 
 if [ "$KUBERNETES" -eq 1 ]; then

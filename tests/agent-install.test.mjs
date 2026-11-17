@@ -56,15 +56,24 @@ const config = fs.readFileSync(0, 'utf8');
 const url = config.match(/^url = "([^"]+)"/m)?.[1] ?? '';
 const healthPort = forwardPort(url);
 if (healthPort && !forwardAnswers(healthPort)) process.exit(7);
+const writeOut = (status) => {
+  if (/^write-out = /m.test(config)) process.stdout.write('\\n' + status);
+};
 const ingressOrigin = process.env.CLAIM_TEST_INGRESS_ORIGIN;
 if (ingressOrigin && url.startsWith(ingressOrigin + '/admin/')) {
   // The console proxy strips Authorization and answers its own 401 page.
   process.stdout.write('<html><head><title>401 Authorization Required</title></head></html>');
+  writeOut(401);
 } else if (url.endsWith('/admin/health')) {
   const expectedUrl = process.env.CLAIM_TEST_HEALTH_URL;
   if (expectedUrl && url !== expectedUrl) process.exit(7);
   const adminToken = process.env.CLAIM_TEST_ADMIN_TOKEN;
-  if (adminToken && !config.includes('Authorization: Bearer ' + adminToken + '"')) process.exit(0);
+  if (adminToken && !config.includes('Authorization: Bearer ' + adminToken + '"')) {
+    const denied = Number(process.env.CLAIM_TEST_HEALTH_DENY_STATUS || 401);
+    process.stdout.write(JSON.stringify({ error: { code: denied === 401 ? 'unauthorized' : 'forbidden' } }));
+    writeOut(denied);
+    process.exit(0);
+  }
   process.stdout.write(JSON.stringify({
     ok: process.env.CLAIM_TEST_HEALTH_OK !== 'false',
     observability: { ok: true, configured: true },
@@ -72,6 +81,7 @@ if (ingressOrigin && url.startsWith(ingressOrigin + '/admin/')) {
     optimizer: { ok: true, configured: true },
     portal: { metering: true, lease: 'active' },
   }));
+  writeOut(200);
 } else if (url.endsWith('/redeem')) {
   process.stdout.write(JSON.stringify({
     version: 1,
@@ -84,7 +94,18 @@ if (ingressOrigin && url.startsWith(ingressOrigin + '/admin/')) {
   if (!config.includes('Authorization: Bearer ' + process.env.CLAIM_TEST_DEPLOYMENT_TOKEN)) {
     process.exit(22);
   }
-  if (config.includes('\\\\"status\\\\":\\\\"ready\\\\"')) {
+  // Billing parses the body as JSON; curl config unescapes the quoted data first.
+  let progress;
+  try {
+    progress = JSON.parse(JSON.parse('"' + (config.match(/^data = "(.*)"$/m)?.[1] ?? '') + '"'));
+  } catch {
+    fs.appendFileSync(process.env.CLAIM_TEST_ARGV + '.invalid-json', config.match(/^data = .*$/m)?.[0] + '\\n');
+    if (/^fail$/m.test(config)) process.exit(22);
+    process.stdout.write(JSON.stringify({ error: { code: 'invalid-json' } }));
+    process.exit(0);
+  }
+  fs.appendFileSync(process.env.CLAIM_TEST_ARGV + '.progress', JSON.stringify(progress) + '\\n');
+  if (progress.status === 'ready') {
     const rejections = Number(process.env.CLAIM_TEST_READY_REJECTIONS || 0);
     const counter = process.env.CLAIM_TEST_READY + '.attempts';
     const attempt = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0) + 1;
@@ -210,7 +231,14 @@ const assertSecretAbsent = async (result, argvPath) => {
   assert.doesNotMatch(result.stdout, /ar-adm-[0-9a-f]{32}/);
   assert.doesNotMatch(result.stderr, /ar-adm-[0-9a-f]{32}/);
   assert.doesNotMatch(await readFile(argvPath, 'utf8'), /adt_/);
+  await assert.rejects(readFile(`${argvPath}.invalid-json`, 'utf8'), 'a progress body was not valid JSON');
 };
+
+const progressReports = async (world) =>
+  (await readFile(`${world.argv}.progress`, 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
 
 test('setup redeems a claim into files while stdout and argv stay secret-free', async () => {
   const world = await makeWorld('pending');
@@ -688,6 +716,65 @@ for (const [name, override] of [
       { status: 'error', errorCode: 'install_claim_error' },
     ]);
     await assert.rejects(readFile(world.ready, 'utf8'));
+    assert.deepEqual((await progressReports(world)).at(-1), {
+      status: 'error',
+      errorCode: 'verification_failed',
+    });
     await assertSecretAbsent(result, world.argv);
   });
 }
+
+test('claim progress bodies avoid the escape that bash 3.2 renders as malformed JSON', async () => {
+  for (const script of [setup, verify]) {
+    const source = await readFile(script, 'utf8');
+    assert.doesNotMatch(source, /\$\{[A-Za-z_]+\/\/\\"/, script);
+  }
+});
+
+test('verifier reports a rejected admin token instead of an unreadable health response', async () => {
+  const world = await makeWorld('gateway_connected');
+  const copiedVerify = await makeDockerRoot(world);
+  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+    cwd: world.root,
+    env: { ...world.env, CLAIM_TEST_ADMIN_TOKEN: 'ar-adm-synthetic-other' },
+    encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(jsonLines(result.stdout), [
+    { status: 'error', errorCode: 'admin_token_rejected' },
+  ]);
+  assert.match(result.stderr, /rejected the admin token/);
+  await assertSecretAbsent(result, world.argv);
+});
+
+test('verifier does not blame the admin token for a 403', async () => {
+  const world = await makeWorld('gateway_connected');
+  const copiedVerify = await makeDockerRoot(world);
+  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+    cwd: world.root,
+    env: {
+      ...world.env,
+      CLAIM_TEST_ADMIN_TOKEN: 'ar-adm-synthetic-other',
+      CLAIM_TEST_HEALTH_DENY_STATUS: '403',
+    },
+    encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0);
+  const lines = jsonLines(result.stdout);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].status, 'error');
+  assert.notEqual(lines[0].errorCode, 'admin_token_rejected');
+  assert.doesNotMatch(result.stderr, /admin token/);
+});
+
+test('verifier pointed at the console proxy with a token reports the rejection', async () => {
+  const world = await makeWorld('pending');
+  const copiedVerify = await makeDockerRoot(world);
+  const result = spawnSync(copiedVerify, [ingressOrigin, 'ar-adm-synthetic'], {
+    cwd: world.root,
+    env: { ...world.env, CLAIM_TEST_INGRESS_ORIGIN: ingressOrigin },
+    encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /rejected the admin token \(HTTP 401\)/);
+});

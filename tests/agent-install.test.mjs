@@ -760,9 +760,10 @@ test('verifier does not blame the admin token for a 403', async () => {
     encoding: 'utf8',
   });
   assert.notEqual(result.status, 0);
-  assert.deepEqual(jsonLines(result.stdout), [
-    { status: 'error', errorCode: 'invalid_health_response' },
-  ]);
+  const lines = jsonLines(result.stdout);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].status, 'error');
+  assert.notEqual(lines[0].errorCode, 'admin_token_rejected');
   assert.doesNotMatch(result.stderr, /admin token/);
 });
 

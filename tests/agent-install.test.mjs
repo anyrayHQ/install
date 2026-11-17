@@ -103,6 +103,7 @@ if (ingressOrigin && url.startsWith(ingressOrigin + '/admin/')) {
     process.stdout.write(JSON.stringify({ error: { code: 'invalid-json' } }));
     process.exit(0);
   }
+  fs.appendFileSync(process.env.CLAIM_TEST_ARGV + '.progress', JSON.stringify(progress) + '\\n');
   if (progress.status === 'ready') {
     const rejections = Number(process.env.CLAIM_TEST_READY_REJECTIONS || 0);
     const counter = process.env.CLAIM_TEST_READY + '.attempts';
@@ -229,7 +230,14 @@ const assertSecretAbsent = async (result, argvPath) => {
   assert.doesNotMatch(result.stdout, /ar-adm-[0-9a-f]{32}/);
   assert.doesNotMatch(result.stderr, /ar-adm-[0-9a-f]{32}/);
   assert.doesNotMatch(await readFile(argvPath, 'utf8'), /adt_/);
+  await assert.rejects(readFile(`${argvPath}.invalid-json`, 'utf8'), 'a progress body was not valid JSON');
 };
+
+const progressReports = async (world) =>
+  (await readFile(`${world.argv}.progress`, 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
 
 test('setup redeems a claim into files while stdout and argv stay secret-free', async () => {
   const world = await makeWorld('pending');
@@ -707,6 +715,10 @@ for (const [name, override] of [
       { status: 'error', errorCode: 'install_claim_error' },
     ]);
     await assert.rejects(readFile(world.ready, 'utf8'));
+    assert.deepEqual((await progressReports(world)).at(-1), {
+      status: 'error',
+      errorCode: 'verification_failed',
+    });
     await assertSecretAbsent(result, world.argv);
   });
 }

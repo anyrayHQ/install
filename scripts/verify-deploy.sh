@@ -196,7 +196,7 @@ if [ -z "$ADMIN_TOKEN" ]; then
 fi
 
 # The ingress sends /admin to the cookie-only console proxy, so read health from the Service.
-start_gateway_forward() {
+ensure_gateway_forward() {
   command -v kubectl >/dev/null 2>&1 || fail_verify missing_dependency "kubectl is required to read health from the gateway Service"
   namespace="$(secret_namespace)"
   namespace_args=()
@@ -204,12 +204,13 @@ start_gateway_forward() {
     [[ "$namespace" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || fail_verify invalid_namespace "anyray-secrets.yaml has an invalid metadata.namespace"
     namespace_args=(--namespace "$namespace")
   fi
-  FORWARD_LOG="$(mktemp)"
-  # A fresh install may still be pulling images or migrating; kubectl listens before the gateway does.
-  deadline=$((SECONDS + 180))
-  while [ "$SECONDS" -lt "$deadline" ]; do
+  [ -n "$FORWARD_LOG" ] || FORWARD_LOG="$(mktemp)"
+  deadline=$((SECONDS + $1))
+  while :; do
     if [ -z "$FORWARD_PID" ]; then
-      kubectl port-forward ${namespace_args[@]+"${namespace_args[@]}"} svc/gateway :8787 </dev/null >"$FORWARD_LOG" 2>&1 3>&- &
+      # Truncate here: the child's own redirect can lag, leaving the previous forward's port readable.
+      : >"$FORWARD_LOG"
+      kubectl port-forward ${namespace_args[@]+"${namespace_args[@]}"} svc/gateway :8787 </dev/null >>"$FORWARD_LOG" 2>&1 3>&- &
       FORWARD_PID=$!
       forward_started=$SECONDS
       port=""
@@ -219,17 +220,20 @@ start_gateway_forward() {
       HEALTH_URL="http://127.0.0.1:${port}"
       return 0
     fi
-    if ! kill -0 "$FORWARD_PID" 2>/dev/null || { [ -z "$port" ] && [ $((SECONDS - forward_started)) -ge 10 ]; }; then
+    # Restart a forward that died or never answered; older kubectl keeps running after its pod is gone.
+    if ! kill -0 "$FORWARD_PID" 2>/dev/null || [ $((SECONDS - forward_started)) -ge 10 ]; then
       stop_gateway_forward
     fi
+    [ "$SECONDS" -lt "$deadline" ] || break
     sleep 1
   done
-  fail_verify gateway_unreachable "the gateway Service never answered through kubectl port-forward; confirm the namespace and that the gateway pods are running"
+  fail_verify gateway_unreachable "the gateway Service is not answering through kubectl port-forward; confirm the namespace and that the gateway pods are running, then rerun this command"
 }
 
 if [ "$KUBERNETES" -eq 1 ]; then
-  start_gateway_forward
-  [ -n "$GATEWAY_URL" ] || GATEWAY_URL="$HEALTH_URL"
+  [ -n "$GATEWAY_URL" ] || fail_verify invalid_arguments "pass this install's public URL: ./scripts/verify-deploy.sh [--claim <install_url>] [--json] https://<ingress-host>"
+  # A fresh install may still be pulling images or migrating; kubectl listens before the gateway does.
+  ensure_gateway_forward 300
 fi
 if [ -z "$GATEWAY_URL" ]; then
   GATEWAY_URL="$(get_env ANYRAY_GATEWAY_PUBLIC_URL)"
@@ -264,6 +268,9 @@ if [ -z "$ADMIN_TOKEN" ]; then
   VERIFY_COMPLETE=1
   exit 0
 fi
+
+# The selected pod may have restarted while the public URL was checked.
+[ "$KUBERNETES" -eq 0 ] || ensure_gateway_forward 60
 
 # Query deep health without placing the admin credential in argv. The response
 # is content-free, but malformed bodies still stay out of diagnostics.
@@ -364,7 +371,8 @@ EOF
 # after redemption. Wait for that proof before submitting local Ready.
 gateway_connected=0
 ready_reported=0
-for _ in $(seq 1 45); do
+poll_deadline=$((SECONDS + 90))
+while [ "$SECONDS" -lt "$poll_deadline" ]; do
   status="$(claim_status)" || status=""
   case "$status" in
     ready)

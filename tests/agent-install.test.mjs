@@ -17,15 +17,25 @@ const fakeCurl = `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.CLAIM_TEST_ARGV, JSON.stringify(args) + '\\n');
-const forwardOrigin = 'http://127.0.0.1:' + process.env.CLAIM_TEST_FORWARD_PORT;
-const forwardAnswers = () => {
-  const pidsFile = process.env.CLAIM_TEST_KUBECTL_ARGV + '.pids';
-  const pids = fs.existsSync(pidsFile) ? fs.readFileSync(pidsFile, 'utf8').trim().split('\\n') : [];
+const forwards = () => {
+  const file = process.env.CLAIM_TEST_KUBECTL_ARGV + '.forwards.ndjson';
+  return fs.existsSync(file)
+    ? fs.readFileSync(file, 'utf8').trim().split('\\n').map((line) => JSON.parse(line))
+    : [];
+};
+const alive = (pid) => {
   try {
-    process.kill(Number(pids.at(-1)), 0);
+    process.kill(pid, 0);
+    return true;
   } catch {
     return false;
   }
+};
+const forwardPort = (target) => target.match(/^http:\\/\\/127\\.0\\.0\\.1:(\\d+)\\//)?.[1];
+// Only a live kubectl forwards its own port; the gateway behind it may still be starting.
+const forwardAnswers = (port) => {
+  const forward = forwards().find((entry) => String(entry.port) === port);
+  if (!forward || !alive(forward.pid)) return false;
   const counter = process.env.CLAIM_TEST_KUBECTL_ARGV + '.gateway-requests';
   const seen = (fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0) + 1;
   fs.writeFileSync(counter, String(seen));
@@ -33,11 +43,19 @@ const forwardAnswers = () => {
 };
 if (!args.includes('--config')) {
   const target = args.at(-1);
-  process.exit(target.startsWith(forwardOrigin + '/') && !forwardAnswers() ? 7 : 0);
+  const dropMarker = process.env.CLAIM_TEST_KUBECTL_ARGV + '.dropped';
+  if (process.env.CLAIM_TEST_POD_RESTARTS_DURING_INGRESS_CHECK &&
+      target.startsWith(process.env.CLAIM_TEST_INGRESS_ORIGIN + '/') && !fs.existsSync(dropMarker)) {
+    fs.writeFileSync(dropMarker, '');
+    for (const { pid } of forwards()) if (alive(pid)) process.kill(pid);
+  }
+  const port = forwardPort(target);
+  process.exit(port && !forwardAnswers(port) ? 7 : 0);
 }
 const config = fs.readFileSync(0, 'utf8');
 const url = config.match(/^url = "([^"]+)"/m)?.[1] ?? '';
-if (url.startsWith(forwardOrigin + '/') && !forwardAnswers()) process.exit(7);
+const healthPort = forwardPort(url);
+if (healthPort && !forwardAnswers(healthPort)) process.exit(7);
 const ingressOrigin = process.env.CLAIM_TEST_INGRESS_ORIGIN;
 if (ingressOrigin && url.startsWith(ingressOrigin + '/admin/')) {
   // The console proxy strips Authorization and answers its own 401 page.
@@ -129,8 +147,13 @@ if (attempt <= Number(process.env.CLAIM_TEST_FORWARD_FAILURES || 0)) {
   process.stderr.write('error: unable to forward port because pod is not running\\n');
   process.exit(1);
 }
+const port = Number(process.env.CLAIM_TEST_FORWARD_PORT) + attempt;
 fs.appendFileSync(process.env.CLAIM_TEST_KUBECTL_ARGV + '.pids', process.pid + '\\n');
-process.stdout.write('Forwarding from 127.0.0.1:' + process.env.CLAIM_TEST_FORWARD_PORT + ' -> 8787\\n');
+fs.appendFileSync(
+  process.env.CLAIM_TEST_KUBECTL_ARGV + '.forwards.ndjson',
+  JSON.stringify({ pid: process.pid, port }) + '\\n'
+);
+process.stdout.write('Forwarding from 127.0.0.1:' + port + ' -> 8787\\n');
 if (attempt === 1 && process.env.CLAIM_TEST_FORWARD_DROPS_FIRST) setTimeout(() => process.exit(1), 200);
 setInterval(() => {}, 1000);
 `;
@@ -420,7 +443,6 @@ const ingressOrigin = 'https://anyray.example.com';
 const k8sAdminToken = 'ar-adm-synthetic-k8s';
 const k8sHealthEnv = {
   CLAIM_TEST_INGRESS_ORIGIN: ingressOrigin,
-  CLAIM_TEST_HEALTH_URL: 'http://127.0.0.1:18787/admin/health',
   CLAIM_TEST_ADMIN_TOKEN: k8sAdminToken,
 };
 
@@ -524,7 +546,7 @@ test('Kubernetes verifier reads health from the gateway Service, not the cookie-
 test('Kubernetes verifier retries the forward while the gateway pod starts and uses the current namespace', async () => {
   const world = await makeWorld('gateway_connected');
   const copiedVerify = await makeKubernetesRoot(world, { namespace: '' });
-  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json', ingressOrigin], {
     cwd: world.root,
     env: {
       ...world.env,
@@ -546,6 +568,7 @@ test('Kubernetes verifier retries the forward while the gateway pod starts and u
 for (const [name, override, forwards] of [
   ['the gateway behind the forward answers', { CLAIM_TEST_GATEWAY_STARTING: '3' }, 1],
   ['a dropped forward is restarted', { CLAIM_TEST_FORWARD_DROPS_FIRST: '1' }, 2],
+  ['a forward lost while the public URL was checked is restarted', { CLAIM_TEST_POD_RESTARTS_DURING_INGRESS_CHECK: '1' }, 2],
 ]) {
   test(`Kubernetes verifier waits until ${name} before reading health`, async () => {
     const world = await makeWorld('gateway_connected');
@@ -561,6 +584,22 @@ for (const [name, override, forwards] of [
     await assertForwardsStopped(world);
   });
 }
+
+test('Kubernetes verifier requires the public URL so Ready cannot skip the ingress', async () => {
+  const world = await makeWorld('gateway_connected');
+  const copiedVerify = await makeKubernetesRoot(world);
+  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+    cwd: world.root,
+    env: { ...world.env, ...k8sHealthEnv },
+    encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(jsonLines(result.stdout), [
+    { status: 'error', errorCode: 'invalid_arguments' },
+  ]);
+  await assert.rejects(readFile(world.kubectlArgv, 'utf8'));
+  await assert.rejects(readFile(world.ready, 'utf8'));
+});
 
 test('Kubernetes verifier stops its forward when health fails', async () => {
   const world = await makeWorld('gateway_connected');

@@ -347,9 +347,9 @@ EOF
     [ -z "$response" ] || break
   done
   response="$(printf '%s' "$response" | tr -d '\r\n')"
-  ready_re='^\{.*"status"[[:space:]]*:[[:space:]]*"ready".*\}$'
+  ready_re='^[[:space:]]*\{.*"status"[[:space:]]*:[[:space:]]*"ready".*\}[[:space:]]*$'
   error_re='"error"[[:space:]]*:'
-  waiting_re='^\{"error":\{"code":"gateway-not-connected",.*\}\}$'
+  waiting_re='^[[:space:]]*\{.*"error"[[:space:]]*:[[:space:]]*\{.*"code"[[:space:]]*:[[:space:]]*"gateway-not-connected".*\}[[:space:]]*$'
   if [[ "$response" =~ $ready_re ]] && ! [[ "$response" =~ $error_re ]]; then
     echo ready
   elif [[ "$response" =~ $waiting_re ]]; then

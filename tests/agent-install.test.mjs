@@ -61,11 +61,16 @@ if (ingressOrigin && url.startsWith(ingressOrigin + '/admin/')) {
       (attempt <= rejections ? 'gateway-not-connected' : '');
     if (code) {
       if (/^fail$/m.test(config)) process.exit(22);
-      process.stdout.write(JSON.stringify({ error: { code, message: 'Rejected.' } }));
+      process.stdout.write(
+        process.env.CLAIM_TEST_WAITING_BODY ||
+          JSON.stringify({ error: { code, message: 'Rejected.' } })
+      );
       process.exit(0);
     }
     fs.writeFileSync(process.env.CLAIM_TEST_READY, 'ready');
-    process.stdout.write(JSON.stringify({ version: 1, status: 'ready' }));
+    process.stdout.write(
+      process.env.CLAIM_TEST_ACCEPT_BODY || JSON.stringify({ version: 1, status: 'ready' })
+    );
   } else {
     process.stdout.write('{}');
   }
@@ -559,23 +564,32 @@ test('Docker verifier reads health from the configured gateway URL without kubec
   await assert.rejects(readFile(world.kubectlArgv, 'utf8'));
 });
 
-test('verifier recovers a claim left in error by an earlier failed run once the heartbeat lands', async () => {
-  const world = await makeWorld('error');
-  const copiedVerify = await makeDockerRoot(world);
-  const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
-    cwd: world.root,
-    env: {
-      ...world.env,
-      CLAIM_TEST_INITIAL_ERROR_CODE: 'verification_failed',
-      CLAIM_TEST_READY_REJECTIONS: '2',
-    },
-    encoding: 'utf8',
+for (const [name, bodies] of [
+  ['compact replies', {}],
+  ['spaced and reordered replies', {
+    CLAIM_TEST_WAITING_BODY: '{ "error": { "message": "Waiting", "code": "gateway-not-connected" } }',
+    CLAIM_TEST_ACCEPT_BODY: '{ "claimId": "icl_synthetic", "status": "ready", "version": 1 }',
+  }],
+]) {
+  test(`verifier recovers a claim left in error once the heartbeat lands (${name})`, async () => {
+    const world = await makeWorld('error');
+    const copiedVerify = await makeDockerRoot(world);
+    const result = spawnSync(copiedVerify, ['--claim', claimUrl, '--json'], {
+      cwd: world.root,
+      env: {
+        ...world.env,
+        ...bodies,
+        CLAIM_TEST_INITIAL_ERROR_CODE: 'verification_failed',
+        CLAIM_TEST_READY_REJECTIONS: '2',
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.deepEqual(statuses(result.stdout), ['gateway_connected', 'ready']);
+    assert.equal(await readFile(`${world.ready}.attempts`, 'utf8'), '3');
+    await assertSecretAbsent(result, world.argv);
   });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.deepEqual(statuses(result.stdout), ['gateway_connected', 'ready']);
-  assert.equal(await readFile(`${world.ready}.attempts`, 'utf8'), '3');
-  await assertSecretAbsent(result, world.argv);
-});
+}
 
 for (const [name, override] of [
   ['a superseded claim', { CLAIM_TEST_INITIAL_ERROR_CODE: 'superseded', CLAIM_TEST_READY_REJECT_CODE: 'install-claim-inactive' }],

@@ -156,10 +156,10 @@ test('region: no proxy is rendered and every edge target is the gateway', () => 
   assert.deepEqual(pins.map(p => p.container), ['gateway', 'optimizer']);
 });
 
-test('region: with networkPolicy, gateway takes 8787 from anywhere and 8789 from optimizer pods only', () => {
+test('region: with networkPolicy, gateway takes 8787 from anywhere and 8789 from this release\'s optimizer and update job only', () => {
   const np = doc(render([...region, 'networkPolicy.enabled=true']), 'NetworkPolicy', 'anyray-gateway');
   assert.match(np, /podSelector:\n\s+matchLabels:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: gateway\n/);
-  assert.match(np, /ingress:\n\s+- ports:\n\s+- protocol: TCP\n\s+port: 8787\n\s+- from:\n\s+- podSelector:\n\s+matchLabels:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: optimizer\n\s+app\.kubernetes\.io\/instance: topology-test\n\s+ports:\n\s+- protocol: TCP\n\s+port: 8789\n/);
+  assert.match(np, /ingress:\n\s+- ports:\n\s+- protocol: TCP\n\s+port: 8787\n\s+- from:\n\s+- podSelector:\n\s+matchLabels:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: optimizer\n\s+app\.kubernetes\.io\/instance: topology-test\n\s+- podSelector:\n\s+matchLabels:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: updater\n\s+app\.kubernetes\.io\/instance: topology-test\n\s+ports:\n\s+- protocol: TCP\n\s+port: 8789\n/);
   assert.equal(doc(render(['networkPolicy.enabled=true']), 'NetworkPolicy', 'anyray-gateway'), '');
 });
 
@@ -197,6 +197,42 @@ for (const [topology, base] of [['single', []], ['split', split], ['region', reg
     }
   }
 }
+
+const cronJob = values => doc(render(values), 'CronJob', 'anyray-autoupdate');
+const follows = d => JSON.parse(JSON.parse(d.match(/name: AUTOUPDATE_PINS\n\s+value: (".*")\n/)[1]));
+
+test('region: the update job follows home hourly, reading home\'s build on the internal listener', () => {
+  const s = render(region);
+  const job = doc(s, 'CronJob', 'anyray-autoupdate');
+  assert.match(job, /\n  schedule: "15 \* \* \* \*"\n/);
+  assert.doesNotMatch(job, /initContainers|rollout|kubectl/);
+  assert.match(job, /- name: follow-home\n\s+image: public\.ecr\.aws\/anyray\/gateway:policy-stable\n\s+imagePullPolicy: IfNotPresent\n\s+command: \["node", "\/pin\/autoupdate-pin\.mjs", "follow-home", "http:\/\/gateway-internal:8789\/v1\/region-home-build"\]\n/);
+  assert.deepEqual(follows(job), [
+    { deployment: 'anyray-gateway', container: 'gateway', image: 'public.ecr.aws/anyray/gateway:policy-stable' },
+    { deployment: 'anyray-optimizer', container: 'optimizer', image: 'public.ecr.aws/anyray/optimizer:policy-stable' },
+  ]);
+  const role = doc(s, 'Role', 'anyray-updater');
+  assert.match(role, /rules:\n\s+- apiGroups: \["apps"\]\n\s+resources: \["deployments"\]\n\s+resourceNames: \["anyray-gateway","anyray-optimizer"\]\n\s+verbs: \["get", "patch"\]\n?$/);
+});
+
+test('region: an explicit schedule wins, and an optimizer pinned to its own tag is not followed', () => {
+  const job = cronJob([...region, 'autoUpdate.schedule=0 */6 * * *', 'images.optimizer.tag=v1.10.619']);
+  assert.match(job, /\n  schedule: "0 \*\/6 \* \* \*"\n/);
+  assert.deepEqual(follows(job).map(p => p.container), ['gateway']);
+});
+
+test('region: a pinned image tag renders no update job, as on home', () => {
+  assert.equal(cronJob([...region.filter(v => !v.startsWith('image.tag=')), 'image.tag=v1.10.619']), '');
+});
+
+test('home keeps its nightly channel roll', () => {
+  const job = cronJob(['image.tag=policy-stable']);
+  assert.match(job, /\n  schedule: "30 3 \* \* \*"\n/);
+  assert.match(job, /initContainers:/);
+  assert.match(job, /- name: kubectl\n/);
+  assert.doesNotMatch(job, /follow-home/);
+  assert.match(doc(render(['image.tag=policy-stable']), 'Role', 'anyray-updater'), /verbs: \["get", "list", "patch"\]\n\s+- apiGroups: \[""\]\n\s+resources: \["pods"\]/);
+});
 
 test('region renders on the image floor', () => {
   render([...region, 'image.tag=v1.10.611']);

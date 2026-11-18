@@ -107,6 +107,11 @@ fallback.
 {{- end -}}
 {{- end }}
 
+{{- /* The roll's schedule: the value when set, else hourly for a region (it follows home) and nightly elsewhere. */}}
+{{- define "anyray.autoUpdateSchedule" -}}
+{{- .Values.autoUpdate.schedule | default (ternary "15 * * * *" "30 3 * * *" (eq .Values.topology "region")) -}}
+{{- end }}
+
 {{/*
 Whether an effective image tag is a MOVING channel — one whose digest changes
 under it — rather than an immutable pinned build.

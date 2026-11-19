@@ -22,8 +22,14 @@ console with a port-forward:
 Image updates:
 {{- $tag := include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .) }}
 {{- if and .Values.autoUpdate.enabled (include "anyray.isMovingTag" $tag) }}
+{{- if eq .Values.topology "region" }}
+  automatic  a CronJob sets this region's images to the build home runs, on
+             schedule "{{ include "anyray.autoUpdateSchedule" . }}"{{ with .Values.autoUpdate.timeZone }} ({{ . }}){{ end }}. It never moves the region past
+             home, and holds while it cannot read home's build.
+{{- else }}
   automatic  images follow the "{{ $tag }}" channel and a CronJob rolls this
-             release on schedule "{{ .Values.autoUpdate.schedule }}"{{ with .Values.autoUpdate.timeZone }} ({{ . }}){{ end }}.
+             release on schedule "{{ include "anyray.autoUpdateSchedule" . }}"{{ with .Values.autoUpdate.timeZone }} ({{ . }}){{ end }}.
+{{- end }}
              Turn it off with autoUpdate.enabled=false.
 {{- else if .Values.autoUpdate.enabled }}
   manual     images are pinned to "{{ $tag }}", a fixed and auditable build.

@@ -193,7 +193,7 @@ release's instance label, so a second release in the same namespace is untouched
 | Value | Default | What it does |
 | --- | --- | --- |
 | `autoUpdate.enabled` | `true` | Arms the roll. Renders nothing unless `image.tag` can actually move, so a pinned install is never restarted onto the same build. Set `false` to keep a moving tag without a scheduled roll. |
-| `autoUpdate.schedule` | `"30 3 * * *"` | Standard cron. Daily, outside working hours. |
+| `autoUpdate.schedule` | `""` | Standard cron. Empty runs daily at 03:30, or hourly under `topology: region`. |
 | `autoUpdate.timeZone` | `""` | IANA name (`Europe/Berlin`). Empty uses the cluster's zone. Needs Kubernetes 1.27+. |
 | `autoUpdate.image.repository` / `.tag` | `registry.k8s.io/kubectl` / `v1.33.0` | Any kubectl within one minor of your cluster. Mirrored by `global.imageRegistry` like every other image. The upstream image has no `latest` tag, so this is always explicit. |
 | `autoUpdate.resources` | 10m/32Mi → 100m/128Mi | Per container: the image resolvers, the pin step, and kubectl. Each makes a few API calls at most. |
@@ -203,6 +203,36 @@ It needs a `Role` (never a `ClusterRole`) granting `get`, `list` and `patch` on
 `apps/deployments` in this namespace, and `get` on `pods`: `get`/`list` resolve
 the label selector, `patch` pins the image and stamps the restart annotation, and
 the pod read is the Job reading its own resolved digests. Nothing else.
+
+#### In a region: follow home's build
+
+Under `topology: region` the job does not follow the channel. A region must
+never run a newer build than home: home refuses data it cannot read, and the
+region's usage queue stops at that row. So each hour the job asks the region
+gateway which build home's gateways run (`GET /v1/region-home-build` on
+`gateway-internal:8789`) and acts on the answer:
+
+| Answer | What the job does |
+| --- | --- |
+| Home's build is known and the region runs it | Nothing. No patch, no restart. |
+| Home's build is known and differs | Sets the optimizer, then the gateway image to that release tag (`public.ecr.aws/anyray/gateway:v1.10.619`). The Deployments roll as usual; a run that stops half way is finished by the next. |
+| Unknown, stale or unreachable | Nothing. It logs `hold: <reason>`. |
+
+The region gateway reports home's lowest build over its last 10 minutes of
+answers, and home reports the lowest build among its live gateway pods, so a
+region waits until every home pod has moved. A region gateway older than this
+answers 404, and a home older than this sends no build: in both cases the job
+holds. It follows home down as well as up, so a home rollback moves the region
+back. With `global.imageRegistry`, mirror the release tags too.
+
+An optimizer pinned to its own tag (`images.optimizer.tag`) is left alone. The
+job's `Role` here grants only `get` and `patch` on the gateway and optimizer
+Deployments. A manual `helm upgrade` renders the channel tag again; the next
+hourly run moves the region back to home's build.
+
+Known issue: after the job sets an image, `helm upgrade` with Helm 4
+(server-side apply) fails with a field-ownership conflict on the image field.
+The nightly roll's pin has the same effect.
 
 **Under ArgoCD or Flux, prefer pinning in Git over this roll.** A Job that
 patches Deployments competes with the controller that owns them. Leave
@@ -758,8 +788,9 @@ The chart refuses home-only variables in `gateway.extraEnv` or
 `ANYRAY_PSEUDONYM_SALT` and `ANYRAY_OBSERVABILITY_DB_URL`.
 
 A `region` release also creates the ClusterIP Service `gateway-internal` on port
-8789. The region optimizer pulls home's state through it. Never route it from
-an Ingress or HTTPRoute. With `networkPolicy.enabled`, only optimizer pods reach
+8789. The region optimizer pulls home's state through it, and the update job
+reads home's build there. Never route it from an Ingress or HTTPRoute. With
+`networkPolicy.enabled`, only this release's optimizer and update job pods reach
 8789. See [Regions](https://docs.anyray.ai/operate/regions) for health and
 operations.
 

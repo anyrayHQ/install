@@ -79,7 +79,7 @@ spec:
     {{- end }}
 {{- if eq .Values.topology "region" }}
 ---
-{{- /* Region: 8787 is the public listener; 8789 hands out home's keys, so only optimizer pods reach it. */}}
+{{- /* Region: 8787 is the public listener; 8789 hands out home's keys, so only optimizer pods reach it, and the update job reads home's build there. */}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -101,6 +101,9 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "anyray.selectorLabels" (dict "component" "optimizer" "context" .) | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "anyray.selectorLabels" (dict "component" "updater" "context" .) | nindent 14 }}
       ports:
         - protocol: TCP
           port: 8789

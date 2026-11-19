@@ -55,8 +55,17 @@ render error for all of them, and a red sync for every ArgoCD and Flux user. A
 deploy pipeline broken by a chart bump is a worse outcome than an operator who has
 deliberately pinned not getting a nightly roll they never asked for. */ -}}
 {{- if and .Values.autoUpdate.enabled (include "anyray.isMovingTag" (include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .))) }}
-{{- /* What the pin step patches, and which init container resolves each digest. */}}
 {{- $fullname := include "anyray.fullname" . }}
+{{- $region := eq .Values.topology "region" }}
+{{- $follow := list }}
+{{- if $region }}
+{{- /* A region follows home's build, read from its gateway's internal listener; a pinned optimizer is left alone. */}}
+{{- $follow = list (dict "deployment" (printf "%s-gateway" $fullname) "container" "gateway" "image" (include "anyray.image" (dict "component" "gateway" "context" .))) }}
+{{- if include "anyray.isMovingTag" (include "anyray.effectiveImageTag" (dict "component" "optimizer" "context" .)) }}
+{{- $follow = append $follow (dict "deployment" (printf "%s-optimizer" $fullname) "container" "optimizer" "image" (include "anyray.image" (dict "component" "optimizer" "context" .))) }}
+{{- end }}
+{{- end }}
+{{- /* What the pin step patches, and which init container resolves each digest. */}}
 {{- $resolvers := list
   (dict "name" "resolve-optimizer" "component" "optimizer" "command" (list "/nodejs/bin/node" "-e" "")) }}
 {{- $pins := list
@@ -85,12 +94,19 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: updater
 rules:
+  {{- if $region }}
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: {{ toJson (list (printf "%s-gateway" $fullname) (printf "%s-optimizer" $fullname)) }}
+    verbs: ["get", "patch"]
+  {{- else }}
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "patch"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get"]
+  {{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -127,7 +143,7 @@ metadata:
     {{- include "anyray.labels" . | nindent 4 }}
     app.kubernetes.io/component: updater
 spec:
-  schedule: {{ .Values.autoUpdate.schedule | quote }}
+  schedule: {{ include "anyray.autoUpdateSchedule" . | quote }}
   {{- with .Values.autoUpdate.timeZone }}
   timeZone: {{ . | quote }}
   {{- end }}
@@ -176,6 +192,33 @@ spec:
             - name: pin-script
               configMap:
                 name: {{ include "anyray.fullname" $ }}-autoupdate-pin
+          {{- if $region }}
+          containers:
+            {{- /* Runs only the mounted script, so the image the node already has will do. */}}
+            - name: follow-home
+              image: {{ include "anyray.image" (dict "component" "gateway" "context" .) }}
+              imagePullPolicy: IfNotPresent
+              command: ["node", "/pin/autoupdate-pin.mjs", "follow-home", "http://gateway-internal:8789/v1/region-home-build"]
+              env:
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: NODE_EXTRA_CA_CERTS
+                  value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                - name: AUTOUPDATE_PINS
+                  value: {{ toJson $follow | quote }}
+              volumeMounts:
+                - name: pin-script
+                  mountPath: /pin
+                  readOnly: true
+              {{- with .Values.containerSecurityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- toYaml .Values.autoUpdate.resources | nindent 16 }}
+          {{- else }}
           {{- /* One no-op init container per app image, pulled fresh: its
           status.imageID is the digest the tag resolves to tonight. The gateway's
           digest comes from the `pin` container itself, which runs that image.
@@ -241,4 +284,5 @@ spec:
                 - app.kubernetes.io/instance={{ .Release.Name }}
               resources:
                 {{- toYaml .Values.autoUpdate.resources | nindent 16 }}
+          {{- end }}
 {{- end }}

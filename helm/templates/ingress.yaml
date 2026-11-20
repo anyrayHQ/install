@@ -71,7 +71,8 @@ spec:
       http:
         paths:
           {{- range $rule := $edge.ingress }}
-          {{- $console := eq $rule.target "console" }}
+          {{- /* A region serves no console: its management paths reach the gateway, which forwards them home. */}}
+          {{- $console := and (eq $rule.target "console") (ne $.Values.topology "region") }}
           - path: {{ $rule.path }}
             pathType: {{ $rule.pathType }}
             backend:

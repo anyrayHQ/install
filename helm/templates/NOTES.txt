@@ -3,7 +3,11 @@ Anyray {{ .Chart.AppVersion }} (chart {{ .Chart.Version }}) is installed as "{{ 
 Watch it come up:
 
   kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "anyray.fullname" . }}-gateway
-{{- if .Values.host }}
+{{- if eq .Values.topology "region" }}
+
+Region gateway: {{ include "anyray.gatewayPublicUrl" . | default "(no host set)" }}/v1
+Health:         GET /region-health on that host; management stays on home.
+{{- else if .Values.host }}
 
 Console:  https://{{ .Values.host }}/
 Gateway:  https://{{ .Values.host }}/v1
@@ -18,8 +22,14 @@ console with a port-forward:
 Image updates:
 {{- $tag := include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .) }}
 {{- if and .Values.autoUpdate.enabled (include "anyray.isMovingTag" $tag) }}
+{{- if eq .Values.topology "region" }}
+  automatic  a CronJob sets this region's images to the build home runs, on
+             schedule "{{ include "anyray.autoUpdateSchedule" . }}"{{ with .Values.autoUpdate.timeZone }} ({{ . }}){{ end }}. It never moves the region past
+             home, and holds while it cannot read home's build.
+{{- else }}
   automatic  images follow the "{{ $tag }}" channel and a CronJob rolls this
-             release on schedule "{{ .Values.autoUpdate.schedule }}"{{ with .Values.autoUpdate.timeZone }} ({{ . }}){{ end }}.
+             release on schedule "{{ include "anyray.autoUpdateSchedule" . }}"{{ with .Values.autoUpdate.timeZone }} ({{ . }}){{ end }}.
+{{- end }}
              Turn it off with autoUpdate.enabled=false.
 {{- else if .Values.autoUpdate.enabled }}
   manual     images are pinned to "{{ $tag }}", a fixed and auditable build.
@@ -40,7 +50,9 @@ Availability of this release:
   gateway    replicas {{ if .Values.gateway.autoscaling.enabled }}{{ .Values.gateway.autoscaling.minReplicas }}-{{ .Values.gateway.autoscaling.maxReplicas }} (HPA){{ else }}{{ include "anyray.gatewayReplicas" . }}{{ end }}, rolling update with maxUnavailable 0
 {{- end }}
   optimizer  replicas {{ if .Values.optimizer.autoscaling.enabled }}{{ .Values.optimizer.autoscaling.minReplicas }}-{{ .Values.optimizer.autoscaling.maxReplicas }} (HPA){{ else }}{{ include "anyray.optimizerReplicas" . }}{{ end }}{{ if .Values.optimizer.persistence.enabled }}, Recreate rollout{{ end }}
+{{- if ne .Values.topology "region" }}
   proxy      replicas {{ if .Values.proxy.autoscaling.enabled }}{{ .Values.proxy.autoscaling.minReplicas }}-{{ .Values.proxy.autoscaling.maxReplicas }} (HPA){{ else }}{{ .Values.proxy.replicas }}{{ end }}
+{{- end }}
 {{- if .Values.postgres.enabled }}
   postgres   BUNDLED, single pod. This is the one part of the stack that cannot
              fail over, and the gateway reads client keys from it on the auth

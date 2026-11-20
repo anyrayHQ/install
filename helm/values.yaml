@@ -1,3 +1,4 @@
+# single | split | region. region runs a second region against a home (README "Topology").
 topology: single
 
 inference:
@@ -102,8 +103,10 @@ image:
 # setting from you before it can start.
 autoUpdate:
   enabled: true
-  # Daily, outside working hours. Standard cron, in timeZone below.
-  schedule: "30 3 * * *"
+  # Standard cron, in timeZone below. Empty: daily at 03:30, or hourly under
+  # topology: region, where the job sets the region's images to the build
+  # home's gateways run (read from the region gateway) and never past it.
+  schedule: ""
   # IANA name, e.g. "Europe/Berlin". Empty uses the cluster's zone (UTC on most).
   timeZone: ""
   image:

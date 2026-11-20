@@ -107,6 +107,11 @@ fallback.
 {{- end -}}
 {{- end }}
 
+{{- /* The roll's schedule: the value when set, else hourly for a region (it follows home) and nightly elsewhere. */}}
+{{- define "anyray.autoUpdateSchedule" -}}
+{{- .Values.autoUpdate.schedule | default (ternary "15 * * * *" "30 3 * * *" (eq .Values.topology "region")) -}}
+{{- end }}
+
 {{/*
 Whether an effective image tag is a MOVING channel — one whose digest changes
 under it — rather than an immutable pinned build.
@@ -602,6 +607,19 @@ silently keeps the old single-replica posture.
        replica, with or without a content key (ANY-439, v1.10.403; ANY-334 and
        ANY-407 had already stopped per-pod mints under content mode off). */}}
 {{- define "anyray.multiOptimizerFloor" -}}v1.10.403{{- end }}
+
+{{- /* First appVersion whose region sends home its address; an older one starts and is never offered to Connect. */}}
+{{- define "anyray.regionFloor" -}}v1.10.611{{- end }}
+
+{{- /* Region mode switches the chart sets itself under topology=region; extraEnv would flip a home pod into region mode. */}}
+{{- define "anyray.regionModeEnv" -}}
+{{- list "ANYRAY_REGION_TOKEN" "ANYRAY_REGION_GATEWAY_URL" | toJson -}}
+{{- end }}
+
+{{- /* Home-only env a region refuses to start with; topologyValidation keeps it out of both extraEnvs. */}}
+{{- define "anyray.regionForbiddenEnv" -}}
+{{- list "ANYRAY_ADMIN_TOKEN" "ANYRAY_DEPLOYMENT_TOKEN" "ANYRAY_CONTENT_KEY" "ANYRAY_METERING_ENABLED" "ANYRAY_PSEUDONYM_SALT" "ANYRAY_OBSERVABILITY_DB_URL" | toJson -}}
+{{- end }}
 
 {{- /* Optimizer replica count. An explicit value wins; unset resolves to 2, or
        to 1 wherever a default of 2 would render stricter than chart 0.7.x did

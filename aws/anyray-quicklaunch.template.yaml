@@ -26,6 +26,8 @@ Metadata:
         Parameters: [LoadBalancerScheme, CertificateArn, GatewayPublicUrl, ConsolePublicUrl]
       - Label: { default: Anyray Cloud (metering) }
         Parameters: [SeatExclude, MeteringIntervalMs, EntitlementGraceMs]
+      - Label: { default: Content key rotation }
+        Parameters: [ContentKeyPreviousSecretArn]
       - Label: { default: Content privacy }
         Parameters: [ContentMode, AllowPlaintext, SpendRetentionDays]
       - Label: { default: Gateway hardening }
@@ -176,6 +178,15 @@ Parameters:
     NoEcho: true
     AllowedPattern: '^adt_[A-Za-z0-9_-]+$'
     Description: Anyray Cloud deployment token (adt_...) for usage metering.
+  ContentKeyPreviousSecretArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:\S+$'
+    Description: >-
+      Optional. Only while rotating the content key: the ARN of a Secrets
+      Manager secret holding the previous key (comma-separated, up to four), so
+      portable threads sealed under it keep working. The secret must sit under
+      <stack>/anyray/ or be readable by the execution role. Empty = none.
   SeatExclude:
     Type: String
     Default: ''
@@ -381,6 +392,7 @@ Conditions:
   HasCert: !Not [!Equals [!Ref CertificateArn, '']]
   HasGatewayUrl: !Not [!Equals [!Ref GatewayPublicUrl, '']]
   HasConsoleUrl: !Not [!Equals [!Ref ConsolePublicUrl, '']]
+  HasContentKeyPrevious: !Not [!Equals [!Ref ContentKeyPreviousSecretArn, '']]
   RdsDeletionProtection: !Equals [!Ref EnableRdsDeletionProtection, 'true']
   AutoUpdate: !Equals [!Ref EnableAutoUpdate, 'true']
   InternalLb: !Equals [!Ref LoadBalancerScheme, 'internal']
@@ -1198,6 +1210,7 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${AWS::StackName}/anyray/*'
                   - !Ref DeploymentTokenSecret
+                  - !If [HasContentKeyPrevious, !Ref ContentKeyPreviousSecretArn, !Ref 'AWS::NoValue']
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -2010,6 +2023,10 @@ Resources:
             - { Name: ANYRAY_SPEND_DB_URL, ValueFrom: !GetAtt DbUrlSecret.DbUrlArn }
             - { Name: ANYRAY_OBSERVABILITY_DB_URL, ValueFrom: !GetAtt DbUrlSecret.DbUrlArn }
             - { Name: ANYRAY_CONTENT_KEY, ValueFrom: !GetAtt AppSecrets.ContentKeyArn }
+            - !If
+              - HasContentKeyPrevious
+              - { Name: ANYRAY_CONTENT_KEY_PREVIOUS, ValueFrom: !Ref ContentKeyPreviousSecretArn }
+              - !Ref AWS::NoValue
             - { Name: ANYRAY_ADMIN_TOKEN, ValueFrom: !GetAtt AppSecrets.AdminTokenArn }
             - { Name: ANYRAY_OPTIMIZER_TOKEN, ValueFrom: !GetAtt AppSecrets.OptimizerTokenArn }
             - { Name: ANYRAY_PSEUDONYM_SALT, ValueFrom: !GetAtt AppSecrets.SaltArn }

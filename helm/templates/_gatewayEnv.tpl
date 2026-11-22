@@ -27,6 +27,11 @@
 - name: ANYRAY_CONTENT_KEY
   valueFrom:
     {{- include "anyray.secretRef" (dict "key" "ANYRAY_CONTENT_KEY" "context" .) | nindent 4 }}
+# Rotation only: the key(s) in use before the last change, so portable threads
+# sealed under them keep working. Optional, so a Secret without the key is fine.
+- name: ANYRAY_CONTENT_KEY_PREVIOUS
+  valueFrom:
+    {{- include "anyray.optionalSecretRef" (dict "key" "ANYRAY_CONTENT_KEY_PREVIOUS" "context" .) | nindent 4 }}
 - name: ANYRAY_ALLOW_PLAINTEXT
   value: {{ .Values.gateway.allowPlaintext | quote }}
 - name: ANYRAY_ADMIN_TOKEN

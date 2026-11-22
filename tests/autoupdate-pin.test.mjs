@@ -23,9 +23,23 @@ const PINS = [
   { deployment: 'anyray-proxy', container: 'proxy', resolvedBy: 'resolve-proxy', image: 'public.ecr.aws/anyray/proxy:policy-stable' },
 ];
 
-async function fakeApi({ statuses, images: initial, failPatch = [] }) {
+const helmApply = { manager: 'helm', operation: 'Apply' };
+const ownedImage = (container, extra = {}) => ({
+  'f:spec': { 'f:template': { 'f:spec': { 'f:containers': { [`k:{"name":"${container}"}`]: { '.': {}, 'f:image': {}, 'f:name': {} } } } }, ...extra },
+});
+const nodeEntry = (container, extra) => ({ manager: 'node', operation: 'Update', fieldsV1: ownedImage(container, extra) });
+const controller = { manager: 'kube-controller-manager', operation: 'Update' };
+
+// Stands in for the API server's field ownership: a write that names no
+// manager is recorded under the client's user agent, `node`, and a merge patch
+// that carries a stale resourceVersion is refused with 409.
+async function fakeApi({ statuses, images: initial, managers = {}, staleReleases = 0, failPatch = [] }) {
   const patches = [];
   const images = { ...initial };
+  const releases = [];
+  const managedFields = Object.fromEntries(Object.keys(images).map((d) => [d, managers[d] ?? [helmApply, controller]]));
+  const versions = Object.fromEntries(Object.keys(images).map((d) => [d, 1]));
+  let stale = staleReleases;
   const server = createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += chunk;
@@ -34,26 +48,50 @@ async function fakeApi({ statuses, images: initial, failPatch = [] }) {
       res.end(JSON.stringify(obj));
     };
     assert.equal(req.headers.authorization, 'Bearer synthetic-token');
-    if (req.method === 'GET' && req.url === '/api/v1/namespaces/ns/pods/job-pod') {
+    const url = new URL(req.url, 'http://fake');
+    if (req.method === 'GET' && url.pathname === '/api/v1/namespaces/ns/pods/job-pod') {
       return send(200, { status: statuses });
     }
-    const m = /^\/apis\/apps\/v1\/namespaces\/ns\/deployments\/([\w-]+)$/.exec(req.url);
+    const m = /^\/apis\/apps\/v1\/namespaces\/ns\/deployments\/([\w-]+)$/.exec(url.pathname);
     if (m && m[1] in images) {
       const name = m[1].replace('anyray-', '');
-      if (req.method === 'GET') {
-        return send(200, { spec: { template: { spec: { containers: [{ name, image: images[m[1]] }] } } } });
-      }
+      const object = () => ({
+        metadata: { resourceVersion: String(versions[m[1]]), managedFields: managedFields[m[1]] },
+        spec: { template: { spec: { containers: [{ name, image: images[m[1]] }] } } },
+      });
+      if (req.method === 'GET') return send(200, object());
       if (req.method === 'PATCH') {
         if (failPatch.includes(m[1])) return send(500, {});
-        patches.push({ deployment: m[1], contentType: req.headers['content-type'], body: JSON.parse(body) });
-        images[m[1]] = JSON.parse(body).spec.template.spec.containers[0].image;
-        return send(200, {});
+        const patch = JSON.parse(body);
+        if (req.headers['content-type'] === 'application/merge-patch+json') {
+          releases.push({ deployment: m[1], body: patch });
+          if (stale > 0 || patch.metadata.resourceVersion !== String(versions[m[1]])) {
+            stale = Math.max(0, stale - 1);
+            versions[m[1]] += 1;
+            return send(409, {});
+          }
+          managedFields[m[1]] = patch.metadata.managedFields;
+        } else {
+          patches.push({
+            deployment: m[1],
+            contentType: req.headers['content-type'],
+            fieldManager: url.searchParams.get('fieldManager'),
+            body: patch,
+          });
+          images[m[1]] = patch.spec.template.spec.containers[0].image;
+          managedFields[m[1]] = [
+            ...managedFields[m[1]],
+            { manager: url.searchParams.get('fieldManager') ?? 'node', operation: 'Update', fieldsV1: ownedImage(name) },
+          ];
+        }
+        versions[m[1]] += 1;
+        return send(200, object());
       }
     }
     send(404, {});
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  return { api: `http://127.0.0.1:${server.address().port}`, patches, images, close: () => server.close() };
+  return { api: `http://127.0.0.1:${server.address().port}`, patches, releases, images, managedFields, close: () => server.close() };
 }
 
 const run = (api, pins = PINS) =>
@@ -107,6 +145,149 @@ test('leaves an already-pinned Deployment unpatched', async () => {
   try {
     await run(fake.api);
     assert.equal(fake.patches.length, 0);
+  } finally {
+    fake.close();
+  }
+});
+
+const RESOLVED = {
+  initContainerStatuses: [
+    { name: 'resolve-proxy', imageID: `public.ecr.aws/anyray/proxy@${D2}` },
+    { name: 'pin', imageID: `public.ecr.aws/anyray/gateway@${D1}` },
+  ],
+};
+const PLAIN = {
+  'anyray-gateway': 'public.ecr.aws/anyray/gateway:policy-stable',
+  'anyray-proxy': 'public.ecr.aws/anyray/proxy:policy-stable',
+};
+const PINNED = {
+  'anyray-gateway': `public.ecr.aws/anyray/gateway:policy-stable@${D1}`,
+  'anyray-proxy': `public.ecr.aws/anyray/proxy:policy-stable@${D2}`,
+};
+const owners = (fake, deployment) => fake.managedFields[deployment].map((e) => `${e.manager}/${e.operation}`);
+
+// Helm 4 applies server-side and refuses an image field another manager owns.
+test('leaves no field ownership behind for the pin, so a later helm upgrade takes the image back', async () => {
+  const fake = await fakeApi({ statuses: RESOLVED, images: { ...PLAIN } });
+  try {
+    await run(fake.api);
+    assert.deepEqual(
+      fake.patches.map((p) => p.fieldManager),
+      ['anyray-autoupdate', 'anyray-autoupdate'],
+      'the pin names itself, so its entry can be told apart',
+    );
+    for (const d of ['anyray-gateway', 'anyray-proxy']) {
+      assert.deepEqual(owners(fake, d), ['helm/Apply', 'kube-controller-manager/Update'], `${d}: only the others remain`);
+    }
+    assert.ok(fake.releases.every((r) => r.body.metadata.resourceVersion), 'a release is conditional on the version it read');
+  } finally {
+    fake.close();
+  }
+});
+
+test('releases ownership an older release of the pin left under the client name, with no image patch', async () => {
+  const fake = await fakeApi({
+    statuses: RESOLVED,
+    images: { ...PINNED },
+    managers: {
+      'anyray-gateway': [helmApply, controller, nodeEntry('gateway')],
+      'anyray-proxy': [helmApply, controller, nodeEntry('proxy')],
+    },
+  });
+  try {
+    await run(fake.api);
+    assert.equal(fake.patches.length, 0);
+    assert.deepEqual(owners(fake, 'anyray-gateway'), ['helm/Apply', 'kube-controller-manager/Update']);
+    assert.deepEqual(owners(fake, 'anyray-proxy'), ['helm/Apply', 'kube-controller-manager/Update']);
+  } finally {
+    fake.close();
+  }
+});
+
+test('keeps entries of other managers that share the client name only by operation', async () => {
+  const kubectl = { manager: 'kubectl-rollout', operation: 'Update' };
+  const nodeApply = { manager: 'node', operation: 'Apply' };
+  const fake = await fakeApi({
+    statuses: RESOLVED,
+    images: { ...PINNED },
+    managers: { 'anyray-gateway': [helmApply, kubectl, nodeApply] },
+  });
+  try {
+    await run(fake.api);
+    assert.deepEqual(owners(fake, 'anyray-gateway'), ['helm/Apply', 'kubectl-rollout/Update', 'node/Apply']);
+    assert.equal(fake.releases.length, 0, 'nothing of the pin to release, so nothing is written');
+  } finally {
+    fake.close();
+  }
+});
+
+test('retries a release that lost a race with another writer', async () => {
+  const fake = await fakeApi({ statuses: RESOLVED, images: { ...PLAIN }, staleReleases: 2 });
+  try {
+    await run(fake.api);
+    assert.deepEqual(owners(fake, 'anyray-gateway'), ['helm/Apply', 'kube-controller-manager/Update']);
+    assert.ok(fake.releases.length >= 3, 'two refused attempts, then one that landed');
+  } finally {
+    fake.close();
+  }
+});
+
+test('fails when ownership cannot be released, so the Job retries and the next run finishes it', async () => {
+  const fake = await fakeApi({ statuses: RESOLVED, images: { ...PLAIN }, staleReleases: 99 });
+  try {
+    await assert.rejects(run(fake.api), /HTTP 409/);
+  } finally {
+    fake.close();
+  }
+});
+
+test('drops only the image from an entry that owns more, and keeps the rest', async () => {
+  const fake = await fakeApi({
+    statuses: RESOLVED,
+    images: { ...PINNED },
+    managers: { 'anyray-gateway': [helmApply, nodeEntry('gateway', { 'f:replicas': {} })] },
+  });
+  try {
+    await run(fake.api);
+    assert.deepEqual(fake.managedFields['anyray-gateway'], [
+      helmApply,
+      { manager: 'node', operation: 'Update', fieldsV1: { 'f:spec': { 'f:replicas': {} } } },
+    ]);
+  } finally {
+    fake.close();
+  }
+});
+
+test('keeps another container\'s image and a sidecar field of the same entry', async () => {
+  const other = { 'f:spec': { 'f:template': { 'f:spec': { 'f:containers': {
+    'k:{"name":"gateway"}': { '.': {}, 'f:image': {}, 'f:name': {}, 'f:env': {} },
+    'k:{"name":"sidecar"}': { '.': {}, 'f:image': {}, 'f:name': {} },
+  } } } } };
+  const fake = await fakeApi({
+    statuses: RESOLVED,
+    images: { ...PINNED },
+    managers: { 'anyray-gateway': [helmApply, { manager: 'node', operation: 'Update', fieldsV1: other }] },
+  });
+  try {
+    await run(fake.api);
+    const { fieldsV1 } = fake.managedFields['anyray-gateway'][1];
+    const containers = fieldsV1['f:spec']['f:template']['f:spec']['f:containers'];
+    assert.deepEqual(containers['k:{"name":"gateway"}'], { '.': {}, 'f:name': {}, 'f:env': {} });
+    assert.deepEqual(containers['k:{"name":"sidecar"}'], { '.': {}, 'f:image': {}, 'f:name': {} });
+  } finally {
+    fake.close();
+  }
+});
+
+test('never clears every owner of a Deployment', async () => {
+  const fake = await fakeApi({
+    statuses: RESOLVED,
+    images: { ...PINNED },
+    managers: { 'anyray-gateway': [nodeEntry('gateway')] },
+  });
+  try {
+    await run(fake.api);
+    assert.equal(fake.releases.length, 0);
   } finally {
     fake.close();
   }
@@ -304,6 +485,39 @@ test('follow-home: changes nothing, and restarts nothing, when the region alread
   }
 });
 
+test('follow-home: leaves no field ownership behind for the move, so a later helm upgrade takes the image back', async () => {
+  const fake = await fakeApi({ statuses: {}, images: stable });
+  const build = await answering({ v: 1, region: '1.10.621', home: '1.10.619' });
+  try {
+    await runFollow(fake, build);
+    assert.deepEqual(fake.patches.map((p) => p.fieldManager), ['anyray-autoupdate', 'anyray-autoupdate']);
+    for (const d of Object.keys(stable)) assert.deepEqual(owners(fake, d), ['helm/Apply', 'kube-controller-manager/Update']);
+  } finally {
+    fake.close();
+    build.close();
+  }
+});
+
+test('follow-home: when the region already runs home\'s build, still releases ownership an earlier run left behind', async () => {
+  const fake = await fakeApi({
+    statuses: {},
+    images: { 'anyray-gateway': 'public.ecr.aws/anyray/gateway:v1.10.621', 'anyray-optimizer': 'public.ecr.aws/anyray/optimizer:v1.10.621' },
+    managers: {
+      'anyray-gateway': [helmApply, controller, nodeEntry('gateway')],
+      'anyray-optimizer': [helmApply, controller, nodeEntry('optimizer')],
+    },
+  });
+  const build = await answering({ v: 1, region: '1.10.621', home: '1.10.621' });
+  try {
+    await runFollow(fake, build);
+    assert.equal(fake.patches.length, 0);
+    for (const d of Object.keys(stable)) assert.deepEqual(owners(fake, d), ['helm/Apply', 'kube-controller-manager/Update']);
+  } finally {
+    fake.close();
+    build.close();
+  }
+});
+
 test('follow-home: patches nothing already set to home\'s tag', async () => {
   const { patches } = await follow({
     build: await answering({ v: 1, region: '1.10.621', home: '1.10.619' }),
@@ -359,7 +573,7 @@ test('follow-home: moves the gateway last, so a run that failed half way finishe
   const build = await answering({ v: 1, region: '1.10.621', home: '1.10.619' });
   const run = () => runFollow(fake, build);
   try {
-    await assert.rejects(run(), /PATCH .*anyray-optimizer -> HTTP 500/);
+    await assert.rejects(run(), /PATCH .*anyray-optimizer.* -> HTTP 500/);
     // The region reports its gateway's build: a moved gateway would read as done and strand the optimizer.
     assert.equal(fake.images['anyray-gateway'], stable['anyray-gateway']);
     failPatch.length = 0;

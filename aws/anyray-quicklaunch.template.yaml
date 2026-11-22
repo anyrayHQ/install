@@ -100,7 +100,7 @@ Parameters:
       multiple with commas.
   ImageTag:
     Type: String
-    Default: v1.10.615
+    Default: v1.10.630
     AllowedPattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
     ConstraintDescription: Must be an immutable Anyray release tag such as v1.10.120.
     Description: >-
@@ -1258,6 +1258,15 @@ Resources:
                     - bedrock:ListFoundationModels
                     - bedrock:ListInferenceProfiles
                   Resource: '*'
+                # Reads the model behind an application inference profile ARN,
+                # so its spend rows price at that model instead of a fallback
+                # rate (monorepo ANY-2409). Read-only.
+                - Effect: Allow
+                  Action:
+                    - bedrock:GetInferenceProfile
+                  Resource:
+                    - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*'
+                    - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:application-inference-profile/*'
           - !Ref 'AWS::NoValue'
 
   # ---- Soft-update applier ----------------------------------------------------

@@ -27,12 +27,14 @@ on:
       - 'helm/**'
       - 'tests/autoupdate-pin.test.mjs'
       - 'tests/helm-topology.test.mjs'
+      - 'tests/helm-upgrade-after-pin-live.sh'
       - '.github/workflows/helm-chart.yml'
   pull_request:
     paths:
       - 'helm/**'
       - 'tests/autoupdate-pin.test.mjs'
       - 'tests/helm-topology.test.mjs'
+      - 'tests/helm-upgrade-after-pin-live.sh'
       - '.github/workflows/helm-chart.yml'
   workflow_dispatch:
 
@@ -533,3 +535,21 @@ jobs:
             printf '%s\n' "$render" | grep -q "public.ecr.aws/anyray/${c}:policy-stable"
           done
           test "$(printf '%s\n' "$render" | grep -c 'imagePullPolicy: Always')" -ge 3
+
+  # Helm 4 applies server-side and refuses a field another manager owns. This
+  # runs the real chart and the real roll Job in a throwaway cluster, then a
+  # plain `helm upgrade`, which a Helm 3 render-only check cannot see.
+  upgrade-after-pin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v4.2.0
+          token: ${{ github.token }}
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          install_only: true
+      - name: helm upgrade after the scheduled roll has pinned the images
+        run: tests/helm-upgrade-after-pin-live.sh

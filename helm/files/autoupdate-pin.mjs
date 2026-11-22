@@ -18,6 +18,8 @@
 // each Deployment's container image. The kubectl container that runs next does
 // the same `rollout restart` as before, so the roll lands on the pinned build.
 // A `helm upgrade` renders the plain tag again; the next scheduled run pins it.
+// The pin gives up its ownership of the image field once written, so that
+// upgrade also works under Helm 4's server-side apply.
 //
 // Talks to the API server directly (Node's fetch, the mounted service-account
 // token, NODE_EXTRA_CA_CERTS for the cluster CA): the kubectl image is
@@ -29,6 +31,10 @@ import { fileURLToPath } from 'node:url';
 
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
 const DIGEST = /@(sha256:[0-9a-f]{64})$/;
+const FIELD_MANAGER = 'anyray-autoupdate';
+// Whose `Update` entries can hold the pin's image: ours, and the client name older releases wrote under.
+const PIN_MANAGERS = new Set([FIELD_MANAGER, 'node']);
+const RELEASE_ATTEMPTS = 5;
 
 export function digestOf(imageID) {
   const match = DIGEST.exec(String(imageID ?? ''));
@@ -42,6 +48,60 @@ export function pinnedRef(image, digest) {
   return `${at < 0 ? image : image.slice(0, at)}@${digest}`;
 }
 
+// `fields` without the container's image: what a `Update` entry owns after the pin wrote it.
+function withoutImage(fields, container) {
+  const path = ['f:spec', 'f:template', 'f:spec', 'f:containers', `k:${JSON.stringify({ name: container })}`];
+  const tree = structuredClone(fields ?? {});
+  const chain = [tree];
+  for (const key of path) {
+    const next = chain.at(-1)[key];
+    if (!next) return fields;
+    chain.push(next);
+  }
+  const owned = chain.at(-1);
+  if (!('f:image' in owned)) return fields;
+  delete owned['f:image'];
+  if (Object.keys(owned).every((key) => key === '.' || key === 'f:name')) {
+    for (let i = path.length - 1; i >= 0; i--) {
+      delete chain[i][path[i]];
+      if (Object.keys(chain[i]).length) break;
+    }
+  }
+  return tree;
+}
+
+// Helm 4 applies server-side and refuses an image field another manager owns, so a pin that kept
+// ownership would fail every later `helm upgrade`. Dropping it lets that upgrade take the field back.
+async function releaseOwnership(call, path, container, deployment) {
+  for (let attempt = 1; ; attempt++) {
+    const entries = deployment.metadata?.managedFields ?? [];
+    const kept = [];
+    for (const entry of entries) {
+      if (entry.operation !== 'Update' || !PIN_MANAGERS.has(entry.manager)) {
+        kept.push(entry);
+        continue;
+      }
+      const fields = withoutImage(entry.fieldsV1, container);
+      if (fields !== entry.fieldsV1 && !Object.keys(fields).length) continue;
+      kept.push(fields === entry.fieldsV1 ? entry : { ...entry, fieldsV1: fields });
+    }
+    // The API server ignores an empty list, and an object with no owner at all is not safe to apply over.
+    if (!kept.length || (kept.length === entries.length && kept.every((entry, i) => entry === entries[i]))) return;
+    try {
+      await call(
+        'PATCH',
+        path,
+        { metadata: { resourceVersion: deployment.metadata.resourceVersion, managedFields: kept } },
+        'application/merge-patch+json',
+      );
+      return;
+    } catch (err) {
+      if (err.status !== 409 || attempt === RELEASE_ATTEMPTS) throw err;
+      deployment = await call('GET', path);
+    }
+  }
+}
+
 export async function pin({ api, token, namespace, podName, pins, log = console.log }) {
   const call = async (method, path, body, contentType) => {
     const res = await fetch(`${api}${path}`, {
@@ -53,7 +113,7 @@ export async function pin({ api, token, namespace, podName, pins, log = console.
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new Error(`${method} ${path} -> HTTP ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(`${method} ${path} -> HTTP ${res.status}`), { status: res.status });
     return res.json();
   };
 
@@ -76,15 +136,17 @@ export async function pin({ api, token, namespace, podName, pins, log = console.
     if (!container) throw new Error(`deployment ${p.deployment} has no container ${p.container}`);
     if (container.image === p.target) {
       log(`${p.deployment}: already ${p.target}`);
+      await releaseOwnership(call, path, p.container, current);
       continue;
     }
-    await call(
+    const patched = await call(
       'PATCH',
-      path,
+      `${path}?fieldManager=${FIELD_MANAGER}`,
       { spec: { template: { spec: { containers: [{ name: p.container, image: p.target }] } } } },
       'application/strategic-merge-patch+json',
     );
     log(`${p.deployment}: ${container.image} -> ${p.target}`);
+    await releaseOwnership(call, path, p.container, patched);
   }
 }
 

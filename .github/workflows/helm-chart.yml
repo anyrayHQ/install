@@ -548,8 +548,5 @@ jobs:
         with:
           version: v4.2.0
           token: ${{ github.token }}
-      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
-        with:
-          install_only: true
       - name: helm upgrade after the scheduled roll has pinned the images
         run: tests/helm-upgrade-after-pin-live.sh

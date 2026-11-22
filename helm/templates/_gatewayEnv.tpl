@@ -98,7 +98,7 @@
 - name: ANYRAY_INFERENCE_PUBLIC_URL
   value: {{ printf "https://%s" .Values.inference.host | quote }}
 {{- end }}
-{{- with .Values.gateway.consolePublicUrl }}
+{{- with include "anyray.consolePublicUrl" (dict "gatewayPublicUrl" $gatewayPublicUrl "context" .) }}
 - name: ANYRAY_CONSOLE_PUBLIC_URL
   value: {{ . | quote }}
 {{- end }}
@@ -140,5 +140,26 @@
 {{- end }}
 {{- with .Values.gateway.extraEnv }}
 {{- toYaml . | nindent 0 }}
+{{- end }}
+{{- end }}
+
+{{- /* Unset, the gateway reports its own URL with port 3000, where only Docker Compose serves the console. */}}
+{{- define "anyray.consolePublicUrl" -}}
+{{- $v := .context.Values }}
+{{- if $v.gateway.consolePublicUrl }}
+{{- $v.gateway.consolePublicUrl }}
+{{- else if and $v.host (not (contains "*" $v.host)) }}
+{{- $origin := trimSuffix "/" (toString .gatewayPublicUrl) }}
+{{- $served := list }}
+{{- if $v.ingress.enabled }}
+{{- range $v.ingress.hosts }}{{ $served = append $served (default $v.host .host) }}{{ end }}
+{{- if not $v.ingress.hosts }}{{ $served = append $served $v.host }}{{ end }}
+{{- end }}
+{{- if $v.httpRoute.enabled }}
+{{- $served = concat $served ($v.httpRoute.hostnames | default (list $v.host)) }}
+{{- end }}
+{{- if and (has $v.host $served) (has $origin (list (printf "https://%s" $v.host) (printf "http://%s" $v.host))) }}
+{{- $origin }}
+{{- end }}
 {{- end }}
 {{- end }}

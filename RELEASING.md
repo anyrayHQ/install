@@ -202,9 +202,10 @@ installs a LaunchAgent that handles either MDM ordering safely:
 ### The `release-signing` environment (Apple secrets)
 
 The seven Apple secrets above are **environment secrets** of `release-signing`, whose
-deployment-branch policy admits `main` only. The four jobs that read them declare it:
+deployment-branch policy admits `main` only. The five jobs that read them declare it:
 `signing-preflight` and `sign-macos` in release-connect-binaries, `preflight` and
-`sign-macos` in release-connect-desktop. A job without the environment reads none of
+`sign-macos` in release-connect-desktop, and `probe` in apple-notary-probe, which reads
+only the three notary secrets (see "The daily notary probe" below). A job without the environment reads none of
 them, and GitHub refuses a job that declares it from any other ref before its first
 step: a pull request (`refs/pull/<n>/merge`), a branch dispatch, a fork. Fork pull
 requests receive no secrets at all, and neither release workflow has a
@@ -263,6 +264,26 @@ since nothing reads it.
 for name in APPLE_SIGNING_CERT_P12 APPLE_SIGNING_CERT_PASSWORD APPLE_INSTALLER_CERT_P12 APPLE_INSTALLER_CERT_PASSWORD APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID APPLE_SIGNING_CERT_PEM; do gh secret delete "$name" -R anyrayHQ/install; done
 gh secret list -R anyrayHQ/install | grep '^APPLE_' || echo 'no repository-level Apple secrets left'
 ```
+
+### The daily notary probe
+
+`apple-notary-probe.yml` runs every day at 06:41 UTC, and on dispatch. It signs a short
+App Store Connect API token with the notarization key and makes one read-only call to
+Apple's notary API (it lists this team's submissions). It exists because on 2026-11-13
+Apple stopped accepting the key until the Account Holder accepted a new Program License
+Agreement, and every Connect prepare failed at `sign-macos` for 36 hours before anyone knew.
+
+| Result | What it means | What to do |
+| --- | --- | --- |
+| Green | Apple accepts the key | Nothing. An open `apple-notary-refused` issue closes itself. |
+| Red, "refused (HTTP 403 ...)" | Usually an agreement is pending | The Account Holder accepts it at https://developer.apple.com/account, then dispatch the probe. |
+| Red, "refused (HTTP 401 ...)" | The key was revoked or is wrong | Create a new Team key and set the three notary secrets again (commands above). |
+| Red, "could not be checked" | Apple was down or unreachable | Nothing about the key. Dispatch it again later. |
+
+A refusal opens one `apple-notary-refused` issue, and later refusals comment on it. The
+log and the issue name only the HTTP status and Apple's error code. Edit its cron line as a
+release maintainer: a scheduled run starts as whoever last edited it, and the install
+runner admits maintainers only ("CI runners").
 
 ### Windows — Authenticode (Azure Artifact Signing + jsign)
 

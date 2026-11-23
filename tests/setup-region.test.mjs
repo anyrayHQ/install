@@ -31,7 +31,7 @@ test('region mode writes a Secret with only the region keys and a region values 
   assert.equal(statSync(join(r.cwd, 'anyray-secrets.yaml')).mode & 0o777, 0o600);
   const values = readFileSync(join(r.cwd, 'my-values.yaml'), 'utf8');
   assert.match(values, /^topology: region$/m);
-  assert.match(values, new RegExp(`^host: "${host}"$`, 'm'));
+  assert.ok(values.split('\n').includes(`host: "${host}"`), values);
   assert.match(values, /^ingress:\n {2}enabled: true$/m);
   assert.match(values, /^image:\n {2}tag: policy-stable$/m);
   assert.ok(!r.out.includes(token), 'the region token must not be printed');
@@ -69,7 +69,7 @@ test('region mode refuses what would put home settings or secrets in a region', 
   ]) {
     const r = run(['--k8s', '--region', '--host', host, ...extra], { env: { ANYRAY_REGION_TOKEN: token } });
     assert.notEqual(r.status, 0, extra.join(' '));
-    assert.match(r.stderr, new RegExp(`--region cannot be combined with ${extra[0]}`), extra.join(' '));
+    assert.ok(r.stderr.includes(`--region cannot be combined with ${extra[0]}\n`), r.stderr);
     assert.ok(!existsSync(join(r.cwd, 'anyray-secrets.yaml')), extra.join(' '));
   }
 });

@@ -26,7 +26,7 @@ import {
 // so they are literals below — which also breaks the gateway<->optimizer reference
 // cycle that plain object refs would create.
 
-const TAG = "v1.10.630";
+const TAG = "v1.10.635";
 const ecr = (name: string) => image(`public.ecr.aws/anyray/${name}:${TAG}`);
 
 export default defineRailway(() => {
@@ -44,6 +44,7 @@ export default defineRailway(() => {
       ANYRAY_OPTIMIZER_TOKEN: preserve(), // canonical; optimizer references gateway.env.*
       ANYRAY_DEFAULT_MODEL: "anthropic/claude-sonnet-5-5",
       ANYRAY_CONTENT_KEY: preserve(),
+      ANYRAY_CONTENT_KEY_PREVIOUS: preserve(), // optional; set only while rotating the content key
       ANYRAY_CONTENT_MODE: "encrypted",
       ANYRAY_ALLOW_PLAINTEXT: "false",
       ANYRAY_ADMIN_TOKEN: preserve(),

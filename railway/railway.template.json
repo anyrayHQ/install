@@ -13,7 +13,7 @@
     {
       "name": "gateway",
       "source": {
-        "image": "public.ecr.aws/anyray/gateway:v1.10.630"
+        "image": "public.ecr.aws/anyray/gateway:v1.10.635"
       },
       "deploy": {
         "healthcheckPath": "/",
@@ -45,6 +45,7 @@
         "ANYRAY_HSTS": "true",
         "ANYRAY_TRUST_PROXY": "true",
         "ANYRAY_SEAT_EXCLUDE": "",
+        "ANYRAY_CONTENT_KEY_PREVIOUS": "",
         "ANYRAY_SPEND_RETENTION_DAYS": "",
         "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "120"
       }
@@ -52,7 +53,7 @@
     {
       "name": "optimizer",
       "source": {
-        "image": "public.ecr.aws/anyray/optimizer:v1.10.630"
+        "image": "public.ecr.aws/anyray/optimizer:v1.10.635"
       },
       "deploy": {
         "healthcheckPath": "/health",
@@ -79,7 +80,7 @@
     {
       "name": "proxy",
       "source": {
-        "image": "public.ecr.aws/anyray/proxy:v1.10.630"
+        "image": "public.ecr.aws/anyray/proxy:v1.10.635"
       },
       "deploy": {
         "healthcheckPath": "/anyray-login",

@@ -41,6 +41,7 @@ deployment. The deployment should show as **Connected** at
 | `ANYRAY_DEPLOYMENT_TOKEN`      | Operator                        | Required `adt_…` token from app.anyray.ai.                                  |
 | `ANYRAY_ADMIN_TOKEN`           | `${{secret()}}` on gateway      | Printed in Railway after deploy. Gates console.                             |
 | `ANYRAY_CONTENT_KEY`           | `${{secret(64, "0123456789abcdef")}}` on gateway | 32-byte hex AES-256-GCM at-rest encryption key.                             |
+| `ANYRAY_CONTENT_KEY_PREVIOUS`  | empty on gateway               | Optional. Set to the old key (comma-separated, up to four) only while rotating `ANYRAY_CONTENT_KEY`, so portable threads sealed under it keep working. |
 | `ANYRAY_OBSERVABILITY_DB_URL`  | `${{Postgres.*}}` refs          | Postgres URL for the content-free trace store (falls back to spend DB URL). |
 | `POSTGRES_PASSWORD`            | `${{secret()}}` on Postgres     | Never leaves Railway's environment.                                         |
 | `ANYRAY_CONTENT_MODE`          | `encrypted` on gateway          | Read by the OPTIMIZER (which inherits it); the gateway ignores it. See "Content privacy". A default, not a lock. |

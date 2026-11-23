@@ -296,6 +296,8 @@ jobs:
         with:
           version: v3.16.3
           token: ${{ github.token }}
+      - name: setup.sh --k8s --region writes only region secrets, refuses home ones, and renders
+        run: npm run test:setup-region
       - name: setup.sh --k8s secrets + values render against the chart
         run: |
           set -euo pipefail

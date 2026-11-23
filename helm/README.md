@@ -782,6 +782,17 @@ The region's Secret holds only these keys:
 | `ANYRAY_OPTIMIZER_TOKEN` | a new random value for this region |
 | `POSTGRES_PASSWORD` | the bundled Postgres password (omit with `postgres.external`) |
 
+`setup.sh` writes both files. Save the token to a file first, so it never
+reaches your shell history:
+
+```bash
+./setup.sh --k8s --region --host eu.anyray.example.com --region-token-file region-token
+```
+
+It writes `anyray-secrets.yaml` with exactly the keys above and `my-values.yaml`
+with `topology: region`, and refuses `--connect`, `--claim` and every other home
+flag. It also refuses a directory that already holds a home install's files.
+
 The chart refuses home-only variables in `gateway.extraEnv` or
 `optimizer.extraEnv` under `region`: `ANYRAY_ADMIN_TOKEN`,
 `ANYRAY_DEPLOYMENT_TOKEN`, `ANYRAY_CONTENT_KEY`, `ANYRAY_METERING_ENABLED`,

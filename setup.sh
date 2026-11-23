@@ -9,6 +9,8 @@
 #   x-anyray-config header. Safe to re-run to change the upstream.
 # Existing secrets are kept. --connect and --upstream update only their settings.
 # --control-plane is for internal development builds only.
+# --k8s --region: a region's Secret + Helm values; the region token comes from
+#   ANYRAY_REGION_TOKEN or --region-token-file, never the command line.
 set -euo pipefail
 
 # Datastore sizing comes from the one file every install artifact reads, so the
@@ -33,6 +35,8 @@ ATTACH=0
 JSON_OUTPUT=0
 CLAIM_REDEEMED=0
 JSON_ERROR_EMITTED=0
+REGION=0
+REGION_TOKEN_FILE=""
 
 usage() {
   cat <<'EOF'
@@ -42,6 +46,9 @@ Options:
   --host <hostname-or-ip>         Host users reach for Docker/VM installs.
   --k8s                          Generate Kubernetes Secret + Helm values.
   --namespace <namespace>         Existing Kubernetes namespace for --k8s.
+  --region                        With --k8s: a region of an existing home install.
+                                  Token from ANYRAY_REGION_TOKEN or --region-token-file.
+  --region-token-file <path>      File holding the region token (arr_…).
   --claim <install_url>           Short-lived agent install claim from Billing.
   --connect <adt_token>           Required Billing token for gateway installs.
   --json                          Stream content-free NDJSON status events (requires --claim).
@@ -58,6 +65,8 @@ while [ $# -gt 0 ]; do
     -h|--help) usage; exit 0 ;;
     --host) HOST="${2:?--host needs a value}"; shift 2 ;;
     --k8s)  K8S=1; shift ;;
+    --region) REGION=1; shift ;;
+    --region-token-file) REGION_TOKEN_FILE="${2:?--region-token-file needs a path}"; shift 2 ;;
     --namespace)     NAMESPACE="${2:?--namespace needs a Kubernetes namespace}"; shift 2 ;;
     --claim)         CLAIM_URL="${2:?--claim needs an install URL}"; shift 2 ;;
     --connect)       CONNECT_TOKEN="${2:?--connect needs a deployment token (adt_…)}"; shift 2 ;;
@@ -69,6 +78,49 @@ while [ $# -gt 0 ]; do
     *) echo "✗ unknown flag: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
+
+# A region holds only its own token, an optimizer token and its database password;
+# every home flag would put a home secret or setting into it.
+REGION_TOKEN=""
+if [ "$REGION" -eq 1 ]; then
+  [ "$K8S" -eq 1 ] || { echo "✗ --region requires --k8s" >&2; exit 1; }
+  for refused in "--claim:$CLAIM_URL" "--connect:$CONNECT_TOKEN" "--attach:${ATTACH#0}" "--upstream:$UPSTREAM_URL" \
+                 "--gateway-url:$GATEWAY_URL" "--control-plane:${CONTROL_PLANE_SET#0}" "--json:${JSON_OUTPUT#0}"; do
+    if [ -n "${refused#*:}" ]; then
+      echo "✗ --region cannot be combined with ${refused%%:*}" >&2
+      exit 1
+    fi
+  done
+  if [ -n "$REGION_TOKEN_FILE" ]; then
+    [ -r "$REGION_TOKEN_FILE" ] || { echo "✗ --region-token-file: cannot read ${REGION_TOKEN_FILE}" >&2; exit 1; }
+    REGION_TOKEN="$(tr -d '[:space:]' < "$REGION_TOKEN_FILE")"
+  else
+    REGION_TOKEN="${ANYRAY_REGION_TOKEN:-}"
+  fi
+  if [ -z "$REGION_TOKEN" ]; then
+    echo "✗ --region needs the region token: set ANYRAY_REGION_TOKEN or pass --region-token-file <path>" >&2
+    echo "  Home's console shows it once, under Regions → Add region." >&2
+    exit 1
+  fi
+  if [[ ! "$REGION_TOKEN" =~ ^arr_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+    echo "✗ the region token must be the arr_… value home's console showed when you added the region" >&2
+    exit 1
+  fi
+  if [ -f anyray-secrets.yaml ] && ! grep -Eq '^[[:space:]]*ANYRAY_REGION_TOKEN:' anyray-secrets.yaml; then
+    echo "✗ anyray-secrets.yaml here holds a home install's secrets; run --region in another directory" >&2
+    exit 1
+  fi
+  if [ -f my-values.yaml ] && ! grep -Eq '^topology:[[:space:]]*"?region"?[[:space:]]*$' my-values.yaml; then
+    echo "✗ my-values.yaml here is not a region's (no topology: region); run --region in another directory" >&2
+    exit 1
+  fi
+elif [ -n "$REGION_TOKEN_FILE" ]; then
+  echo "✗ --region-token-file needs --region" >&2
+  exit 1
+elif [ "$K8S" -eq 1 ] && [ -f anyray-secrets.yaml ] && grep -Eq '^[[:space:]]*ANYRAY_REGION_TOKEN:' anyray-secrets.yaml; then
+  echo "✗ anyray-secrets.yaml here holds a region's secrets; add --region, or set up home in another directory" >&2
+  exit 1
+fi
 
 # In JSON mode, ordinary human output (including the one-time admin key) stays
 # off stdout. Only fixed, content-free NDJSON events are written to fd 3.
@@ -179,7 +231,7 @@ if [ "$ATTACH" -eq 1 ]; then
     exit 1
   fi
 fi
-if [ "$ATTACH" -eq 0 ] && [ -z "$CONNECT_TOKEN" ] && [ -z "$CLAIM_URL" ] && [ "$EXISTING_CONNECT" -eq 0 ]; then
+if [ "$REGION" -eq 0 ] && [ "$ATTACH" -eq 0 ] && [ -z "$CONNECT_TOKEN" ] && [ -z "$CLAIM_URL" ] && [ "$EXISTING_CONNECT" -eq 0 ]; then
   echo "✗ --claim <install_url> or --connect <adt_token> is required for every gateway deployment" >&2
   echo "  Get an install link at https://app.anyray.ai (Deployments → New deployment)." >&2
   echo "  Use --attach only for the gateway-less LiteLLM integration." >&2
@@ -227,7 +279,11 @@ if [ "$K8S" -eq 1 ]; then
   fi
   case "$HOST" in
     *[!0-9.]*) : ;;  # has a non-IPv4 character → a hostname, good
-    *) echo "⚠ --host \"$HOST\" looks like an IP — that only works for the NodePort dev" >&2
+    *) if [ "$REGION" -eq 1 ]; then
+         echo "✗ --host for a region must be its public https hostname, not an IP: every employee machine calls it" >&2
+         exit 1
+       fi
+       echo "⚠ --host \"$HOST\" looks like an IP — that only works for the NodePort dev" >&2
        echo "  fallback. For Ingress/LoadBalancer, use the cluster's DNS endpoint." >&2 ;;
   esac
   if [ -z "$NAMESPACE" ]; then
@@ -719,6 +775,68 @@ EOF
     [ -n "$CONNECT_TOKEN" ] || { echo ""; echo "  Next:      docker compose up -d"; }
   fi
   finish_claim_configuration
+  exit 0
+fi
+
+# ── Kubernetes / Helm region (--k8s --region) ────────────────────────────────
+if [ "$REGION" -eq 1 ]; then
+  if [ -f anyray-secrets.yaml ]; then
+    [ -n "$NAMESPACE" ] && set_secret_namespace anyray-secrets.yaml
+    echo "✓ anyray-secrets.yaml already holds this region's secrets — leaving them untouched (delete it to regenerate)"
+  else
+    cat > anyray-secrets.yaml <<EOF
+# Generated by setup.sh --k8s --region — do not commit. Delete and re-run to rotate.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: anyray-secrets
+type: Opaque
+data:
+  ANYRAY_REGION_TOKEN: $(b64enc "$REGION_TOKEN")
+  ANYRAY_OPTIMIZER_TOKEN: $(b64enc "$(hex 32)")
+  POSTGRES_PASSWORD: $(b64enc "$(hex 16)")
+EOF
+    set_secret_namespace anyray-secrets.yaml
+    chmod 600 anyray-secrets.yaml
+    echo "✓ Region secrets → anyray-secrets.yaml"
+    [ -n "$NAMESPACE" ] && echo "  Namespace: ${NAMESPACE} (must already exist; setup.sh does not create it)"
+  fi
+  if [ -f my-values.yaml ]; then
+    echo "✓ my-values.yaml unchanged"
+  else
+    {
+      echo "# Anyray Helm values for a region — safe to commit (no secrets here)."
+      echo "topology: region"
+      echo "host: \"${HOST}\""
+      echo ""
+      echo "# A region never runs a newer build than home. On the moving channel the"
+      echo "# chart's update job sets this region to home's build every hour."
+      echo "image:"
+      echo "  tag: policy-stable"
+      echo ""
+      echo "# Employee machines call https://${HOST}. Set className and tls for your"
+      echo "# ingress controller and certificate."
+      echo "ingress:"
+      echo "  enabled: true"
+      echo "  # className: nginx"
+      echo "  # tls:"
+      echo "  #   - secretName: anyray-region-tls"
+      echo "  #     hosts:"
+      echo "  #       - ${HOST}"
+      echo ""
+      echo "# Immutable once installed (a StatefulSet volume); err high."
+      echo "postgres:"
+      echo "  storage: ${DB_STORAGE_GB}Gi"
+    } > my-values.yaml
+    echo "✓ Region Helm values → my-values.yaml"
+  fi
+  echo ""
+  echo "  Next:"
+  echo "    $(kubectl_apply_command)"
+  echo "    $(helm_install_command)"
+  echo ""
+  echo "  Then:  home's console lists this region as Connected, and"
+  echo "         https://${HOST}/region-health answers 200"
   exit 0
 fi
 

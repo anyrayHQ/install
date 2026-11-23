@@ -242,6 +242,14 @@ spec:
                 secretKeyRef:
                   name: anyray-secrets
                   key: ANYRAY_CONTENT_KEY
+            # Rotation only: the key(s) in use before the last change, so portable threads
+            # sealed under them keep working. Optional, so a Secret without the key is fine.
+            - name: ANYRAY_CONTENT_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: anyray-secrets
+                  key: ANYRAY_CONTENT_KEY_PREVIOUS
+                  optional: true
             - name: ANYRAY_ALLOW_PLAINTEXT
               value: "false"
             - name: ANYRAY_ADMIN_TOKEN

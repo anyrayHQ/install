@@ -468,7 +468,7 @@ test('follow-home: moves both images to home\'s release tag when the region runs
   assert.ok(lines.some((line) => /home runs v1\.10\.619, region runs v1\.10\.621/.test(line)), lines.join('\n'));
 });
 
-test('follow-home: changes nothing, and restarts nothing, when the region already runs home\'s build', async () => {
+test('follow-home: pins images still on the moving channel to home\'s release tag when the region already runs home\'s build', async () => {
   for (const images of [
     stable,
     {
@@ -480,9 +480,23 @@ test('follow-home: changes nothing, and restarts nothing, when the region alread
       build: await answering({ v: 1, region: '1.10.621', home: '1.10.621' }),
       images,
     });
-    assert.equal(patches.length, 0);
+    assert.deepEqual(
+      patches.map((p) => [p.deployment, p.body.spec.template.spec.containers[0].image]),
+      [
+        ['anyray-optimizer', 'public.ecr.aws/anyray/optimizer:v1.10.621'],
+        ['anyray-gateway', 'public.ecr.aws/anyray/gateway:v1.10.621'],
+      ],
+    );
     assert.ok(lines.some((line) => /already runs home's build v1\.10\.621/.test(line)), lines.join('\n'));
   }
+});
+
+test('follow-home: changes nothing, and restarts nothing, when both images already carry home\'s release tag', async () => {
+  const { patches } = await follow({
+    build: await answering({ v: 1, region: '1.10.621', home: '1.10.621' }),
+    images: { 'anyray-gateway': 'public.ecr.aws/anyray/gateway:v1.10.621', 'anyray-optimizer': 'public.ecr.aws/anyray/optimizer:v1.10.621' },
+  });
+  assert.equal(patches.length, 0);
 });
 
 test('follow-home: leaves no field ownership behind for the move, so a later helm upgrade takes the image back', async () => {

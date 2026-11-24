@@ -196,15 +196,8 @@ export async function followHome({ api, token, namespace, url, pins, log = conso
     return;
   }
   const call = kubeApi(api, token);
-  if (build.region === build.home) {
-    log(`region already runs home's build v${build.home}; nothing changed`);
-    // A release that failed after the last move would otherwise wait for the next build change.
-    for (const p of pins) {
-      await releaseOwnership(call, deploymentPath(namespace, p), p.container, (await readDeployment(call, namespace, p)).deployment);
-    }
-    return;
-  }
-  log(`home runs v${build.home}, region runs v${build.region}`);
+  // Same build still moves images off the moving channel: a pod rescheduled there would pull past home.
+  log(build.region === build.home ? `region already runs home's build v${build.home}` : `home runs v${build.home}, region runs v${build.region}`);
   const plan = [];
   for (const p of pins) {
     plan.push({ ...p, current: await readDeployment(call, namespace, p), target: releaseRef(p.image, build.home) });

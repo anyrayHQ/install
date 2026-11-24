@@ -152,7 +152,7 @@ def env_of(task, container='gateway'):
 
 
 HOME = {'Topology': 'home', 'AllowedCidr': ['203.0.113.0/24'], 'DeploymentToken': 'adt_synthetic'}
-REGION = {'Topology': 'region', 'AllowedCidr': ['203.0.113.0/24'],
+REGION = {'Topology': 'region', 'AllowedCidr': ['203.0.113.0/24'], 'DeploymentToken': 'adt_synthetic',
           'RegionToken': 'arr_e30.synthetic', 'CertificateArn': 'arn:aws:acm:eu-west-1:000000000000:certificate/x',
           'GatewayPublicUrl': 'https://eu.anyray.example.com:8787'}
 FORBIDDEN_GATEWAY = {'ANYRAY_ADMIN_TOKEN', 'ANYRAY_DEPLOYMENT_TOKEN', 'ANYRAY_CONTENT_KEY',
@@ -251,11 +251,14 @@ check('the home updater keeps its admin-token gate and has no follow-home mode',
 
 print('== the topology rules ==')
 rules = DOC['Rules']
-check('a home requires the deployment token and refuses a region token',
-      rules['HomeNeedsDeploymentToken']['RuleCondition'] == {'Fn::Equals': [{'Ref': 'Topology'}, 'home']})
+check('a home refuses a region token',
+      rules['HomeRefusesRegionToken']['RuleCondition'] == {'Fn::Equals': [{'Ref': 'Topology'}, 'home']})
 region_rule = json.dumps(rules['RegionNeedsTokenAndHttps'])
-check('a region requires its token, HTTPS and its URL, and refuses the deployment token',
-      all(p in region_rule for p in ('RegionToken', 'DeploymentToken', 'CertificateArn', 'GatewayPublicUrl')))
+check('a region requires its token, HTTPS and its URL',
+      all(p in region_rule for p in ('RegionToken', 'CertificateArn', 'GatewayPublicUrl')))
+check('the deployment token stays required on every stack (railway job guard)',
+      'Default' not in DOC['Parameters']['DeploymentToken']
+      and DOC['Parameters']['DeploymentToken']['AllowedPattern'].startswith('^adt_'))
 
 
 # ---- the inline Lambdas, run for real --------------------------------------
@@ -415,12 +418,12 @@ STATE['secrets'] = {}
 secret_fn['handler']({'RequestType': 'Create', 'ResourceProperties': {
     'Action': 'generate', 'Prefix': 'st/anyray/', 'Topology': 'region'}}, None)
 made = set(STATE['secrets'])
-check('generate succeeds', sent.get('status') == 'SUCCESS', sent)
+check('generate succeeds', sent.get('status') == 'SUCCESS')
 check('no admin token, content key or salt is created',
-      not ({'st/anyray/admin-token', 'st/anyray/content-key', 'st/anyray/pseudonym-salt'} & made), made)
-check('the optimizer token and database credential are', {'st/anyray/optimizer-token', 'st/anyray/db-master'} <= made, made)
+      not ({'st/anyray/admin-token', 'st/anyray/content-key', 'st/anyray/pseudonym-salt'} & made))
+check('the optimizer token and database credential are', {'st/anyray/optimizer-token', 'st/anyray/db-master'} <= made)
 check('the home-secret attributes resolve, empty',
-      all(sent['data'].get(k) == '' for k in ('ContentKeyArn', 'AdminTokenArn', 'SaltArn')), sent.get('data'))
+      all(sent['data'].get(k) == '' for k in ('ContentKeyArn', 'AdminTokenArn', 'SaltArn')))
 STATE['secrets'] = {}
 secret_fn['handler']({'RequestType': 'Create', 'ResourceProperties': {'Action': 'generate', 'Prefix': 'st/anyray/'}}, None)
 check('a home still gets every secret',

@@ -53,7 +53,7 @@ Metadata:
         Parameters: [VpcId, SubnetA, SubnetB]
     ParameterLabels:
       Topology: { default: "What to deploy (home = a full Anyray; region = an inference region of an existing home)" }
-      DeploymentToken: { default: "Deployment token (home only; leave blank for a region)" }
+      DeploymentToken: { default: "Deployment token (adt_...; a region asks for it but never stores it)" }
       RegionToken: { default: "Region token (region only; from home's console, Regions, Add)" }
       AllowedCidr: { default: "Allowed CIDR(s) (your office/VPN range, comma-separated)" }
       LoadBalancerScheme: { default: "Load balancer reachability (internal = private, VPC-only)" }
@@ -203,13 +203,11 @@ Parameters:
   DeploymentToken:
     Type: String
     NoEcho: true
-    # Blank is allowed only so a region can leave it out; the HomeNeedsDeploymentToken
-    # rule still requires it on every home.
-    Default: ''
-    AllowedPattern: '^$|^adt_[A-Za-z0-9_-]+$'
+    AllowedPattern: '^adt_[A-Za-z0-9_-]+$'
     Description: >-
-      Anyray Cloud deployment token (adt_...) for usage metering. Required for
-      a home. Leave blank for a region: metering runs at home.
+      Anyray Cloud deployment token (adt_...) for usage metering. A region asks
+      for it too, but neither stores it nor passes it to any task: metering
+      runs at home.
   ContentKeyPreviousSecretArn:
     Type: String
     Default: ''
@@ -419,11 +417,9 @@ Rules:
         AssertDescription: >-
           Leave VpcId, SubnetA and SubnetB ALL blank to use this account's default
           VPC, or set all three. Setting only some of them is not valid.
-  HomeNeedsDeploymentToken:
+  HomeRefusesRegionToken:
     RuleCondition: !Equals [!Ref Topology, home]
     Assertions:
-      - Assert: !Not [!Equals [!Ref DeploymentToken, '']]
-        AssertDescription: A home needs its Anyray Cloud deployment token (adt_...).
       - Assert: !Equals [!Ref RegionToken, '']
         AssertDescription: RegionToken is for Topology=region only. Leave it blank for a home.
   RegionNeedsTokenAndHttps:
@@ -431,8 +427,6 @@ Rules:
     Assertions:
       - Assert: !Not [!Equals [!Ref RegionToken, '']]
         AssertDescription: A region needs RegionToken, from home's console (Regions, Add).
-      - Assert: !Equals [!Ref DeploymentToken, '']
-        AssertDescription: A region never holds the deployment token. Leave DeploymentToken blank; metering runs at home.
       # Home offers the region's URL to employees and accepts only a public HTTPS
       # origin for it, so a region on the ALB's plain-HTTP DNS name never serves.
       - Assert: !Not [!Equals [!Ref CertificateArn, '']]
@@ -996,6 +990,12 @@ Resources:
   RegionTokenSecret:
     Type: AWS::SecretsManager::Secret
     Condition: IsRegion
+    # W1030 reads RegionToken's blank default; RegionNeedsTokenAndHttps refuses a
+    # blank token on every stack where this secret exists.
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1030]
     Properties:
       Description: Anyray region token (arr_...) that joins this region to its home.
       SecretString: !Ref RegionToken
@@ -1120,7 +1120,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Condition: RegionAutoUpdate
     Properties:
-      GroupDescription: Anyray region follow-home probe - reads the gateway's view of home's build.
+      GroupDescription: Anyray region follow-home probe - reads the region gateway view of the home build.
       VpcId: !GetAtt Net.VpcId
       Tags: [{ Key: Name, Value: anyray-follow-home }]
 

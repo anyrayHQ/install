@@ -26,6 +26,8 @@ on:
     paths:
       - 'helm/**'
       - 'tests/autoupdate-pin.test.mjs'
+      - 'tests/artifacthub-images.test.mjs'
+      - 'scripts/stamp-artifacthub-images.sh'
       - 'tests/helm-topology.test.mjs'
       - 'tests/helm-upgrade-after-pin-live.sh'
       - '.github/workflows/helm-chart.yml'
@@ -33,6 +35,8 @@ on:
     paths:
       - 'helm/**'
       - 'tests/autoupdate-pin.test.mjs'
+      - 'tests/artifacthub-images.test.mjs'
+      - 'scripts/stamp-artifacthub-images.sh'
       - 'tests/helm-topology.test.mjs'
       - 'tests/helm-upgrade-after-pin-live.sh'
       - '.github/workflows/helm-chart.yml'
@@ -463,6 +467,13 @@ jobs:
 
       - name: autoUpdate pin step behaves against a fake API server
         run: node --test tests/autoupdate-pin.test.mjs
+
+      # Artifact Hub cannot render the chart with default values (the Postgres
+      # storage floor fails it on purpose), so it reads its image list and Trivy
+      # targets from the artifacthub.io/images annotation. This fails a list
+      # that no longer matches the default render.
+      - name: artifacthub.io/images matches the default render
+        run: node --test tests/artifacthub-images.test.mjs
 
       - name: Every Ingress path passes ingress-nginx strict path validation
         run: |

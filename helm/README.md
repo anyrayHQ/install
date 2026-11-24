@@ -208,7 +208,7 @@ the pod read is the Job reading its own resolved digests. Nothing else.
 
 Under `topology: region` the job does not follow the channel. A region must
 never run a newer build than home: home refuses data it cannot read, and the
-region's usage queue stops at that row. So each hour the job asks the region
+region's usage queue stops at that row. So every 5 minutes (by default) the job asks the region
 gateway which build home's gateways run (`GET /v1/region-home-build` on
 `gateway-internal:8789`) and acts on the answer:
 

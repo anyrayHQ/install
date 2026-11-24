@@ -107,9 +107,9 @@ fallback.
 {{- end -}}
 {{- end }}
 
-{{- /* The roll's schedule: the value when set, else hourly for a region (it follows home) and nightly elsewhere. */}}
+{{- /* The roll's schedule: the value when set, else every 5 minutes for a region (it is not ready until moved to home's build) and nightly elsewhere. */}}
 {{- define "anyray.autoUpdateSchedule" -}}
-{{- .Values.autoUpdate.schedule | default (ternary "15 * * * *" "30 3 * * *" (eq .Values.topology "region")) -}}
+{{- .Values.autoUpdate.schedule | default (ternary "*/5 * * * *" "30 3 * * *" (eq .Values.topology "region")) -}}
 {{- end }}
 
 {{/*

@@ -813,7 +813,7 @@ EOF
       echo "host: \"${HOST}\""
       echo ""
       echo "# A region never runs a newer build than home. On the moving channel the"
-      echo "# chart's update job sets this region to home's build every hour."
+      echo "# chart's update job sets this region to home's build every 5 minutes."
       echo "image:"
       echo "  tag: policy-stable"
       echo ""

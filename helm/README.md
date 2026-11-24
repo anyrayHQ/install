@@ -193,7 +193,7 @@ release's instance label, so a second release in the same namespace is untouched
 | Value | Default | What it does |
 | --- | --- | --- |
 | `autoUpdate.enabled` | `true` | Arms the roll. Renders nothing unless `image.tag` can actually move, so a pinned install is never restarted onto the same build. Set `false` to keep a moving tag without a scheduled roll. |
-| `autoUpdate.schedule` | `""` | Standard cron. Empty runs daily at 03:30, or hourly under `topology: region`. |
+| `autoUpdate.schedule` | `""` | Standard cron. Empty runs daily at 03:30, or every 5 minutes under `topology: region`; a value you set wins in both. |
 | `autoUpdate.timeZone` | `""` | IANA name (`Europe/Berlin`). Empty uses the cluster's zone. Needs Kubernetes 1.27+. |
 | `autoUpdate.image.repository` / `.tag` | `registry.k8s.io/kubectl` / `v1.33.0` | Any kubectl within one minor of your cluster. Mirrored by `global.imageRegistry` like every other image. The upstream image has no `latest` tag, so this is always explicit. |
 | `autoUpdate.resources` | 10m/32Mi → 100m/128Mi | Per container: the image resolvers, the pin step, and kubectl. Each makes a few API calls at most. |
@@ -228,7 +228,7 @@ back. With `global.imageRegistry`, mirror the release tags too.
 An optimizer pinned to its own tag (`images.optimizer.tag`) is left alone. The
 job's `Role` here grants only `get` and `patch` on the gateway and optimizer
 Deployments. A manual `helm upgrade` renders the channel tag again; the next
-hourly run moves the region back to home's build.
+run (every 5 minutes) moves the region back to home's build.
 
 Known issue: after the job sets an image, `helm upgrade` with Helm 4
 (server-side apply) fails with a field-ownership conflict on the image field.

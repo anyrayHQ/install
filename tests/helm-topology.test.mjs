@@ -201,10 +201,12 @@ for (const [topology, base] of [['single', []], ['split', split], ['region', reg
 const cronJob = values => doc(render(values), 'CronJob', 'anyray-autoupdate');
 const follows = d => JSON.parse(JSON.parse(d.match(/name: AUTOUPDATE_PINS\n\s+value: (".*")\n/)[1]));
 
-test('region: the update job follows home hourly, reading home\'s build on the internal listener', () => {
+test('region: the update job follows home every 5 minutes, reading home\'s build on the internal listener', () => {
   const s = render(region);
   const job = doc(s, 'CronJob', 'anyray-autoupdate');
-  assert.match(job, /\n  schedule: "15 \* \* \* \*"\n/);
+  assert.match(job, /\n  schedule: "\*\/5 \* \* \* \*"\n/);
+  assert.match(job, /\n  concurrencyPolicy: Forbid\n/);
+  assert.match(job, /\n  successfulJobsHistoryLimit: 3\n  failedJobsHistoryLimit: 3\n/);
   assert.doesNotMatch(job, /initContainers|rollout|kubectl/);
   assert.match(job, /- name: follow-home\n\s+image: public\.ecr\.aws\/anyray\/gateway:policy-stable\n\s+imagePullPolicy: IfNotPresent\n\s+command: \["node", "\/pin\/autoupdate-pin\.mjs", "follow-home", "http:\/\/gateway-internal:8789\/v1\/region-home-build"\]\n/);
   assert.deepEqual(follows(job), [

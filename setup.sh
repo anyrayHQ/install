@@ -120,6 +120,9 @@ elif [ -n "$REGION_TOKEN_FILE" ]; then
 elif [ "$K8S" -eq 1 ] && [ -f anyray-secrets.yaml ] && grep -Eq '^[[:space:]]*ANYRAY_REGION_TOKEN:' anyray-secrets.yaml; then
   echo "✗ anyray-secrets.yaml here holds a region's secrets; add --region, or set up home in another directory" >&2
   exit 1
+elif [ "$K8S" -eq 1 ] && [ -f my-values.yaml ] && grep -Eq '^topology:[[:space:]]*"?region"?[[:space:]]*$' my-values.yaml; then
+  echo "✗ my-values.yaml here is a region's (topology: region); add --region, or set up home in another directory" >&2
+  exit 1
 fi
 
 # In JSON mode, ordinary human output (including the one-time admin key) stays

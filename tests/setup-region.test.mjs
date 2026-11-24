@@ -119,6 +119,15 @@ test('a region and a home never share a secrets file', () => {
   assert.match(homeValues.stderr, /topology: region/);
   assert.ok(!existsSync(join(valuesOnly, 'anyray-secrets.yaml')));
 
+  const regionValuesOnly = mkdtempSync(join(tmpdir(), 'setup-region-'));
+  writeFileSync(join(regionValuesOnly, 'my-values.yaml'), `topology: region\nhost: "${host}"\n`);
+  for (const args of [['--k8s', '--connect', 'adt_synthetic0000000000', '--host', host], ['--k8s', '--host', host]]) {
+    const homeIntoRegionValues = run(args, { cwd: regionValuesOnly });
+    assert.notEqual(homeIntoRegionValues.status, 0, args.join(' '));
+    assert.match(homeIntoRegionValues.stderr, /topology: region/, args.join(' '));
+    assert.ok(!existsSync(join(regionValuesOnly, 'anyray-secrets.yaml')), args.join(' '));
+  }
+
   const again = run(['--k8s', '--region', '--host', host], { cwd: region.cwd, env: { ANYRAY_REGION_TOKEN: token } });
   assert.equal(again.status, 0, again.out);
   assert.equal(readFileSync(join(region.cwd, 'anyray-secrets.yaml'), 'utf8'), regionSecret);

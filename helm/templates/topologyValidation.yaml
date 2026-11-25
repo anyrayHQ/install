@@ -43,7 +43,7 @@
 {{- end }}
 {{- end }}
 {{- if not (include "anyray.atLeastAppVersion" (dict "component" $component "floor" (include "anyray.regionFloor" $) "context" $)) }}
-{{- fail (printf "topology=region needs %s image %s or newer (this renders %s): older images refuse to start a region or are never offered to Connect" $component (include "anyray.regionFloor" $) (include "anyray.effectiveImageTag" (dict "component" $component "context" $))) }}
+{{- fail (printf "topology=region needs %s image %s or newer (this renders %s): older images serve without checking home's build" $component (include "anyray.regionFloor" $) (include "anyray.effectiveImageTag" (dict "component" $component "context" $))) }}
 {{- end }}
 {{- end }}
 {{- end }}

@@ -762,7 +762,7 @@ inference:
 runs the gateway and the optimizer on their own Postgres (bundled or
 `postgres.external`), with no proxy and no console. Every Ingress or HTTPRoute
 path goes to the gateway, which forwards management requests home. It needs gateway
-and optimizer images of `v1.10.611` or newer. Mint the region on home first; the
+and optimizer images of `v1.10.637` or newer. Mint the region on home first; the
 token carries the region name and home's URL. Home offers the region to Connect at
 `https://<host>`, or at `gateway.publicUrl` when set, so that must be the region's
 own public address.

@@ -182,8 +182,8 @@ for (const [values, err] of [
   [[...region, 'gateway.extraEnv[0].name=ANYRAY_ADMIN_TOKEN', 'gateway.extraEnv[0].value=x'], /ANYRAY_ADMIN_TOKEN is forbidden in a region/],
   [[...region, 'gateway.extraEnv[0].name=ANYRAY_OBSERVABILITY_DB_URL', 'gateway.extraEnv[0].value=x'], /forbidden in a region/],
   [[...region, 'optimizer.extraEnv[0].name=ANYRAY_CONTENT_KEY', 'optimizer.extraEnv[0].value=x'], /ANYRAY_CONTENT_KEY is forbidden in a region/],
-  [[...region, 'image.tag=v1.10.610'], /region needs gateway image v1\.10\.611/],
-  [[...region, 'images.optimizer.tag=v1.10.610'], /region needs optimizer image v1\.10\.611/],
+  [[...region, 'image.tag=v1.10.636'], /region needs gateway image v1\.10\.637 or newer \(this renders v1\.10\.636\): older images serve without checking home's build/],
+  [[...region, 'images.optimizer.tag=v1.10.636'], /region needs optimizer image v1\.10\.637 or newer \(this renders v1\.10\.636\): older images serve without checking home's build/],
 ]) test(`region refuses ${values.slice(region.length).join(' ')}`, () => { const r = helm(values); assert.notEqual(r.status, 0); assert.match(r.stderr, err); });
 
 for (const [topology, base] of [['single', []], ['split', split], ['region', region]]) {
@@ -218,13 +218,13 @@ test('region: the update job follows home every 5 minutes, reading home\'s build
 });
 
 test('region: an explicit schedule wins, and an optimizer pinned to its own tag is not followed', () => {
-  const job = cronJob([...region, 'autoUpdate.schedule=0 */6 * * *', 'images.optimizer.tag=v1.10.619']);
+  const job = cronJob([...region, 'autoUpdate.schedule=0 */6 * * *', 'images.optimizer.tag=v1.10.637']);
   assert.match(job, /\n  schedule: "0 \*\/6 \* \* \*"\n/);
   assert.deepEqual(follows(job).map(p => p.container), ['gateway']);
 });
 
 test('region: a pinned image tag renders no update job, as on home', () => {
-  assert.equal(cronJob([...region.filter(v => !v.startsWith('image.tag=')), 'image.tag=v1.10.619']), '');
+  assert.equal(cronJob([...region.filter(v => !v.startsWith('image.tag=')), 'image.tag=v1.10.637']), '');
 });
 
 test('home keeps its nightly channel roll', () => {
@@ -237,7 +237,7 @@ test('home keeps its nightly channel roll', () => {
 });
 
 test('region renders on the image floor', () => {
-  render([...region, 'image.tag=v1.10.611']);
+  render([...region, 'image.tag=v1.10.637']);
 });
 
 test('single render is unchanged by the region work', () => {

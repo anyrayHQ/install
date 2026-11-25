@@ -1,5 +1,13 @@
-{{- if not (has .Values.topology (list "single" "split")) }}
-{{- fail "topology must be single or split" }}
+{{- if not (has .Values.topology (list "single" "split" "region")) }}
+{{- fail "topology must be single, split or region" }}
+{{- end }}
+{{- $regionMode := include "anyray.regionModeEnv" . | fromJsonArray }}
+{{- range $component := list "gateway" "optimizer" }}
+{{- range (index $.Values $component).extraEnv | default list }}
+{{- if has (toString .name) $regionMode }}
+{{- fail (printf "%s.extraEnv: %s is set by the chart under topology=region and never through extraEnv" $component .name) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if eq .Values.topology "split" }}
 {{- if not (or .Values.ingress.enabled .Values.httpRoute.enabled) }}
@@ -24,5 +32,18 @@
 {{- end }}
 {{- if not (include "anyray.atLeastAppVersion" (dict "component" "gateway" "floor" "v1.10.563" "context" .)) }}
 {{- fail (printf "topology=split needs a gateway image of v1.10.563 or newer (this renders %s): older images ignore --inference-only" (include "anyray.effectiveImageTag" (dict "component" "gateway" "context" .))) }}
+{{- end }}
+{{- end }}
+{{- if eq .Values.topology "region" }}
+{{- $forbidden := include "anyray.regionForbiddenEnv" . | fromJsonArray }}
+{{- range $component := list "gateway" "optimizer" }}
+{{- range (index $.Values $component).extraEnv | default list }}
+{{- if has (toString .name) $forbidden }}
+{{- fail (printf "%s.extraEnv: %s is forbidden in a region: it holds home's secrets or turns on home-only work" $component .name) }}
+{{- end }}
+{{- end }}
+{{- if not (include "anyray.atLeastAppVersion" (dict "component" $component "floor" (include "anyray.regionFloor" $) "context" $)) }}
+{{- fail (printf "topology=region needs %s image %s or newer (this renders %s): older images serve without checking home's build" $component (include "anyray.regionFloor" $) (include "anyray.effectiveImageTag" (dict "component" $component "context" $))) }}
+{{- end }}
 {{- end }}
 {{- end }}

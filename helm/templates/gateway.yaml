@@ -69,10 +69,20 @@ spec:
           image: {{ include "anyray.image" (dict "component" "gateway" "context" .) }}
           imagePullPolicy: {{ include "anyray.imagePullPolicy" (dict "component" "gateway" "context" .) }}
           {{- include "anyray.containerSecurityContext" (dict "component" "gateway" "context" .) | nindent 10 }}
+          {{- if eq .Values.topology "region" }}
+          args: ["node", "build/region-server.js"]
+          env:
+            {{- include "anyray.regionEnv" . | trimPrefix "\n" | nindent 12 }}
+          ports:
+            - containerPort: 8787
+            # Internal listener: /v1/region-state and /v1/region-spend, reached through gateway-internal only.
+            - containerPort: 8789
+          {{- else }}
           env:
             {{- include "anyray.gatewayEnv" . | trimPrefix "\n" | nindent 12 }}
           ports:
             - containerPort: 8787
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /

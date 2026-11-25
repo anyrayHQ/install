@@ -5,19 +5,7 @@
 - name: ANYRAY_OPTIMIZER_TOKEN
   valueFrom:
     {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 4 }}
-{{- if .Values.optimizerRequestSigning.enabled }}
-# Gateway→optimizer request signing (ANY-202) — the PRIVATE half.
-# Never place this on the optimizer: it holds the public half only,
-# and that asymmetry is the entire security property.
-#
-# `optional: true` so an install that has enabled signing before
-# adding the key to its Secret degrades to unsigned (which the
-# optimizer, also unconfigured, accepts) instead of crashlooping the
-# gateway. Turn the gateway on FIRST, then the optimizer.
-- name: ANYRAY_OPTIMIZER_SIGNING_KEY
-  valueFrom:
-    {{- include "anyray.optionalSecretRef" (dict "key" "ANYRAY_OPTIMIZER_SIGNING_KEY" "context" .) | nindent 4 }}
-{{- end }}
+{{- include "anyray.optimizerSigningKeyEnv" . }}
 {{- with .Values.gateway.defaultModel }}
 # What `anyray-default` routes to when a request names no model;
 # without it the gateway falls back to a stale alias and 404s.
@@ -84,10 +72,7 @@
        to https://<host> (the Ingress endpoint) when publicUrl isn't set, so a
        plain `--host` install doesn't leave enrollment links with no gateway.
        NodePort / non-TLS installs override via gateway.publicUrl. */}}
-{{- $gatewayPublicUrl := .Values.gateway.publicUrl }}
-{{- if and (not $gatewayPublicUrl) .Values.host }}
-{{- $gatewayPublicUrl = printf "https://%s" .Values.host }}
-{{- end }}
+{{- $gatewayPublicUrl := include "anyray.gatewayPublicUrl" . }}
 {{- with $gatewayPublicUrl }}
 - name: ANYRAY_GATEWAY_PUBLIC_URL
   value: {{ . | quote }}
@@ -126,6 +111,80 @@
 - name: ANYRAY_SPEND_RETENTION_DAYS
   value: {{ . | quote }}
 {{- end }}
+{{- include "anyray.gatewayLimitsEnv" . }}
+{{- with .Values.gateway.maxBodyBytes }}
+- name: ANYRAY_MAX_BODY_BYTES
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.extraEnv }}
+{{- toYaml . | nindent 0 }}
+{{- end }}
+{{- end }}
+
+{{- define "anyray.gatewayPublicUrl" -}}
+{{- .Values.gateway.publicUrl | default (ternary (printf "https://%s" .Values.host) "" (not (empty .Values.host))) -}}
+{{- end }}
+
+{{- /* Region gateway env: the region token is the mode, and the spend DB URL is the regional database. */}}
+{{- define "anyray.regionEnv" -}}
+- name: ANYRAY_REGION_TOKEN
+  valueFrom:
+    {{- include "anyray.secretRef" (dict "key" "ANYRAY_REGION_TOKEN" "context" .) | nindent 4 }}
+- name: ANYRAY_OPTIMIZER_URL
+  value: "http://optimizer:8088"
+- name: ANYRAY_OPTIMIZER_TOKEN
+  valueFrom:
+    {{- include "anyray.secretRef" (dict "key" "ANYRAY_OPTIMIZER_TOKEN" "context" .) | nindent 4 }}
+{{- include "anyray.optimizerSigningKeyEnv" . }}
+{{- include "anyray.spendDbEnv" . | nindent 0 }}
+{{- with include "anyray.gatewayPublicUrl" . }}
+- name: ANYRAY_GATEWAY_PUBLIC_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.trustProxy }}
+- name: ANYRAY_TRUST_PROXY
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.rateLimitRpm }}
+- name: ANYRAY_RATE_LIMIT_RPM
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.rateLimitIpRpm }}
+- name: ANYRAY_RATE_LIMIT_IP_RPM
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.rateLimitUnauthRpm }}
+- name: ANYRAY_RATE_LIMIT_UNAUTH_RPM
+  value: {{ . | quote }}
+{{- end }}
+{{- include "anyray.gatewayLimitsEnv" . }}
+{{- with .Values.gateway.maxBodyBytes }}
+- name: ANYRAY_MAX_BODY_BYTES
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.gateway.extraEnv }}
+{{- toYaml . | nindent 0 }}
+{{- end }}
+{{- end }}
+
+{{- /* Shared by home and region gateways so the signing key cannot reach one and miss the other. */}}
+{{- define "anyray.optimizerSigningKeyEnv" -}}
+{{- if .Values.optimizerRequestSigning.enabled }}
+# Gateway→optimizer request signing (ANY-202) — the PRIVATE half.
+# Never place this on the optimizer: it holds the public half only,
+# and that asymmetry is the entire security property.
+#
+# `optional: true` so an install that has enabled signing before
+# adding the key to its Secret degrades to unsigned (which the
+# optimizer, also unconfigured, accepts) instead of crashlooping the
+# gateway. Turn the gateway on FIRST, then the optimizer.
+- name: ANYRAY_OPTIMIZER_SIGNING_KEY
+  valueFrom:
+    {{- include "anyray.optionalSecretRef" (dict "key" "ANYRAY_OPTIMIZER_SIGNING_KEY" "context" .) | nindent 4 }}
+{{- end }}
+{{- end }}
+
+{{- define "anyray.gatewayLimitsEnv" -}}
 {{- with .Values.gateway.maxConcurrentRequests }}
 - name: ANYRAY_MAX_CONCURRENT_REQUESTS
   value: {{ . | quote }}
@@ -133,13 +192,6 @@
 {{- with .Values.gateway.authFailLimit }}
 - name: ANYRAY_AUTH_FAIL_LIMIT
   value: {{ . | quote }}
-{{- end }}
-{{- with .Values.gateway.maxBodyBytes }}
-- name: ANYRAY_MAX_BODY_BYTES
-  value: {{ . | quote }}
-{{- end }}
-{{- with .Values.gateway.extraEnv }}
-{{- toYaml . | nindent 0 }}
 {{- end }}
 {{- end }}
 

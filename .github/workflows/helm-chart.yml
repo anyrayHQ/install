@@ -29,6 +29,7 @@ on:
       - 'tests/artifacthub-images.test.mjs'
       - 'scripts/stamp-artifacthub-images.sh'
       - 'tests/helm-topology.test.mjs'
+      - 'tests/fixtures/single-render.yaml'
       - 'tests/helm-upgrade-after-pin-live.sh'
       - '.github/workflows/helm-chart.yml'
   pull_request:
@@ -38,6 +39,7 @@ on:
       - 'tests/artifacthub-images.test.mjs'
       - 'scripts/stamp-artifacthub-images.sh'
       - 'tests/helm-topology.test.mjs'
+      - 'tests/fixtures/single-render.yaml'
       - 'tests/helm-upgrade-after-pin-live.sh'
       - '.github/workflows/helm-chart.yml'
   workflow_dispatch:

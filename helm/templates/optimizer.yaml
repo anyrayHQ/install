@@ -86,9 +86,15 @@ spec:
               valueFrom:
                 {{- include "anyray.optionalSecretRef" (dict "key" "ANYRAY_OPTIMIZER_VERIFY_KEY" "context" .) | nindent 16 }}
             {{- end }}
+            {{- if eq .Values.topology "region" }}
+            # Region mode: pulls home's state from the region gateway's internal listener.
+            - name: ANYRAY_REGION_GATEWAY_URL
+              value: "http://gateway-internal:8789"
+            {{- else }}
             - name: ANYRAY_ADMIN_TOKEN
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_ADMIN_TOKEN" "context" .) | nindent 16 }}
+            {{- end }}
             # Runtime config + audit log under ANYRAY_DATA_DIR; the runtime
             # config starts empty and is seeded from the image-baked
             # optimizer.config.json until the first admin edit writes here.
@@ -98,6 +104,7 @@ spec:
             # originals persist as AES-256-GCM ciphertext, so retrieval handles
             # survive optimizer restarts and resolve from any replica.
             {{- include "anyray.spendDbEnv" . | nindent 12 }}
+            {{- if ne .Values.topology "region" }}
             - name: ANYRAY_CONTENT_KEY
               valueFrom:
                 {{- include "anyray.secretRef" (dict "key" "ANYRAY_CONTENT_KEY" "context" .) | nindent 16 }}
@@ -110,6 +117,7 @@ spec:
               value: {{ .Values.gateway.contentMode | quote }}
             - name: ANYRAY_ALLOW_PLAINTEXT
               value: {{ .Values.gateway.allowPlaintext | quote }}
+            {{- end }}
             {{- with .Values.gateway.spendRetentionDays }}
             # Same trace-retention sweep as the gateway — must see the same override.
             - name: ANYRAY_SPEND_RETENTION_DAYS

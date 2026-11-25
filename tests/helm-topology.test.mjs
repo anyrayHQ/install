@@ -103,6 +103,151 @@ test('split hands both pods the inference URL only when inference.host is set', 
     assert.match(render([...split, 'host=', ...route]), /- name: ANYRAY_INFERENCE_PUBLIC_URL\n\s+value: "https:\/\/inference\.anyray\.example\.com"\n/, route.join(' '));
   }
 });
+
+const region = ['topology=region', 'ingress.enabled=true', 'image.tag=policy-stable'];
+const regionForbidden = /ANYRAY_ADMIN_TOKEN|ANYRAY_DEPLOYMENT_TOKEN|ANYRAY_CONTENT_KEY|ANYRAY_METERING_ENABLED|ANYRAY_PSEUDONYM_SALT|ANYRAY_OBSERVABILITY_DB_URL/;
+
+test('region: the gateway pod runs the region entry with region env only', () => {
+  const g = doc(render(region), 'Deployment', 'anyray-gateway');
+  assert.match(g, /args: \["node", "build\/region-server\.js"\]/);
+  assert.match(g, /- name: ANYRAY_REGION_TOKEN\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: anyray-secrets\n\s+key: ANYRAY_REGION_TOKEN\n/);
+  assert.match(g, /- name: ANYRAY_OPTIMIZER_URL\n\s+value: "http:\/\/optimizer:8088"\n/);
+  assert.match(g, /key: ANYRAY_OPTIMIZER_TOKEN\n/);
+  assert.match(g, /- name: ANYRAY_SPEND_DB_URL\n/);
+  assert.match(g, /- name: ANYRAY_GATEWAY_PUBLIC_URL\n\s+value: "https:\/\/anyray\.example\.com"\n/);
+  assert.doesNotMatch(g, regionForbidden);
+  assert.match(g, /livenessProbe:\n\s+httpGet:\n\s+path: \/livez\n\s+port: 8787\n/);
+  assert.match(g, /- containerPort: 8789\n/);
+  const opt = ['gateway.trustProxy=true', 'gateway.rateLimitRpm=60', 'gateway.maxBodyBytes=1000', 'gateway.extraEnv[0].name=SYNTHETIC_FLAG', 'gateway.extraEnv[0].value=on'];
+  const withOpt = doc(render([...region, ...opt]), 'Deployment', 'anyray-gateway');
+  for (const name of ['ANYRAY_TRUST_PROXY', 'ANYRAY_RATE_LIMIT_RPM', 'ANYRAY_MAX_BODY_BYTES', 'SYNTHETIC_FLAG']) assert.match(withOpt, new RegExp(`- name: ${name}\n`), name);
+});
+
+test('region: the optimizer pulls from the internal service and holds no home secret', () => {
+  const o = doc(render(region), 'Deployment', 'anyray-optimizer');
+  assert.match(o, /- name: ANYRAY_REGION_GATEWAY_URL\n\s+value: "http:\/\/gateway-internal:8789"\n/);
+  assert.match(o, /key: ANYRAY_OPTIMIZER_TOKEN\n/);
+  assert.match(o, /- name: ANYRAY_SPEND_DB_URL\n/);
+  assert.doesNotMatch(o, /ANYRAY_ADMIN_TOKEN|ANYRAY_CONTENT_KEY|ANYRAY_CONTENT_MODE|ANYRAY_ALLOW_PLAINTEXT|ANYRAY_OBSERVABILITY_DB_URL/);
+});
+
+test('region: gateway-internal is ClusterIP, publishes not-ready endpoints, never on the edge', () => {
+  const s = render(region);
+  const svc = doc(s, 'Service', 'gateway-internal');
+  assert.match(svc, /type: ClusterIP\n/);
+  assert.match(svc, /publishNotReadyAddresses: true\n/);
+  assert.match(svc, /- port: 8789\n\s+targetPort: 8789\n/);
+  assert.match(svc, /selector:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: gateway\n/);
+  assert.doesNotMatch(doc(s, 'Ingress', 'anyray'), /gateway-internal|8789/);
+  const h = render([...region, 'ingress.enabled=false', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway']);
+  assert.doesNotMatch(doc(h, 'HTTPRoute', 'anyray'), /gateway-internal|8789/);
+  assert.equal(doc(render(['ingress.enabled=true']), 'Service', 'gateway-internal'), '');
+});
+
+test('region: no proxy is rendered and every edge target is the gateway', () => {
+  const s = render([...region, 'proxy.autoscaling.enabled=true', 'networkPolicy.enabled=true']);
+  assert.equal(doc(s, 'Deployment', 'anyray-proxy'), '');
+  assert.doesNotMatch(s, /anyray-proxy|component: proxy/);
+  const ing = doc(s, 'Ingress', 'anyray');
+  assert.deepEqual([...new Set(ing.match(/name: \S+\n\s+port:\n\s+number: \d+/g).map(b => b.replace(/\s+/g, ' ')))], ['name: gateway port: number: 8787']);
+  const h = doc(render([...region, 'ingress.enabled=false', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway']), 'HTTPRoute', 'anyray');
+  assert.deepEqual([...new Set(h.match(/- name: \S+\n\s+port: \d+/g).map(b => b.replace(/\s+/g, ' ')))], ['- name: gateway port: 8787']);
+  const pins = JSON.parse(JSON.parse(doc(s, 'CronJob', 'anyray-autoupdate').split('name: AUTOUPDATE_PINS')[1].split('\n')[1].trim().slice(7)));
+  assert.deepEqual(pins.map(p => p.container), ['gateway', 'optimizer']);
+});
+
+test('region: with networkPolicy, gateway takes 8787 from anywhere and 8789 from this release\'s optimizer and update job only', () => {
+  const np = doc(render([...region, 'networkPolicy.enabled=true']), 'NetworkPolicy', 'anyray-gateway');
+  assert.match(np, /podSelector:\n\s+matchLabels:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: gateway\n/);
+  assert.match(np, /ingress:\n\s+- ports:\n\s+- protocol: TCP\n\s+port: 8787\n\s+- from:\n\s+- podSelector:\n\s+matchLabels:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: optimizer\n\s+app\.kubernetes\.io\/instance: topology-test\n\s+- podSelector:\n\s+matchLabels:\n\s+app\.kubernetes\.io\/name: anyray\n\s+app\.kubernetes\.io\/component: updater\n\s+app\.kubernetes\.io\/instance: topology-test\n\s+ports:\n\s+- protocol: TCP\n\s+port: 8789\n/);
+  assert.equal(doc(render(['networkPolicy.enabled=true']), 'NetworkPolicy', 'anyray-gateway'), '');
+});
+
+test('region: with request signing, the gateway holds the private key and the optimizer never does', () => {
+  const s = render([...region, 'optimizerRequestSigning.enabled=true', 'optimizerRequestSigning.enforce=true']);
+  assert.match(doc(s, 'Deployment', 'anyray-gateway'), /- name: ANYRAY_OPTIMIZER_SIGNING_KEY\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: anyray-secrets\n\s+key: ANYRAY_OPTIMIZER_SIGNING_KEY\n\s+optional: true\n/);
+  const o = doc(s, 'Deployment', 'anyray-optimizer');
+  assert.doesNotMatch(o, /ANYRAY_OPTIMIZER_SIGNING_KEY/);
+  assert.match(o, /key: ANYRAY_OPTIMIZER_VERIFY_KEY\n/);
+  assert.doesNotMatch(doc(render(region), 'Deployment', 'anyray-gateway'), /ANYRAY_OPTIMIZER_SIGNING_KEY/);
+});
+
+test('region: the gateway keeps the concurrency cap and auth-fail limit', () => {
+  const g = doc(render([...region, 'gateway.maxConcurrentRequests=7', 'gateway.authFailLimit=8']), 'Deployment', 'anyray-gateway');
+  assert.match(g, /- name: ANYRAY_MAX_CONCURRENT_REQUESTS\n\s+value: "7"\n/);
+  assert.match(g, /- name: ANYRAY_AUTH_FAIL_LIMIT\n\s+value: "8"\n/);
+});
+
+for (const [values, err] of [
+  [[...region, 'gateway.extraEnv[0].name=ANYRAY_ADMIN_TOKEN', 'gateway.extraEnv[0].value=x'], /ANYRAY_ADMIN_TOKEN is forbidden in a region/],
+  [[...region, 'gateway.extraEnv[0].name=ANYRAY_OBSERVABILITY_DB_URL', 'gateway.extraEnv[0].value=x'], /forbidden in a region/],
+  [[...region, 'optimizer.extraEnv[0].name=ANYRAY_CONTENT_KEY', 'optimizer.extraEnv[0].value=x'], /ANYRAY_CONTENT_KEY is forbidden in a region/],
+  [[...region, 'image.tag=v1.10.636'], /region needs gateway image v1\.10\.637 or newer \(this renders v1\.10\.636\): older images serve without checking home's build/],
+  [[...region, 'images.optimizer.tag=v1.10.636'], /region needs optimizer image v1\.10\.637 or newer \(this renders v1\.10\.636\): older images serve without checking home's build/],
+]) test(`region refuses ${values.slice(region.length).join(' ')}`, () => { const r = helm(values); assert.notEqual(r.status, 0); assert.match(r.stderr, err); });
+
+for (const [topology, base] of [['single', []], ['split', split], ['region', region]]) {
+  for (const component of ['gateway', 'optimizer']) {
+    for (const name of ['ANYRAY_REGION_TOKEN', 'ANYRAY_REGION_GATEWAY_URL']) {
+      test(`${topology} refuses ${name} in ${component}.extraEnv`, () => {
+        const r = helm([...base, `${component}.extraEnv[0].name=${name}`, `${component}.extraEnv[0].value=x`]);
+        assert.notEqual(r.status, 0);
+        assert.match(r.stderr, new RegExp(`${component}\\.extraEnv: ${name} is set by the chart`));
+      });
+    }
+  }
+}
+
+const cronJob = values => doc(render(values), 'CronJob', 'anyray-autoupdate');
+const follows = d => JSON.parse(JSON.parse(d.match(/name: AUTOUPDATE_PINS\n\s+value: (".*")\n/)[1]));
+
+test('region: the update job follows home every 5 minutes, reading home\'s build on the internal listener', () => {
+  const s = render(region);
+  const job = doc(s, 'CronJob', 'anyray-autoupdate');
+  assert.match(job, /\n  schedule: "\*\/5 \* \* \* \*"\n/);
+  assert.match(job, /\n  concurrencyPolicy: Forbid\n/);
+  assert.match(job, /\n  successfulJobsHistoryLimit: 3\n  failedJobsHistoryLimit: 3\n/);
+  assert.doesNotMatch(job, /initContainers|rollout|kubectl/);
+  assert.match(job, /- name: follow-home\n\s+image: public\.ecr\.aws\/anyray\/gateway:policy-stable\n\s+imagePullPolicy: IfNotPresent\n\s+command: \["node", "\/pin\/autoupdate-pin\.mjs", "follow-home", "http:\/\/gateway-internal:8789\/v1\/region-home-build"\]\n/);
+  assert.deepEqual(follows(job), [
+    { deployment: 'anyray-gateway', container: 'gateway', image: 'public.ecr.aws/anyray/gateway:policy-stable' },
+    { deployment: 'anyray-optimizer', container: 'optimizer', image: 'public.ecr.aws/anyray/optimizer:policy-stable' },
+  ]);
+  const role = doc(s, 'Role', 'anyray-updater');
+  assert.match(role, /rules:\n\s+- apiGroups: \["apps"\]\n\s+resources: \["deployments"\]\n\s+resourceNames: \["anyray-gateway","anyray-optimizer"\]\n\s+verbs: \["get", "patch"\]\n?$/);
+});
+
+test('region: an explicit schedule wins, and an optimizer pinned to its own tag is not followed', () => {
+  const job = cronJob([...region, 'autoUpdate.schedule=0 */6 * * *', 'images.optimizer.tag=v1.10.637']);
+  assert.match(job, /\n  schedule: "0 \*\/6 \* \* \*"\n/);
+  assert.deepEqual(follows(job).map(p => p.container), ['gateway']);
+});
+
+test('region: a pinned image tag renders no update job, as on home', () => {
+  assert.equal(cronJob([...region.filter(v => !v.startsWith('image.tag=')), 'image.tag=v1.10.637']), '');
+});
+
+test('home keeps its nightly channel roll', () => {
+  const job = cronJob(['image.tag=policy-stable']);
+  assert.match(job, /\n  schedule: "30 3 \* \* \*"\n/);
+  assert.match(job, /initContainers:/);
+  assert.match(job, /- name: kubectl\n/);
+  assert.doesNotMatch(job, /follow-home/);
+  assert.match(doc(render(['image.tag=policy-stable']), 'Role', 'anyray-updater'), /verbs: \["get", "list", "patch"\]\n\s+- apiGroups: \[""\]\n\s+resources: \["pods"\]/);
+});
+
+test('region renders on the image floor', () => {
+  render([...region, 'image.tag=v1.10.637']);
+});
+
+test('single render is unchanged by the region work', () => {
+  // Frozen with CI's helm 3; helm 4 adds blank lines between documents.
+  // Every release bump moves the chart version and the image tags, so both sides drop them.
+  const unversioned = l => l.replace(/(helm\.sh\/chart: anyray-)[\d.]+$/, '$1X').replace(/(image: public\.ecr\.aws\/anyray\/[a-z-]+:)v[\d.]+$/, '$1X');
+  const lines = s => s.split('\n').filter(l => l.trim()).map(unversioned);
+  assert.deepEqual(lines(render([])), lines(readFileSync('tests/fixtures/single-render.yaml', 'utf8')));
+});
+
 test('the console URL defaults to the gateway origin only when the chart routes that host to the console', () => {
   const consoleUrl = d => d.match(/- name: ANYRAY_CONSOLE_PUBLIC_URL\n\s+value: "([^"]*)"\n/g)?.map(m => m.match(/value: "([^"]*)"/)[1]);
   const gw = values => consoleUrl(doc(render(values), 'Deployment', 'anyray-gateway'));
@@ -131,4 +276,5 @@ test('the console URL defaults to the gateway origin only when the chart routes 
     ['proxy.service.type=LoadBalancer'],
     ['ingress.hosts[0].host=anyray.example.com', 'httpRoute.hostnames[0]=anyray.example.com'],
   ]) assert.equal(gw(values), undefined, values.join(' '));
+  assert.equal(gw(region), undefined, 'a region serves no console');
 });

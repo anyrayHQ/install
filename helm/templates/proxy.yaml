@@ -1,3 +1,5 @@
+{{- /* A region serves no console, so it runs no proxy. */}}
+{{- if ne .Values.topology "region" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -148,3 +150,4 @@ spec:
       {{- with .Values.proxy.service.nodePort }}
       nodePort: {{ . }}
       {{- end }}
+{{- end }}

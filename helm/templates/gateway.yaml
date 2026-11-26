@@ -27,11 +27,12 @@ spec:
   {{- if .Values.gateway.persistence.enabled }}
   {{- fail "gateway.autoscaling.enabled needs gateway.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
   {{- end }}
-  {{- else }}
+  {{- end }}
+  {{- if not (include "anyray.gatewayAutoscaling" .) }}
   replicas: {{ include "anyray.gatewayReplicas" . }}
   {{- end }}
   {{- if .Values.gateway.persistence.enabled }}
-  {{- if and (not .Values.gateway.autoscaling.enabled) (gt (int .Values.gateway.replicas) 1) }}
+  {{- if and (not (include "anyray.gatewayAutoscaling" .)) (gt (int (include "anyray.gatewayReplicas" .)) 1) }}
   {{- fail "gateway.replicas > 1 needs gateway.persistence.enabled=false: the data PVC is ReadWriteOnce" }}
   {{- end }}
   # Recreate: the RWO volume must detach before the replacement pod can mount it.
@@ -89,6 +90,7 @@ spec:
               port: 8787
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 10
           {{- /* Liveness targets /livez, NOT the readiness route above: `/` 503s
                  while draining, so a liveness probe there would restart the pod

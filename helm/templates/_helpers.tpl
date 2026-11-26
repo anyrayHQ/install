@@ -876,5 +876,16 @@ BYO /v1/record path, which full-stack installs don't use.
 {{- end }}
 
 {{- define "anyray.gatewayReplicas" -}}
-{{- if eq .Values.topology "split" -}}2{{- else -}}{{ .Values.gateway.replicas }}{{- end -}}
+{{- if or (eq .Values.topology "split") (kindIs "invalid" .Values.gateway.replicas) -}}2{{- else -}}{{ .Values.gateway.replicas }}{{- end -}}
+{{- end }}
+
+{{- /* "true" when the gateway runs under its HPA. An unset autoscaling.enabled
+       follows what the install already pinned: a replica count, a data volume or
+       the split topology keeps its fixed gateway, as does an image older than
+       v1.10.431, whose pods open about 47 connections each (24 from then on). */}}
+{{- define "anyray.gatewayAutoscaling" -}}
+{{- $enabled := .Values.gateway.autoscaling.enabled -}}
+{{- if kindIs "invalid" $enabled -}}
+{{- if and (kindIs "invalid" .Values.gateway.replicas) (not .Values.gateway.persistence.enabled) (ne .Values.topology "split") (include "anyray.atLeastAppVersion" (dict "component" "gateway" "floor" "v1.10.431" "context" .)) -}}true{{- end -}}
+{{- else if $enabled -}}true{{- end -}}
 {{- end }}

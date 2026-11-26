@@ -35,6 +35,15 @@ check() { # label, expected, actual
 APPS=(gateway optimizer proxy)
 managers() { k -n "$NS" get deploy "anyray-$1" --show-managed-fields -o jsonpath='{range .metadata.managedFields[*]}{.manager}{"\n"}{end}'; }
 gateway_image() { k -n "$NS" get deploy anyray-gateway -o jsonpath='{.spec.template.spec.containers[0].image}'; }
+# Why a Job's pods never ran. A failed image pull says why (a 429, a manifest the
+# registry does not have yet) only in the pod events, never in the container
+# logs: install#776 failed on 2026-11-26 with nothing but "trying and failing to
+# pull image" to go on.
+job_events() { # job name
+  k -n "$NS" get events --sort-by=.lastTimestamp --field-selector involvedObject.kind=Pod \
+    -o custom-columns='TIME:.lastTimestamp,TYPE:.type,REASON:.reason,POD:.involvedObject.name,MESSAGE:.message' 2>&1 |
+    awk -v p="$1-" 'NR == 1 || index($4, p) == 1' | tail -n 25 | cut -c1-600 | sed 's/^/  /'
+}
 
 [ -f "$CHART/Chart.yaml" ] || { echo "not a chart directory: $CHART" >&2; exit 2; }
 case "$(helm version --template '{{.Version}}' 2>/dev/null)" in
@@ -95,6 +104,8 @@ for roll in 1 2 legacy; do
   else
     echo "FAIL  the job did not complete"; FAILS=$((FAILS + 1))
     k -n "$NS" logs "job/pin-$roll" --all-containers --prefix 2>&1 | cut -c1-240 | sed 's/^/  /'
+    echo "  events of the job's pods:"
+    job_events "pin-$roll"
     break
   fi
   case "$(gateway_image)" in *:policy-stable@sha256:*) pinned=yes ;; *) pinned=no ;; esac

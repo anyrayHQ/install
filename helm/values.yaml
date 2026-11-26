@@ -349,7 +349,8 @@ gateway:
   # With the ReadWriteOnce volume mounted the chart refuses anything above 1.
   replicas: null
   # Unset (null), on unless gateway.replicas is set, gateway.persistence.enabled
-  # is true or topology is split. true or false overrides that.
+  # is true, topology is split or the gateway image is older than v1.10.431
+  # (about 47 connections a pod). true or false overrides that.
   #
   # Scale-in is slow on purpose: a stopping pod keeps serving for the pre-stop
   # pause (5 s), then on SIGTERM stops accepting, lets open streams finish and

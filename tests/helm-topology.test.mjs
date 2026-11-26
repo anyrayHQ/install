@@ -327,6 +327,15 @@ test('a data volume or the split topology keeps the fixed gateway and renders as
   assert.ok(doc(s, 'PodDisruptionBudget', 'anyray-gateway'));
 });
 
+test('an image that opens about 47 connections per pod keeps the fixed gateway', () => {
+  for (const [tag, hpa] of [['v1.10.430', false], ['v1.10.431', true], ['policy-stable', true]]) {
+    const s = render([`image.tag=${tag}`]);
+    assert.equal(!!doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway'), hpa, tag);
+    assert.equal(/\n  replicas: 2\n/.test(doc(s, 'Deployment', 'anyray-gateway')), !hpa, tag);
+  }
+  assert.ok(render(['image.tag=v1.10.430', 'gateway.autoscaling.enabled=true']).includes('kind: HorizontalPodAutoscaler'));
+});
+
 test('a region gateway scales with the same defaults', () => {
   const s = render(region);
   assert.doesNotMatch(doc(s, 'Deployment', 'anyray-gateway'), /\n  replicas: /);

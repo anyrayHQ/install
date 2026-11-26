@@ -719,8 +719,9 @@ The gateway runs under a CPU autoscaler by default: 2 to 10 pods, each
 requesting 1 vCPU, scaling out at 70% of that. Setting `gateway.replicas` pins
 the count and turns the autoscaler off (set `gateway.autoscaling.enabled: true`
 to keep both: the autoscaler wins). It is also off with
-`gateway.persistence.enabled: true` and under `topology: split`. It needs a
-metrics server. Scale-in removes one pod every 5 minutes, after 10 minutes below
+`gateway.persistence.enabled: true`, under `topology: split` and for a gateway
+image older than `v1.10.431`. It needs a metrics server. Scale-in removes one
+pod every 5 minutes, after 10 minutes below
 the target (`gateway.autoscaling.behavior`); scale-out has no wait. A scaled-in
 pod stops accepting, lets open streams finish and settles its usage writes for up
 to 90 seconds inside the 120-second grace period; rows are lost only if that
@@ -728,8 +729,14 @@ drain runs out. A new pod starts with a cold prefix memo.
 
 Two gateways, two optimizers and the rest need about 4.3 vCPU of requests, plus
 1 vCPU while a pod rolls. A 1 vCPU pod fills most of a 2-vCPU node, so give the
-cluster at least four such nodes or a cluster autoscaler (the Azure script
-enables one).
+cluster at least five such nodes (four hold the floor, the fifth takes the pod a
+rollout adds) or a cluster autoscaler (the Azure script enables one).
+
+On the upgrade that first turns the autoscaler on, Helm drops `replicas` from
+the live Deployment and Kubernetes briefly runs one pod until the autoscaler
+raises it to 2, so run that upgrade in a quiet window. `helm upgrade
+--reuse-values` keeps the previous release's values, old defaults included (the fixed count and the 250m request); use
+`--reset-then-reuse-values` to take the new ones.
 
 The other workloads' autoscaling is available but off (`<component>.autoscaling.enabled`).
 A removed optimizer resets the gateway connections still pointed at it, which

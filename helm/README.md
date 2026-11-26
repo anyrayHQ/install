@@ -753,8 +753,8 @@ optimizer:
 
 `postgres.maxConnections` defaults to 300. From v1.10.431, each gateway pod
 opens up to 24 connections at peak, and each optimizer pod up to 8. The default
-gateway ceiling of 10 pods and two optimizers use up to 256 of the 300, and one
-surge pod during a rollout adds 24. On older images, each gateway pod uses about
+gateway ceiling of 10 pods and two optimizers use up to 256 of the 300, and a
+rollout adds one gateway and one optimizer pod (32 more, 288 in all). On older images, each gateway pod uses about
 47 and each optimizer pod about 20. Raise the limit before raising `maxReplicas`.
 For external Postgres, size its limit the same way.
 

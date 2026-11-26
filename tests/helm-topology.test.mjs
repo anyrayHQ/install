@@ -349,10 +349,12 @@ test('gateway and inference readiness probes time out after 5 seconds, not the 1
   }
 });
 
-test('the HPA ceiling plus the optimizers stays under the bundled Postgres connection limit', () => {
+test('the HPA ceiling, the optimizers and one surge pod of each stay under the bundled Postgres connection limit', () => {
   const s = render([]);
   const max = Number(doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway').match(/maxReplicas: (\d+)/)[1]);
   const optimizers = Number(doc(s, 'Deployment', 'anyray-optimizer').match(/\n  replicas: (\d+)/)[1]);
   const limit = Number(doc(s, 'StatefulSet', 'anyray-postgres').match(/max_connections=(\d+)/)[1]);
-  assert.ok(max * 24 + optimizers * 8 < limit, `${max} gateways x 24 + ${optimizers} optimizers x 8 vs ${limit}`);
+  const surge = 1;
+  const used = (max + surge) * 24 + (optimizers + surge) * 8;
+  assert.ok(used < limit, `${max}+${surge} gateways x 24 + ${optimizers}+${surge} optimizers x 8 = ${used} vs ${limit}`);
 });

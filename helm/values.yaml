@@ -362,7 +362,8 @@ gateway:
   # Database ceiling: each gateway pod opens up to 24 Postgres connections and
   # each optimizer pod up to 8. At maxReplicas 10 with two optimizers that is
   # 256 of the 300 the bundled Postgres allows (postgres.maxConnections); a
-  # rollout surge adds one pod. Raise that limit before raising maxReplicas, and
+  # rollout surge adds one gateway and one optimizer pod (32 more, 288 in all).
+  # Raise that limit before raising maxReplicas, and
   # size an external Postgres the same way.
   #
   # Under topology: region each pod also polls home once a second for each of

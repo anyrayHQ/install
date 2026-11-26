@@ -2,12 +2,12 @@ apiVersion: v2
 name: anyray
 description: Self-hosted AI-spend optimizer - gateway, optimizer, console, and Postgres trace/spend store.
 type: application
-version: 0.8.167
+version: 0.8.168
 # The Anyray image tag this chart version ships. Images default to this pinned
 # tag (see values.yaml image.tag), so a given chart version always deploys the
 # same, auditable build. Bumped in lockstep with each release by the monorepo
 # prod promotion; override image.tag to test a different/moving tag.
-appVersion: "v1.10.637"
+appVersion: "v1.10.639"
 keywords:
   - anyray
   - ai-gateway
@@ -31,8 +31,8 @@ annotations:
     - name: postgres
       image: docker.io/postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     - name: gateway
-      image: public.ecr.aws/anyray/gateway:v1.10.637
+      image: public.ecr.aws/anyray/gateway:v1.10.639
     - name: optimizer
-      image: public.ecr.aws/anyray/optimizer:v1.10.637
+      image: public.ecr.aws/anyray/optimizer:v1.10.639
     - name: proxy
-      image: public.ecr.aws/anyray/proxy:v1.10.637
+      image: public.ecr.aws/anyray/proxy:v1.10.639

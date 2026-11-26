@@ -46,6 +46,7 @@ spec:
               port: 8787
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 10
           {{- include "anyray.startupProbe" (dict "component" "inference" "port" 8787 "context" .) | nindent 10 }}
           {{- include "anyray.livenessProbe" (dict "component" "inference" "port" 8787 "context" .) | nindent 10 }}

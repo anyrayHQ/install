@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 const helm = values => spawnSync('helm', ['template', 'topology-test', 'helm', '--set', 'host=anyray.example.com', '--set', 'postgres.storage=150Gi', ...values.flatMap(v => ['--set', v])], { encoding: 'utf8' });
 const render = values => { const r = helm(values); assert.equal(r.status, 0, r.stderr); return r.stdout; };
-const doc = (s, kind, name) => s.split(/^---$/m).find(d => d.includes(`kind: ${kind}\n`) && d.includes(`  name: ${name}\n`)) || '';
+const doc = (s, kind, name) => s.split(/^---$/m).find(d => d.includes(`\nkind: ${kind}\n`) && d.includes(`\n  name: ${name}\n`)) || '';
 const selectsInference = (d, key) => d.split(`${key}:\n`)[1]?.includes('app.kubernetes.io/component: inference\n');
 const split = ['topology=split', 'inference.host=inference.anyray.example.com', 'ingress.enabled=true'];
 const httpRoute = ['topology=split', 'inference.host=inference.anyray.example.com', 'httpRoute.enabled=true', 'httpRoute.parentRefs[0].name=synthetic-gateway'];
@@ -36,7 +36,7 @@ test('inference pods match the gateway pods apart from name, start command and r
   const optional = ['gateway.trustProxy=true', 'gateway.customHostAllowlist=anyray.example.com', 'gateway.extraEnv[0].name=SYNTHETIC_SECRET', 'gateway.extraEnv[0].valueFrom.secretKeyRef.name=synthetic-secret', 'gateway.extraEnv[0].valueFrom.secretKeyRef.key=value'];
   const volumes = ['gateway.extraVolumes[0].name=ca', 'gateway.extraVolumes[0].secret.secretName=ca', 'gateway.extraVolumeMounts[0].name=ca', 'gateway.extraVolumeMounts[0].mountPath=/etc/anyray/ca'];
   const args = 'args: ["node", "build/start-server.js", "--inference-only"]';
-  const strip = d => d.split('\n').filter(l => !/^\s*#/.test(l) && !/^  replicas: /.test(l) && !l.includes(args)).join('\n')
+  const strip = d => d.split('\n').filter(l => !/^\s*#/.test(l) && !/^  replicas: /.test(l) && !l.includes(args)).join('\n').replace(/(requests:\n\s+cpu: )\S+/, '$1X')
     .replaceAll('anyray-inference', 'anyray-gateway').replaceAll('component: inference', 'component: gateway').replace('        - name: inference\n', '        - name: gateway\n');
   for (const extra of [[], optional, volumes]) {
     const s = render([...split, ...extra]);
@@ -277,4 +277,73 @@ test('the console URL defaults to the gateway origin only when the chart routes 
     ['ingress.hosts[0].host=anyray.example.com', 'httpRoute.hostnames[0]=anyray.example.com'],
   ]) assert.equal(gw(values), undefined, values.join(' '));
   assert.equal(gw(region), undefined, 'a region serves no console');
+});
+
+const gateway = values => doc(render(values), 'Deployment', 'anyray-gateway');
+const gatewayHpa = values => doc(render(values), 'HorizontalPodAutoscaler', 'anyray-gateway');
+
+test('gateway autoscaling is on by default, so the Deployment leaves the replica count to the HPA', () => {
+  const s = render([]);
+  assert.doesNotMatch(doc(s, 'Deployment', 'anyray-gateway'), /\n  replicas: /);
+  const h = doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway');
+  assert.match(h, /name: anyray-gateway\n\s+minReplicas: 2\n\s+maxReplicas: 10\n/);
+  assert.match(h, /averageUtilization: 70\n/);
+  assert.ok(doc(s, 'PodDisruptionBudget', 'anyray-gateway'));
+  assert.match(doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway'), /kind: Deployment\n/);
+});
+
+test('gateway CPU request is near real use so the 70% target means something', () => {
+  assert.match(gateway([]), /limits:\n\s+cpu: 1000m\n\s+memory: 2Gi\n\s+requests:\n\s+cpu: 1000m\n\s+memory: 512Mi\n/);
+});
+
+test('gateway scales in one pod at a time after a long quiet period, and out without a brake', () => {
+  const h = gatewayHpa([]);
+  assert.match(h, /behavior:\n\s+scaleDown:\n\s+policies:\n\s+- periodSeconds: 300\n\s+type: Pods\n\s+value: 1\n\s+stabilizationWindowSeconds: 600\n/);
+  assert.doesNotMatch(h, /scaleUp/);
+});
+
+test('an explicit gateway.replicas keeps a fixed count and gets no HPA', () => {
+  assert.match(gateway(['gateway.replicas=3']), /\n  replicas: 3\n/);
+  assert.equal(gatewayHpa(['gateway.replicas=3']), '');
+  assert.match(gateway(['gateway.replicas=1']), /\n  replicas: 1\n/);
+});
+
+test('an explicit gateway.autoscaling.enabled wins over gateway.replicas', () => {
+  const s = render(['gateway.replicas=3', 'gateway.autoscaling.enabled=true']);
+  assert.doesNotMatch(doc(s, 'Deployment', 'anyray-gateway'), /\n  replicas: /);
+  assert.ok(doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway'));
+  const off = render(['gateway.autoscaling.enabled=false']);
+  assert.match(doc(off, 'Deployment', 'anyray-gateway'), /\n  replicas: 2\n/);
+  assert.equal(doc(off, 'HorizontalPodAutoscaler', 'anyray-gateway'), '');
+});
+
+test('a data volume or the split topology keeps the fixed gateway and renders as before', () => {
+  const persisted = render(['gateway.persistence.enabled=true', 'gateway.replicas=1']);
+  assert.match(doc(persisted, 'Deployment', 'anyray-gateway'), /\n  replicas: 1\n/);
+  assert.equal(doc(persisted, 'HorizontalPodAutoscaler', 'anyray-gateway'), '');
+  const s = render(split);
+  assert.match(doc(s, 'Deployment', 'anyray-gateway'), /\n  replicas: 2\n/);
+  assert.equal(doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway'), '');
+  assert.ok(doc(s, 'PodDisruptionBudget', 'anyray-gateway'));
+});
+
+test('a region gateway scales with the same defaults', () => {
+  const s = render(region);
+  assert.doesNotMatch(doc(s, 'Deployment', 'anyray-gateway'), /\n  replicas: /);
+  assert.match(doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway'), /minReplicas: 2\n\s+maxReplicas: 10\n/);
+  assert.match(doc(s, 'Deployment', 'anyray-gateway'), /requests:\n\s+cpu: 1000m\n/);
+});
+
+test('gateway and inference readiness probes time out after 5 seconds, not the 1 second default', () => {
+  for (const d of [gateway([]), doc(render(split), 'Deployment', 'anyray-inference')]) {
+    assert.match(d, /readinessProbe:\n\s+httpGet:\n\s+path: \/\n\s+port: 8787\n\s+initialDelaySeconds: 5\n\s+periodSeconds: 5\n\s+timeoutSeconds: 5\n\s+failureThreshold: 10\n/);
+  }
+});
+
+test('the HPA ceiling plus the optimizers stays under the bundled Postgres connection limit', () => {
+  const s = render([]);
+  const max = Number(doc(s, 'HorizontalPodAutoscaler', 'anyray-gateway').match(/maxReplicas: (\d+)/)[1]);
+  const optimizers = Number(doc(s, 'Deployment', 'anyray-optimizer').match(/\n  replicas: (\d+)/)[1]);
+  const limit = Number(doc(s, 'StatefulSet', 'anyray-postgres').match(/max_connections=(\d+)/)[1]);
+  assert.ok(max * 24 + optimizers * 8 < limit, `${max} gateways x 24 + ${optimizers} optimizers x 8 vs ${limit}`);
 });

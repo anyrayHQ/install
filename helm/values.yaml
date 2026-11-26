@@ -342,21 +342,45 @@ podDisruptionBudget:
 
 # Gateway
 gateway:
-  # Two, so the gateway survives losing one. This is only possible because
-  # persistence is off below; with the ReadWriteOnce volume mounted the chart
-  # refuses anything above 1.
-  replicas: 2
-  # Opt-in. Scaling IN terminates pods mid-session, and each one costs money:
-  # spend rows still being written are dropped, open streams are cut, and the
-  # per-pod prefix memo that keeps a fail-open turn byte-identical starts cold on
-  # every new pod. Fixed replicas give the redundancy without that churn. Needs
-  # gateway.persistence.enabled=false and a metrics server; size the database's
-  # connection limit for maxReplicas first (see postgres.maxConnections).
+  # Unset, the chart runs the gateway under the autoscaler below (it needs
+  # persistence off and a metrics server); with the autoscaler off it runs two
+  # pods, so it survives losing one. Setting a number here pins the count and
+  # turns the autoscaler off unless you set autoscaling.enabled=true yourself.
+  # With the ReadWriteOnce volume mounted the chart refuses anything above 1.
+  replicas: null
+  # Unset (null), on unless gateway.replicas is set, gateway.persistence.enabled
+  # is true or topology is split. true or false overrides that.
+  #
+  # Scale-in is slow on purpose: a stopping pod keeps serving for the pre-stop
+  # pause (5 s), then on SIGTERM stops accepting, lets open streams finish and
+  # settles pending usage writes, for up to 90 s (ANYRAY_SHUTDOWN_DRAIN_MS)
+  # inside the 120 s grace period. Rows are lost only when that drain runs out.
+  # A new pod starts with a cold per-pod prefix memo, so a fail-open turn on it
+  # is not byte-identical to the one on the pod that left. The behavior block
+  # removes one pod per 5 minutes, after 10 minutes below the target; scale-out
+  # keeps the Kubernetes default (no wait).
+  #
+  # Database ceiling: each gateway pod opens up to 24 Postgres connections and
+  # each optimizer pod up to 8. At maxReplicas 10 with two optimizers that is
+  # 256 of the 300 the bundled Postgres allows (postgres.maxConnections); a
+  # rollout surge adds one pod. Raise that limit before raising maxReplicas, and
+  # size an external Postgres the same way.
+  #
+  # Under topology: region each pod also polls home once a second for each of
+  # the 3 copies (keys, config, budgets): 3 requests a second per region pod to
+  # home's gateway, so a region at 10 pods asks home for 30 a second.
   autoscaling:
-    enabled: false
+    enabled: null
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 600
+        policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 300
   service:
     type: ClusterIP
     # Set for NodePort installs, for example: 30787
@@ -368,11 +392,16 @@ gateway:
   # Claude Code sessions sending 300k-960k-token prompts took a gateway from
   # 300 MB to the cap within minutes, and it was OOM-killed four times in 40
   # minutes (Anyray prod, 2026-10-09). The 2 Gi limit matches the AWS
-  # quicklaunch task. The request stays at 512Mi so a default install still
-  # fits the nodes in the sizing guide.
+  # quicklaunch task. The memory request stays at 512Mi so a default install
+  # still fits the nodes in the sizing guide. The CPU request is near real use
+  # (one pod used 0.8 to 0.9 CPU at 8 to 10 large requests a second), because
+  # the autoscaler measures against it: at 250m its 70% target was 175m and any
+  # real load asked for the maximum. 1 CPU is what a 2-vCPU node can give one pod
+  # beside the system pods, as for the optimizer, so the gateway and the
+  # optimizer no longer share a node there.
   resources:
     requests:
-      cpu: "250m"
+      cpu: "1000m"
       memory: "512Mi"
     limits:
       cpu: "1000m"

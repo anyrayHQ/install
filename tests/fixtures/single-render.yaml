@@ -150,7 +150,6 @@ metadata:
     app.kubernetes.io/instance: topology-test
     app.kubernetes.io/component: gateway
 spec:
-  replicas: 2
   # No RWO volume to detach, so a replacement can run alongside the outgoing pod:
   # surge one new pod, wait for it to pass the readinessProbe, then retire an old
   # one. Holding maxUnavailable at zero is the part that matters — it keeps the
@@ -295,6 +294,7 @@ spec:
               port: 8787
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 10
           startupProbe:
             httpGet:
@@ -325,7 +325,7 @@ spec:
               cpu: 1000m
               memory: 2Gi
             requests:
-              cpu: 250m
+              cpu: 1000m
               memory: 512Mi
           volumeMounts:
             - name: data
@@ -633,6 +633,38 @@ spec:
             requests:
               cpu: 100m
               memory: 128Mi
+---
+# Source: anyray/templates/autoscaling.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: anyray-gateway
+  labels:
+    helm.sh/chart: anyray-0.8.137
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: topology-test
+    app.kubernetes.io/component: gateway
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: anyray-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      policies:
+      - periodSeconds: 300
+        type: Pods
+        value: 1
+      stabilizationWindowSeconds: 600
 ---
 # Source: anyray/templates/postgres.yaml
 apiVersion: apps/v1

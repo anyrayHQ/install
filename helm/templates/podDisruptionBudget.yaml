@@ -31,7 +31,8 @@ replicas, so all three are covered out of the box.
 {{- if eq $component "gateway" }}
 {{- $fixed = int (include "anyray.gatewayReplicas" $) }}
 {{- end }}
-{{- $floor := ternary (int $cfg.autoscaling.minReplicas) $fixed $cfg.autoscaling.enabled }}
+{{- $autoscaled := ternary (include "anyray.gatewayAutoscaling" $ | eq "true") $cfg.autoscaling.enabled (eq $component "gateway") }}
+{{- $floor := ternary (int $cfg.autoscaling.minReplicas) $fixed $autoscaled }}
 {{- if gt $floor 1 }}
 {{- /* A budget that permits evicting the whole floor is not a budget: the
 eviction API would be free to take every serving pod at once, which is exactly

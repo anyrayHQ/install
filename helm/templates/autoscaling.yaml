@@ -1,4 +1,4 @@
-{{- if .Values.gateway.autoscaling.enabled }}
+{{- if include "anyray.gatewayAutoscaling" . }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -20,6 +20,10 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .Values.gateway.autoscaling.targetCPUUtilizationPercentage }}
+  {{- with .Values.gateway.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- end }}
 {{- if .Values.optimizer.autoscaling.enabled }}
 ---

@@ -715,19 +715,29 @@ The optimizer resolves to one replica instead of two when
 `v1.10.403` (a retrieval handle minted on one pod may not resolve on another).
 Set `optimizer.replicas` to override.
 
-Two replicas of everything need about 3 vCPU of requests, plus 1 vCPU while an
-optimizer rolls, so give the cluster at least three 2-vCPU nodes or a cluster
-autoscaler (the Azure script enables one).
+The gateway runs under a CPU autoscaler by default: 2 to 10 pods, each
+requesting 1 vCPU, scaling out at 70% of that. Setting `gateway.replicas` pins
+the count and turns the autoscaler off (set `gateway.autoscaling.enabled: true`
+to keep both: the autoscaler wins). It is also off with
+`gateway.persistence.enabled: true` and under `topology: split`. It needs a
+metrics server. Scale-in removes one pod every 5 minutes, after 10 minutes below
+the target (`gateway.autoscaling.behavior`); scale-out has no wait. A scaled-in
+pod stops accepting, lets open streams finish and settles its usage writes for up
+to 90 seconds inside the 120-second grace period; rows are lost only if that
+drain runs out. A new pod starts with a cold prefix memo.
 
-**Autoscaling is available but off.** Scaling in terminates pods mid-session:
-spend rows still being written can be dropped, long streams are cut, and a
-removed optimizer resets the gateway connections still pointed at it, which
-sends those turns unoptimized and busts the prompt cache on warm sessions. Fixed
-replicas give the redundancy without that churn. If you enable it, raise
-`postgres.maxConnections` for `maxReplicas` first:
+Two gateways, two optimizers and the rest need about 4.3 vCPU of requests, plus
+1 vCPU while a pod rolls. A 1 vCPU pod fills most of a 2-vCPU node, so give the
+cluster at least four such nodes or a cluster autoscaler (the Azure script
+enables one).
+
+The other workloads' autoscaling is available but off (`<component>.autoscaling.enabled`).
+A removed optimizer resets the gateway connections still pointed at it, which
+sends those turns unoptimized and busts the prompt cache on warm sessions. If you
+enable one, raise `postgres.maxConnections` for `maxReplicas` first:
 
 ```yaml
-gateway:
+optimizer:
   autoscaling:
     enabled: true
     minReplicas: 2
@@ -735,10 +745,15 @@ gateway:
 ```
 
 `postgres.maxConnections` defaults to 300. From v1.10.431, each gateway pod
-opens up to 24 connections at peak, and each optimizer pod up to 8, so the
-default two of each use up to 64. On older images, each gateway pod uses about 47
-and each optimizer pod about 20, or ~135 for two of each. Raise the limit before raising replicas or enabling an HPA. For
-external Postgres, size its limit the same way.
+opens up to 24 connections at peak, and each optimizer pod up to 8. The default
+gateway ceiling of 10 pods and two optimizers use up to 256 of the 300, and one
+surge pod during a rollout adds 24. On older images, each gateway pod uses about
+47 and each optimizer pod about 20. Raise the limit before raising `maxReplicas`.
+For external Postgres, size its limit the same way.
+
+Under `topology: region` every gateway pod also polls home once a second for
+each of its 3 copies (keys, config, budgets): 3 requests a second per region
+pod to home's gateway, so a region at 10 pods asks home for 30 a second.
 
 ## Topology
 

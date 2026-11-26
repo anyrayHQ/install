@@ -47,7 +47,7 @@ Availability of this release:
              volume is enabled, so upgrades have a downtime window and replicas
              cannot go above 1)
 {{- else }}
-  gateway    replicas {{ if .Values.gateway.autoscaling.enabled }}{{ .Values.gateway.autoscaling.minReplicas }}-{{ .Values.gateway.autoscaling.maxReplicas }} (HPA){{ else }}{{ include "anyray.gatewayReplicas" . }}{{ end }}, rolling update with maxUnavailable 0
+  gateway    replicas {{ if include "anyray.gatewayAutoscaling" . }}{{ .Values.gateway.autoscaling.minReplicas }}-{{ .Values.gateway.autoscaling.maxReplicas }} (HPA){{ else }}{{ include "anyray.gatewayReplicas" . }}{{ end }}, rolling update with maxUnavailable 0
 {{- end }}
   optimizer  replicas {{ if .Values.optimizer.autoscaling.enabled }}{{ .Values.optimizer.autoscaling.minReplicas }}-{{ .Values.optimizer.autoscaling.maxReplicas }} (HPA){{ else }}{{ include "anyray.optimizerReplicas" . }}{{ end }}{{ if .Values.optimizer.persistence.enabled }}, Recreate rollout{{ end }}
 {{- if ne .Values.topology "region" }}

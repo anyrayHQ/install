@@ -434,6 +434,12 @@ jobs:
       # No interpolation, no untrusted input: a fixed script path only.
       - name: Updater Lambda contract (version format, forward-only, input validation)
         run: python3 ci/test-quicklaunch-updater.py
+      # Renders the template as a home and as a region and drives the region's
+      # follow-home updater and probe against stubbed clients. Fixed script path.
+      - name: Region topology contract (no home secret in a region, home unchanged)
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y -qq python3-yaml
+          python3 ci/test-quicklaunch-region.py
       - name: SecretFn db-url contract (follows the RDS master rotation)
         run: python3 ci/test-quicklaunch-dburl.py
       - name: Database version contract (decided once per stack, never changed)
